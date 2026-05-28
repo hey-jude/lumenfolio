@@ -1,0 +1,1638 @@
+use base64::{engine::general_purpose, Engine as _};
+use rusqlite::{params, Connection, OptionalExtension};
+use std::{
+    collections::HashSet,
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use tauri::Emitter;
+
+use crate::{
+    llm, normalize_base_url, runtime, truncate_for_error, vision, AgentActivityEventOutput,
+    AppDatabase, AskDocumentInput, OpenAiChatRequest, OpenAiChatResponse, OpenAiCompatibleProvider,
+    MAX_LLM_JUDGE_STEPS,
+};
+
+const M4_LLM_JUDGE_TIMEOUT_SECS: u64 = 45;
+
+pub(crate) struct LlmJudgeLoopInput<'a> {
+    pub(crate) input: &'a AskDocumentInput,
+    pub(crate) database: &'a AppDatabase,
+    pub(crate) app: Option<&'a tauri::AppHandle>,
+    pub(crate) question: &'a str,
+    pub(crate) document_id: &'a str,
+    pub(crate) provider: &'a OpenAiCompatibleProvider,
+    pub(crate) activity_event_id: Option<&'a str>,
+}
+
+struct VisualAssetForAnalysis {
+    id: String,
+    document_id: String,
+    page: u32,
+    asset_type: String,
+    caption: String,
+    bbox_list: serde_json::Value,
+    image_path: String,
+    nearby_text: String,
+}
+
+pub(crate) async fn improve_retrieval_with_llm_judge(
+    ctx: LlmJudgeLoopInput<'_>,
+    agent_run: &mut runtime::agent::AgentRunResult,
+) -> Result<(), String> {
+    if has_image_context(ctx.input) {
+        return Ok(());
+    }
+    let max_steps = ctx.input.max_retrieval_steps.unwrap_or(20).clamp(1, 20);
+    let mut attempt = retrieval_attempt_count(agent_run);
+    let (mut remaining_llm_tool_steps, mut remaining_llm_judge_rounds) =
+        llm_judge_budget(max_steps, attempt);
+    let mut attempted_tools = HashSet::new();
+    let mut tool_feedback = Vec::new();
+
+    while remaining_llm_judge_rounds > 0 {
+        remaining_llm_judge_rounds = remaining_llm_judge_rounds.saturating_sub(1);
+        emit_agent_activity_optional(
+            ctx.app,
+            ctx.activity_event_id,
+            runtime::agent::AgentTraceEvent::new(
+                "judge_start",
+                "finalize_answer",
+                "running",
+                "M4 LLM evidence check",
+                format!(
+                    "Judge attempt {} is deciding whether more evidence is needed",
+                    attempt + 1
+                ),
+                format!("llm_judge attempt={} checking answerability", attempt + 1),
+            ),
+        );
+        let judge_result = tokio::time::timeout(
+            Duration::from_secs(M4_LLM_JUDGE_TIMEOUT_SECS),
+            llm::chat::judge_answerability_with_openai_compatible(
+                ctx.question,
+                &agent_run.retrieval_run.intent,
+                &agent_run.retrieval_run.citations,
+                &tool_feedback,
+                ctx.provider,
+                &agent_run.retrieval_run.context_budget,
+            ),
+        )
+        .await
+        .map_err(|_| format!("M4 LLM judge timed out after {M4_LLM_JUDGE_TIMEOUT_SECS}s"));
+        let mut decision = match judge_result {
+            Ok(Ok(decision)) => decision,
+            Ok(Err(err)) | Err(err) => {
+                let gate = serde_json::json!({
+                    "status": "insufficient",
+                    "reason": format!(
+                        "M4 LLM judge request failed; refusing to fall back to local answerability: {err}"
+                    ),
+                    "missing": serde_json::json!(["LLM evidence judge"]),
+                    "nextToolCall": serde_json::Value::Null,
+                    "citationCount": agent_run.retrieval_run.citations.len(),
+                    "attempt": attempt,
+                    "maxAttempts": max_steps,
+                    "budgetExhausted": false,
+                    "runtime": "m4-llm-judge",
+                    "skipped": false
+                });
+                agent_run.retrieval_run.trace.finalize_gate = gate.clone();
+                agent_run.trace.finalize_gate = gate.clone();
+                let event = runtime::agent::AgentTraceEvent::new(
+                    "judge_result",
+                    "finalize_answer",
+                    "error",
+                    "M4 LLM evidence check",
+                    "Judge request failed; refusing to fall back to local answerability",
+                    format!("llm_judge required but unavailable: {err}"),
+                )
+                .with_judge(gate);
+                emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+                agent_run.trace.events.push(event);
+                return Ok(());
+            }
+        };
+        enforce_llm_judge_hard_gate(
+            ctx.question,
+            &agent_run.retrieval_run.citations,
+            &mut decision,
+        );
+
+        let gate = serde_json::json!({
+            "status": decision.status,
+            "reason": decision.reason,
+            "missing": decision.missing,
+            "nextToolCall": decision.next_tool_call,
+            "citationCount": agent_run.retrieval_run.citations.len(),
+            "attempt": attempt,
+            "maxAttempts": max_steps,
+            "budgetExhausted": false,
+            "runtime": "m4-llm-judge"
+        });
+        agent_run.retrieval_run.trace.finalize_gate = gate.clone();
+        agent_run.trace.finalize_gate = gate.clone();
+        let detail = format!(
+            "llm_judge attempt={} status={} reason={} missing={} next_tool={}",
+            attempt.saturating_add(1),
+            agent_run
+                .trace
+                .finalize_gate
+                .get("status")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown"),
+            agent_run
+                .trace
+                .finalize_gate
+                .get("reason")
+                .and_then(|value| value.as_str())
+                .unwrap_or(""),
+            format_json_string_list(
+                agent_run
+                    .trace
+                    .finalize_gate
+                    .get("missing")
+                    .unwrap_or(&serde_json::Value::Null),
+            ),
+            agent_run
+                .trace
+                .finalize_gate
+                .get("nextToolCall")
+                .and_then(|value| value.get("tool"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("none")
+        );
+        let event = runtime::agent::AgentTraceEvent::new(
+            "judge_result",
+            "finalize_answer",
+            "completed",
+            "M4 LLM evidence check",
+            format!(
+                "status={} next_tool={}",
+                agent_run
+                    .trace
+                    .finalize_gate
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown"),
+                agent_run
+                    .trace
+                    .finalize_gate
+                    .get("nextToolCall")
+                    .and_then(|value| value.get("tool"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("none")
+            ),
+            detail,
+        )
+        .with_judge(gate);
+        emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+        agent_run.trace.events.push(event);
+
+        let status = agent_run
+            .trace
+            .finalize_gate
+            .get("status")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        if status != "needs_more_evidence" {
+            return Ok(());
+        }
+        if remaining_llm_tool_steps == 0 {
+            let gate = serde_json::json!({
+                "status": "insufficient",
+                "reason": agent_run
+                    .trace
+                    .finalize_gate
+                    .get("reason")
+                    .and_then(|value| value.as_str())
+                    .map(|reason| format!("{reason} Reached the retrieval step limit."))
+                    .unwrap_or_else(|| "LLM judge requested more evidence, but the retrieval step limit has been reached.".to_string()),
+                "missing": agent_run
+                    .trace
+                    .finalize_gate
+                    .get("missing")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+                "nextToolCall": agent_run
+                    .trace
+                    .finalize_gate
+                    .get("nextToolCall")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null),
+                "citationCount": agent_run.retrieval_run.citations.len(),
+                "attempt": attempt,
+                "maxAttempts": max_steps,
+                "budgetExhausted": true,
+                "runtime": "m4-llm-judge"
+            });
+            agent_run.retrieval_run.trace.finalize_gate = gate.clone();
+            agent_run.trace.finalize_gate = gate.clone();
+            let event = runtime::agent::AgentTraceEvent::new(
+                "judge_stop",
+                "finalize_answer",
+                "skipped",
+                "Stopping retrieval",
+                "LLM judge requested more evidence, but no retrieval budget remains",
+                "llm_judge stopped: no retrieval budget remains",
+            )
+            .with_judge(gate);
+            emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+            agent_run.trace.events.push(event);
+            return Ok(());
+        }
+        let Some(call) = agent_run
+            .trace
+            .finalize_gate
+            .get("nextToolCall")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<llm::chat::LlmRagToolCall>(value).ok())
+        else {
+            return Ok(());
+        };
+        let vision_enabled = ctx
+            .provider
+            .capabilities
+            .iter()
+            .any(|capability| capability == "vision");
+        let rag_capabilities = runtime::rag::RagToolCapabilities {
+            vision_enabled,
+            max_quote_chars: agent_run.retrieval_run.context_budget.max_quote_chars,
+        };
+        if !runtime::rag::is_registered_rag_tool_for_capabilities(&call.tool, rag_capabilities) {
+            let gate = serde_json::json!({
+                "status": "insufficient",
+                "reason": format!(
+                    "LLM judge requested unavailable tool {} for the selected model capabilities.",
+                    call.tool
+                ),
+                "missing": serde_json::json!(["available retrieval tool"]),
+                "nextToolCall": serde_json::Value::Null,
+                "citationCount": agent_run.retrieval_run.citations.len(),
+                "attempt": attempt,
+                "maxAttempts": max_steps,
+                "budgetExhausted": false,
+                "runtime": "m4-llm-judge"
+            });
+            agent_run.retrieval_run.trace.finalize_gate = gate.clone();
+            agent_run.trace.finalize_gate = gate.clone();
+            let event = runtime::agent::AgentTraceEvent::new(
+                "judge_stop",
+                "finalize_answer",
+                "error",
+                "Stopping retrieval",
+                "Judge returned a tool that is unavailable for the selected model",
+                format!(
+                    "llm_judge returned unavailable tool={} vision_enabled={}",
+                    call.tool, vision_enabled
+                ),
+            )
+            .with_judge(gate);
+            emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+            agent_run.trace.events.push(event);
+            return Ok(());
+        }
+        let signature = format!("{}:{}", call.tool, call.args);
+        if !attempted_tools.insert(signature) {
+            if remaining_llm_judge_rounds > 0 {
+                let feedback = serde_json::json!({
+                    "tool": call.tool,
+                    "args": call.args,
+                    "reason": call.reason,
+                    "observation": "The LLM judge repeated this exact tool request. The tool will not be called again; decide from current evidence, choose a different useful tool, or mark insufficient."
+                })
+                .to_string();
+                let event = runtime::agent::AgentTraceEvent::new(
+                    "judge_feedback",
+                    "finalize_answer",
+                    "skipped",
+                    "Tool feedback",
+                    "Judge repeated a previous tool request; asking it to decide again",
+                    format!(
+                        "llm_judge repeated tool={} with same args; retrying judge with feedback",
+                        call.tool
+                    ),
+                )
+                .with_tool(call.tool.clone(), call.args.clone());
+                emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+                agent_run.trace.events.push(event);
+                tool_feedback.push(feedback);
+                continue;
+            }
+            let gate = serde_json::json!({
+                "status": "insufficient",
+                "reason": format!(
+                    "LLM judge repeated the same tool request {}; stopping to avoid a retrieval loop.",
+                    call.tool
+                ),
+                "missing": serde_json::json!(["non-repeating retrieval step"]),
+                "nextToolCall": serde_json::Value::Null,
+                "citationCount": agent_run.retrieval_run.citations.len(),
+                "attempt": attempt,
+                "maxAttempts": max_steps,
+                "budgetExhausted": false,
+                "runtime": "m4-llm-judge"
+            });
+            agent_run.retrieval_run.trace.finalize_gate = gate.clone();
+            agent_run.trace.finalize_gate = gate.clone();
+            let event = runtime::agent::AgentTraceEvent::new(
+                "judge_stop",
+                "finalize_answer",
+                "error",
+                "Stopping retrieval",
+                "Judge repeated the same tool request",
+                format!("llm_judge repeated tool={} with same args", call.tool),
+            )
+            .with_tool(call.tool.clone(), call.args.clone())
+            .with_judge(gate);
+            emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+            agent_run.trace.events.push(event);
+            return Ok(());
+        }
+
+        let fallback_query_owned;
+        let fallback_query =
+            if let Some(query) = call.args.get("query").and_then(|value| value.as_str()) {
+                query
+            } else {
+                fallback_query_owned = judge_tool_fallback_query(
+                    ctx.question,
+                    &agent_run.retrieval_run.intent,
+                    &call.tool,
+                );
+                fallback_query_owned.as_str()
+            };
+        let tool_start = runtime::agent::AgentTraceEvent::new(
+            "tool_call",
+            call.tool.clone(),
+            "running",
+            format!("Calling {}", call.tool),
+            call.reason.clone(),
+            format!(
+                "llm_judge tool={} args={} fallback_query={}",
+                call.tool, call.args, fallback_query
+            ),
+        )
+        .with_tool(call.tool.clone(), call.args.clone());
+        emit_agent_activity_optional(ctx.app, ctx.activity_event_id, tool_start.clone());
+
+        let output = if call.tool == "analyze_visual" {
+            execute_analyze_visual_with_provider(&ctx, &call, fallback_query).await
+        } else if call.tool == "analyze_page" {
+            execute_analyze_page_with_provider(&ctx, &call, fallback_query).await
+        } else {
+            let conn = ctx
+                .database
+                .conn
+                .lock()
+                .map_err(|_| "SQLite lock was poisoned".to_string())?;
+            Ok(runtime::rag::execute_rag_tool_call_for_capabilities(
+                &conn,
+                ctx.document_id,
+                &call.tool,
+                &call.args,
+                fallback_query,
+                rag_capabilities,
+            ))
+        }?;
+        let event = runtime::agent::AgentTraceEvent::new(
+            "tool_result",
+            output.tool_call.tool.clone(),
+            trace_event_status_from_tool_status(&output.tool_call.status),
+            format!("{} result", output.tool_call.tool),
+            format!(
+                "{} returned {} results",
+                output.tool_call.tool, output.tool_call.result_count
+            ),
+            format!(
+                "llm_judge tool={} results={} reason={}",
+                output.tool_call.tool, output.tool_call.result_count, call.reason
+            ),
+        )
+        .with_tool(
+            output.tool_call.tool.clone(),
+            output.tool_call.input.clone(),
+        )
+        .with_result(
+            output.tool_call.result_count,
+            trace_preview_from_rag_output(&output),
+            output.tool_call.error.clone(),
+        );
+        emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+        agent_run.trace.events.push(event);
+
+        let mut gained_citations = apply_judge_tool_output(agent_run, &output).0;
+        gained_citations = gained_citations.saturating_add(maybe_open_table_page_fallback(
+            &ctx,
+            agent_run,
+            &call,
+            &output,
+            fallback_query,
+        )?);
+        if gained_citations == 0
+            && matches!(call.tool.as_str(), "inspect_tree" | "read_tree_node_lines")
+            && !output.tree_nodes.is_empty()
+        {
+            let node_ids = output
+                .tree_nodes
+                .iter()
+                .map(|node| serde_json::Value::String(node.id.clone()))
+                .collect::<Vec<_>>();
+            if call.tool == "inspect_tree" {
+                let line_args = serde_json::json!({
+                    "treeNodeIds": node_ids.clone(),
+                    "query": fallback_query,
+                    "lineLimit": 12
+                });
+                let line_start = runtime::agent::AgentTraceEvent::new(
+                    "tool_call",
+                    "read_tree_node_lines",
+                    "running",
+                    "Calling read_tree_node_lines",
+                    "Inspecting line-level content inside matched sections",
+                    format!(
+                        "llm_judge follow-up tool=read_tree_node_lines args={} fallback_query={}",
+                        line_args, fallback_query
+                    ),
+                )
+                .with_tool("read_tree_node_lines", line_args.clone());
+                emit_agent_activity_optional(ctx.app, ctx.activity_event_id, line_start.clone());
+                let line_output = {
+                    let conn = ctx
+                        .database
+                        .conn
+                        .lock()
+                        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+                    runtime::rag::execute_rag_tool_call_for_capabilities(
+                        &conn,
+                        ctx.document_id,
+                        "read_tree_node_lines",
+                        &line_args,
+                        fallback_query,
+                        rag_capabilities,
+                    )
+                };
+                let event = runtime::agent::AgentTraceEvent::new(
+                    "tool_result",
+                    line_output.tool_call.tool.clone(),
+                    trace_event_status_from_tool_status(&line_output.tool_call.status),
+                    format!("{} result", line_output.tool_call.tool),
+                    format!(
+                        "{} returned {} results",
+                        line_output.tool_call.tool, line_output.tool_call.result_count
+                    ),
+                    format!(
+                        "llm_judge follow-up tool={} results={} reason=inspect_tree returned section nodes",
+                        line_output.tool_call.tool, line_output.tool_call.result_count
+                    ),
+                )
+                .with_tool(
+                    line_output.tool_call.tool.clone(),
+                    line_output.tool_call.input.clone(),
+                )
+                .with_result(
+                    line_output.tool_call.result_count,
+                    trace_preview_from_rag_output(&line_output),
+                    line_output.tool_call.error.clone(),
+                );
+                emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+                agent_run.trace.events.push(event);
+                gained_citations = gained_citations
+                    .saturating_add(apply_judge_tool_output(agent_run, &line_output).0);
+            }
+
+            if gained_citations == 0 {
+                let open_args = serde_json::json!({
+                    "treeNodeIds": node_ids,
+                    "query": fallback_query,
+                    "perSectionLimit": 10
+                });
+                let section_start = runtime::agent::AgentTraceEvent::new(
+                    "tool_call",
+                    "open_section",
+                    "running",
+                    "Calling open_section",
+                    "Opening full section evidence after line lookup found nothing new",
+                    format!(
+                        "llm_judge follow-up tool=open_section args={} fallback_query={}",
+                        open_args, fallback_query
+                    ),
+                )
+                .with_tool("open_section", open_args.clone());
+                emit_agent_activity_optional(ctx.app, ctx.activity_event_id, section_start.clone());
+                let section_output = {
+                    let conn = ctx
+                        .database
+                        .conn
+                        .lock()
+                        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+                    runtime::rag::execute_rag_tool_call_for_capabilities(
+                        &conn,
+                        ctx.document_id,
+                        "open_section",
+                        &open_args,
+                        fallback_query,
+                        rag_capabilities,
+                    )
+                };
+                let event = runtime::agent::AgentTraceEvent::new(
+                    "tool_result",
+                    section_output.tool_call.tool.clone(),
+                    trace_event_status_from_tool_status(&section_output.tool_call.status),
+                    format!("{} result", section_output.tool_call.tool),
+                    format!(
+                        "{} returned {} results",
+                        section_output.tool_call.tool, section_output.tool_call.result_count
+                    ),
+                    format!(
+                        "llm_judge follow-up tool={} results={} reason=line evidence unavailable",
+                        section_output.tool_call.tool, section_output.tool_call.result_count
+                    ),
+                )
+                .with_tool(
+                    section_output.tool_call.tool.clone(),
+                    section_output.tool_call.input.clone(),
+                )
+                .with_result(
+                    section_output.tool_call.result_count,
+                    trace_preview_from_rag_output(&section_output),
+                    section_output.tool_call.error.clone(),
+                );
+                emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+                agent_run.trace.events.push(event);
+                gained_citations = gained_citations
+                    .saturating_add(apply_judge_tool_output(agent_run, &section_output).0);
+            }
+        }
+        if gained_citations == 0 {
+            let feedback = no_gain_tool_feedback(&call, &output);
+            let event = runtime::agent::AgentTraceEvent::new(
+                "judge_feedback",
+                "finalize_answer",
+                "skipped",
+                "Tool feedback",
+                "Tool returned no new evidence; asking the LLM judge to decide again",
+                format!(
+                    "llm_judge tool={} produced no new evidence; retrying judge with feedback",
+                    call.tool
+                ),
+            )
+            .with_tool(call.tool.clone(), call.args.clone());
+            emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+            agent_run.trace.events.push(event);
+            tool_feedback.push(feedback);
+            attempt = attempt.saturating_add(1);
+            remaining_llm_tool_steps = remaining_llm_tool_steps.saturating_sub(1);
+            if remaining_llm_judge_rounds > 0 {
+                continue;
+            }
+            let gate = serde_json::json!({
+                "status": "insufficient",
+                "reason": format!("LLM judge requested {}, but the tool returned no new evidence and no judge rounds remain.", call.tool),
+                "missing": agent_run
+                    .trace
+                    .finalize_gate
+                    .get("missing")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([])),
+                "nextToolCall": serde_json::Value::Null,
+                "citationCount": agent_run.retrieval_run.citations.len(),
+                "attempt": attempt,
+                "maxAttempts": max_steps,
+                "budgetExhausted": false,
+                "runtime": "m4-llm-judge"
+            });
+            agent_run.retrieval_run.trace.finalize_gate = gate.clone();
+            agent_run.trace.finalize_gate = gate.clone();
+            let event = runtime::agent::AgentTraceEvent::new(
+                "judge_stop",
+                "finalize_answer",
+                "skipped",
+                "Stopping retrieval",
+                "Tool returned no new evidence and no judge rounds remain",
+                format!(
+                    "llm_judge stopped: tool={} produced no new evidence and no judge rounds remain",
+                    call.tool
+                ),
+            )
+            .with_judge(gate);
+            emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+            agent_run.trace.events.push(event);
+            return Ok(());
+        }
+        attempt = attempt.saturating_add(1);
+        remaining_llm_tool_steps = remaining_llm_tool_steps.saturating_sub(1);
+    }
+    Ok(())
+}
+
+async fn execute_analyze_visual_with_provider(
+    ctx: &LlmJudgeLoopInput<'_>,
+    call: &llm::chat::LlmRagToolCall,
+    fallback_query: &str,
+) -> Result<runtime::rag::RagToolExecutionOutput, String> {
+    let asset_id = call
+        .args
+        .get("assetId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(asset_id) = asset_id else {
+        return Ok(analyze_visual_error_output(
+            &call.args,
+            "analyze_visual requires assetId",
+        ));
+    };
+    let question = call
+        .args
+        .get("question")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_query);
+    let asset = {
+        let conn = ctx
+            .database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        load_visual_asset_for_analysis(&conn, ctx.document_id, asset_id)?
+    };
+    let Some(asset) = asset else {
+        return Ok(analyze_visual_error_output(
+            &call.args,
+            "visual asset was not found",
+        ));
+    };
+    let image_data_url = match visual_asset_data_url(&asset) {
+        Ok(value) => value,
+        Err(err) => return Ok(analyze_visual_error_output(&call.args, &err)),
+    };
+
+    let prompt = format!(
+        "Analyze this visual crop from an academic PDF.\n\
+         User question: {question}\n\
+         Asset type: {}\n\
+         Caption: {}\n\
+         Nearby text: {}\n\n\
+         Return a concise evidence-focused description. Do not invent values that are not visible.",
+        asset.asset_type, asset.caption, asset.nearby_text
+    );
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|err| format!("Failed to create visual analysis client: {err}"))?;
+    let endpoint = format!(
+        "{}/chat/completions",
+        normalize_base_url(&ctx.provider.base_url)
+    );
+    let request = OpenAiChatRequest {
+        model: ctx.provider.model.clone(),
+        temperature: 0.0,
+        stream: None,
+        messages: vec![
+            llm::chat::text_message(
+                "system",
+                "You are a careful visual evidence analyzer for an academic PDF. Use only the image and supplied caption/nearby text.",
+            ),
+            llm::chat::user_message_with_optional_image(&prompt, Some(&image_data_url)),
+        ],
+    };
+    let mut builder = client.post(endpoint).json(&request);
+    if let Some(api_key) = &ctx.provider.api_key {
+        builder = builder.bearer_auth(api_key);
+    }
+    let response = match builder.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            return Ok(analyze_visual_error_output(
+                &call.args,
+                &format!("visual analysis request failed: {err}"),
+            ));
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Ok(analyze_visual_error_output(
+            &call.args,
+            &format!(
+                "visual analysis provider returned {status}: {}",
+                truncate_for_error(&body, 400)
+            ),
+        ));
+    }
+    let response = response
+        .json::<OpenAiChatResponse>()
+        .await
+        .map_err(|err| format!("Failed to decode visual analysis response: {err}"))?;
+    let answer = response
+        .choices
+        .into_iter()
+        .next()
+        .map(|choice| llm::chat::extract_chat_response_text(&choice.message.content))
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| "The vision model returned no visual analysis.".to_string());
+    let quote = format!(
+        "Visual analysis for {} on page {}:\n{}\n\nCaption: {}",
+        asset.asset_type, asset.page, answer, asset.caption
+    );
+    let citation = runtime::rag::Citation {
+        id: format!("rag-c-analyze-visual-{}", asset.id),
+        label: "[1]".to_string(),
+        page: asset.page,
+        block_id: asset.id.clone(),
+        section_title: Some(format!("{} on page {}", asset.asset_type, asset.page)),
+        quote: truncate_for_error(&quote, 1_800),
+        bbox_list: asset.bbox_list.clone(),
+        document_id: asset.document_id.clone(),
+        source: "analyze_visual".to_string(),
+    };
+    Ok(runtime::rag::RagToolExecutionOutput {
+        citations: vec![citation.clone()],
+        trace_candidates: vec![runtime::rag::RetrievalTraceCandidate {
+            source: citation.source.clone(),
+            page: citation.page,
+            block_id: citation.block_id.clone(),
+            tree_node_id: None,
+            section_title: citation.section_title.clone(),
+            quote: truncate_for_error(&citation.quote, 240),
+        }],
+        tree_nodes: Vec::new(),
+        tool_call: runtime::rag::RetrievalTraceToolCall {
+            tool: "analyze_visual".to_string(),
+            status: "ok".to_string(),
+            input: call.args.clone(),
+            result_count: 1,
+            error: None,
+        },
+    })
+}
+
+async fn execute_analyze_page_with_provider(
+    ctx: &LlmJudgeLoopInput<'_>,
+    call: &llm::chat::LlmRagToolCall,
+    fallback_query: &str,
+) -> Result<runtime::rag::RagToolExecutionOutput, String> {
+    let page = call
+        .args
+        .get("page")
+        .and_then(|value| value.as_u64())
+        .filter(|value| *value > 0)
+        .and_then(|value| u32::try_from(value).ok());
+    let Some(page) = page else {
+        return Ok(analyze_page_error_output(
+            &call.args,
+            "analyze_page requires page",
+        ));
+    };
+    let question = call
+        .args
+        .get("question")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_query);
+    let pdf_path = {
+        let conn = ctx
+            .database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        document_pdf_path_for_analysis(&conn, ctx.document_id)?
+    };
+    let image_data_url =
+        match tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+            let page_image = vision::render_pdf_page_image(&pdf_path, page)?;
+            image_file_data_url(&page_image)
+        })
+        .await
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(err)) => return Ok(analyze_page_error_output(&call.args, &err)),
+            Err(err) => {
+                return Ok(analyze_page_error_output(
+                    &call.args,
+                    &format!("page rendering task failed: {err}"),
+                ));
+            }
+        };
+    let page_text = {
+        let conn = ctx
+            .database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        page_text_for_analysis(&conn, ctx.document_id, page)?
+    };
+
+    let prompt = format!(
+        "Analyze this full page screenshot from an academic PDF.\n\
+         User question: {question}\n\
+         Page: {page}\n\
+         Extracted page text:\n{page_text}\n\n\
+         Use the screenshot for visual layout, charts, figures, and tables. Use the text only as supporting context. Return concise evidence-focused findings and do not invent values that are not visible.",
+    );
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|err| format!("Failed to create page analysis client: {err}"))?;
+    let endpoint = format!(
+        "{}/chat/completions",
+        normalize_base_url(&ctx.provider.base_url)
+    );
+    let request = OpenAiChatRequest {
+        model: ctx.provider.model.clone(),
+        temperature: 0.0,
+        stream: None,
+        messages: vec![
+            llm::chat::text_message(
+                "system",
+                "You are a careful page-level visual evidence analyzer for academic PDFs. Use only the screenshot and supplied page text.",
+            ),
+            llm::chat::user_message_with_optional_image(&prompt, Some(&image_data_url)),
+        ],
+    };
+    let mut builder = client.post(endpoint).json(&request);
+    if let Some(api_key) = &ctx.provider.api_key {
+        builder = builder.bearer_auth(api_key);
+    }
+    let response = match builder.send().await {
+        Ok(response) => response,
+        Err(err) => {
+            return Ok(analyze_page_error_output(
+                &call.args,
+                &format!("page analysis request failed: {err}"),
+            ));
+        }
+    };
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Ok(analyze_page_error_output(
+            &call.args,
+            &format!(
+                "page analysis provider returned {status}: {}",
+                truncate_for_error(&body, 400)
+            ),
+        ));
+    }
+    let response = response
+        .json::<OpenAiChatResponse>()
+        .await
+        .map_err(|err| format!("Failed to decode page analysis response: {err}"))?;
+    let answer = response
+        .choices
+        .into_iter()
+        .next()
+        .map(|choice| llm::chat::extract_chat_response_text(&choice.message.content))
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| "The vision model returned no page analysis.".to_string());
+    let quote = format!("Full-page visual analysis for page {page}:\n{answer}");
+    let citation = runtime::rag::Citation {
+        id: format!("rag-c-analyze-page-{page}"),
+        label: "[1]".to_string(),
+        page,
+        block_id: format!("page-image-{page}"),
+        section_title: Some(format!("Page {page} screenshot")),
+        quote: truncate_for_error(&quote, 1_800),
+        bbox_list: serde_json::json!([[0.0, 0.0, 1.0, 1.0]]),
+        document_id: ctx.document_id.to_string(),
+        source: "analyze_page".to_string(),
+    };
+    Ok(runtime::rag::RagToolExecutionOutput {
+        citations: vec![citation.clone()],
+        trace_candidates: vec![runtime::rag::RetrievalTraceCandidate {
+            source: citation.source.clone(),
+            page: citation.page,
+            block_id: citation.block_id.clone(),
+            tree_node_id: None,
+            section_title: citation.section_title.clone(),
+            quote: truncate_for_error(&citation.quote, 240),
+        }],
+        tree_nodes: Vec::new(),
+        tool_call: runtime::rag::RetrievalTraceToolCall {
+            tool: "analyze_page".to_string(),
+            status: "ok".to_string(),
+            input: call.args.clone(),
+            result_count: 1,
+            error: None,
+        },
+    })
+}
+
+fn analyze_visual_error_output(
+    args: &serde_json::Value,
+    error: &str,
+) -> runtime::rag::RagToolExecutionOutput {
+    runtime::rag::RagToolExecutionOutput {
+        citations: Vec::new(),
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: runtime::rag::RetrievalTraceToolCall {
+            tool: "analyze_visual".to_string(),
+            status: "error".to_string(),
+            input: args.clone(),
+            result_count: 0,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn analyze_page_error_output(
+    args: &serde_json::Value,
+    error: &str,
+) -> runtime::rag::RagToolExecutionOutput {
+    runtime::rag::RagToolExecutionOutput {
+        citations: Vec::new(),
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: runtime::rag::RetrievalTraceToolCall {
+            tool: "analyze_page".to_string(),
+            status: "error".to_string(),
+            input: args.clone(),
+            result_count: 0,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn load_visual_asset_for_analysis(
+    conn: &Connection,
+    document_id: &str,
+    asset_id: &str,
+) -> Result<Option<VisualAssetForAnalysis>, String> {
+    conn.query_row(
+        "SELECT id, document_id, page_no, asset_type, caption, bbox_json, image_path, nearby_text
+         FROM document_visual_assets
+         WHERE document_id = ?1 AND id = ?2
+         LIMIT 1",
+        params![document_id, asset_id],
+        |row| {
+            let bbox_json: String = row.get(5)?;
+            let bbox_list: serde_json::Value =
+                serde_json::from_str(&bbox_json).unwrap_or_else(|_| serde_json::json!([]));
+            Ok(VisualAssetForAnalysis {
+                id: row.get(0)?,
+                document_id: row.get(1)?,
+                page: row.get(2)?,
+                asset_type: row.get(3)?,
+                caption: row.get(4)?,
+                bbox_list,
+                image_path: row.get(6)?,
+                nearby_text: row.get(7)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|err| format!("Failed to load visual asset for analysis: {err}"))
+}
+
+fn document_pdf_path_for_analysis(conn: &Connection, document_id: &str) -> Result<PathBuf, String> {
+    let path = conn
+        .query_row(
+            "SELECT path FROM documents WHERE id = ?1 LIMIT 1",
+            params![document_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|err| format!("Failed to load document path for page analysis: {err}"))?
+        .ok_or_else(|| "Document is no longer available for page analysis".to_string())?;
+    let path = PathBuf::from(path);
+    if !path.is_file() {
+        return Err(format!("PDF is no longer available at {}", path.display()));
+    }
+    Ok(path)
+}
+
+fn page_text_for_analysis(
+    conn: &Connection,
+    document_id: &str,
+    page: u32,
+) -> Result<String, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT text
+             FROM document_blocks
+             WHERE document_id = ?1 AND page_no = ?2
+             ORDER BY block_index
+             LIMIT 80",
+        )
+        .map_err(|err| format!("Failed to prepare page text for analysis: {err}"))?;
+    let rows = stmt
+        .query_map(params![document_id, page], |row| row.get::<_, String>(0))
+        .map_err(|err| format!("Failed to read page text for analysis: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to collect page text for analysis: {err}"))?;
+    let text = rows
+        .into_iter()
+        .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|text| !text.is_empty())
+        .take(24)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(truncate_for_error(&text, 2_400))
+}
+
+fn visual_asset_data_url(asset: &VisualAssetForAnalysis) -> Result<String, String> {
+    let image_path = asset.image_path.trim();
+    if image_path.is_empty() {
+        return Err(
+            "visual asset has no crop path; run Rust visual indexing with crop support first"
+                .to_string(),
+        );
+    }
+    image_file_data_url(&PathBuf::from(image_path))
+}
+
+fn image_file_data_url(path: &Path) -> Result<String, String> {
+    let metadata =
+        fs::metadata(path).map_err(|err| format!("failed to read image metadata: {err}"))?;
+    const MAX_VISUAL_CROP_BYTES: u64 = 8 * 1024 * 1024;
+    if metadata.len() > MAX_VISUAL_CROP_BYTES {
+        return Err(format!(
+            "image is too large for inline analysis: {} bytes",
+            metadata.len()
+        ));
+    }
+    let mime = match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("png") => "image/png",
+        _ => return Err("image must be a PNG, JPEG, or WebP image".to_string()),
+    };
+    let bytes = fs::read(path).map_err(|err| format!("failed to read image: {err}"))?;
+    Ok(format!(
+        "data:{mime};base64,{}",
+        general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+pub(super) fn apply_judge_tool_output(
+    agent_run: &mut runtime::agent::AgentRunResult,
+    output: &runtime::rag::RagToolExecutionOutput,
+) -> (usize, usize) {
+    let before_citation_signatures = citation_change_signatures(&agent_run.retrieval_run.citations);
+    let before_tree_node_count = agent_run.retrieval_run.trace.tree_nodes.len();
+    let mut accumulated = agent_run.retrieval_run.citations.clone();
+    runtime::rag::merge_retrieval_citations_with_budget(
+        &mut accumulated,
+        &output.citations,
+        &agent_run.retrieval_run.context_budget,
+    );
+    let gained_citations = citation_change_signatures(&accumulated)
+        .difference(&before_citation_signatures)
+        .count();
+    let latest_gate = agent_run.trace.finalize_gate.clone();
+    runtime::rag::apply_tool_execution(&mut agent_run.retrieval_run, output);
+    runtime::rag::apply_retrieval_citations(&mut agent_run.retrieval_run, accumulated);
+    agent_run.retrieval_run.trace.finalize_gate = latest_gate.clone();
+    agent_run.trace.sync_retrieval_view(
+        agent_run.retrieval_run.trace.clone(),
+        &agent_run.retrieval_run.citations,
+    );
+    agent_run.trace.finalize_gate = latest_gate;
+    let gained_tree_nodes = agent_run
+        .retrieval_run
+        .trace
+        .tree_nodes
+        .len()
+        .saturating_sub(before_tree_node_count);
+    (gained_citations, gained_tree_nodes)
+}
+
+fn citation_change_signatures(citations: &[runtime::rag::Citation]) -> HashSet<String> {
+    citations
+        .iter()
+        .map(citation_change_signature)
+        .collect::<HashSet<_>>()
+}
+
+fn citation_change_signature(citation: &runtime::rag::Citation) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        citation.source,
+        citation.document_id,
+        citation.block_id,
+        citation.page,
+        citation.quote.trim()
+    )
+}
+
+pub(super) fn enforce_llm_judge_hard_gate(
+    question: &str,
+    citations: &[runtime::rag::Citation],
+    decision: &mut llm::chat::LlmAnswerabilityDecision,
+) {
+    if decision.status != "answerable" {
+        return;
+    }
+    if citations.is_empty() {
+        decision.status = "insufficient".to_string();
+        decision.reason = "Hard gate rejected answerable: no citations are available.".to_string();
+        decision.missing = vec!["document evidence".to_string()];
+        decision.next_tool_call = None;
+        return;
+    }
+    if !question_needs_table_evidence(question) {
+        return;
+    }
+    if has_current_view_table_evidence(question, citations) {
+        return;
+    }
+    if !citations
+        .iter()
+        .any(|citation| citation.source.as_str() == "open_table")
+    {
+        decision.status = "needs_more_evidence".to_string();
+        decision.reason =
+            "Hard gate requires open_table evidence for table or metric questions.".to_string();
+        decision.missing = vec!["full table evidence".to_string()];
+        decision.next_tool_call = Some(llm::chat::LlmRagToolCall {
+            tool: "open_table".to_string(),
+            args: serde_json::json!({ "query": question, "limit": 40 }),
+            reason: "Open the candidate table before deciding exact table values.".to_string(),
+        });
+        return;
+    }
+    if let Some(table_no) = requested_table_number(question) {
+        let needle = format!("table {table_no}");
+        let has_requested_table = citations.iter().any(|citation| {
+            citation.source.as_str() == "open_table"
+                && citation
+                    .section_title
+                    .as_deref()
+                    .and_then(requested_table_number)
+                    .as_deref()
+                    .is_some_and(|candidate_no| candidate_no == table_no)
+        });
+        if !has_requested_table {
+            decision.status = "needs_more_evidence".to_string();
+            decision.reason =
+                format!("Hard gate requires open_table evidence from the requested {needle}.");
+            decision.missing = vec![format!("{needle} open_table evidence")];
+            decision.next_tool_call = Some(llm::chat::LlmRagToolCall {
+                tool: "open_table".to_string(),
+                args: serde_json::json!({
+                    "tableNumber": table_no,
+                    "query": question,
+                    "limit": 40
+                }),
+                reason: "Open the requested table number before answering.".to_string(),
+            });
+        }
+    }
+}
+
+fn has_current_view_table_evidence(question: &str, citations: &[runtime::rag::Citation]) -> bool {
+    let requested = requested_table_number(question);
+    citations
+        .iter()
+        .filter(|citation| citation.source.as_str() == "current_view")
+        .any(|citation| {
+            if let Some(table_no) = requested.as_deref() {
+                return citation
+                    .section_title
+                    .as_deref()
+                    .and_then(requested_table_number)
+                    .as_deref()
+                    == Some(table_no)
+                    || requested_table_number(&citation.quote).as_deref() == Some(table_no);
+            }
+            let haystack = format!(
+                "{}\n{}",
+                citation.section_title.as_deref().unwrap_or_default(),
+                citation.quote
+            )
+            .to_lowercase();
+            haystack.contains("table")
+                || haystack.contains("metric")
+                || haystack.contains("score")
+                || haystack.contains("benchmark")
+                || haystack.contains("performance")
+                || haystack.contains("表")
+                || haystack.contains("指标")
+        })
+}
+
+pub(super) fn requires_llm_judge_for_answer(_question: &str) -> bool {
+    true
+}
+
+pub(super) fn question_needs_table_evidence(question: &str) -> bool {
+    let normalized = question.to_lowercase();
+    requested_table_number(question).is_some()
+        || normalized.contains("table")
+        || normalized.contains("benchmark")
+        || normalized.contains("metric")
+        || normalized.contains("score")
+        || normalized.contains("sota")
+        || normalized.contains("performance")
+        || normalized.contains("表格")
+        || normalized.contains("指标")
+        || normalized.contains("分数")
+        || normalized.contains("成绩")
+        || normalized.contains("数值")
+}
+
+pub(super) fn requested_table_number(question: &str) -> Option<String> {
+    let normalized = question.to_lowercase();
+    for (index, _) in normalized.match_indices("table") {
+        let rest = &normalized[index + "table".len()..];
+        let rest_chars = rest
+            .chars()
+            .skip_while(|ch| ch.is_ascii_whitespace() || matches!(ch, ':' | '#' | '-'))
+            .collect::<Vec<_>>();
+        if let Some((number, _)) = table_number_prefix(&rest_chars) {
+            return Some(number);
+        }
+    }
+    let chars = normalized.chars().collect::<Vec<_>>();
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == '表' {
+            let rest = chars
+                .iter()
+                .skip(index + 1)
+                .skip_while(|ch| ch.is_ascii_whitespace() || matches!(ch, ':' | '#' | '-' | '：'))
+                .copied()
+                .collect::<Vec<_>>();
+            if let Some((number, _)) = table_number_prefix(&rest) {
+                return Some(number);
+            }
+        }
+        if *ch == '第' {
+            if let Some((number, len)) = table_number_prefix(&chars[index + 1..]) {
+                if chars.get(index + 1 + len).is_some_and(|next| *next == '表') {
+                    return Some(number);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn table_number_prefix(chars: &[char]) -> Option<(String, usize)> {
+    let digits = chars
+        .iter()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if !digits.is_empty() {
+        return Some((digits.clone(), digits.chars().count()));
+    }
+    let cjk = chars
+        .iter()
+        .take_while(|ch| is_cjk_number_char(**ch))
+        .collect::<String>();
+    let number = parse_cjk_number(&cjk)?;
+    Some((number.to_string(), cjk.chars().count()))
+}
+
+fn is_cjk_number_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '零' | '〇' | '一' | '二' | '两' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
+    )
+}
+
+fn parse_cjk_number(value: &str) -> Option<u32> {
+    if value.is_empty() {
+        return None;
+    }
+    let chars = value.chars().collect::<Vec<_>>();
+    if let Some(ten_index) = chars.iter().position(|ch| *ch == '十') {
+        let tens = if ten_index == 0 {
+            1
+        } else {
+            cjk_digit(chars[ten_index - 1])?
+        };
+        let ones = match chars.get(ten_index + 1).copied() {
+            Some(ch) => cjk_digit(ch)?,
+            None => 0,
+        };
+        return Some(tens * 10 + ones);
+    }
+    if chars.len() == 1 {
+        return cjk_digit(chars[0]);
+    }
+    None
+}
+
+fn cjk_digit(ch: char) -> Option<u32> {
+    match ch {
+        '零' | '〇' => Some(0),
+        '一' => Some(1),
+        '二' | '两' => Some(2),
+        '三' => Some(3),
+        '四' => Some(4),
+        '五' => Some(5),
+        '六' => Some(6),
+        '七' => Some(7),
+        '八' => Some(8),
+        '九' => Some(9),
+        _ => None,
+    }
+}
+
+fn trace_event_status_from_tool_status(status: &str) -> &'static str {
+    if status == "error" {
+        "error"
+    } else {
+        "completed"
+    }
+}
+
+fn trace_preview_from_rag_output(
+    output: &runtime::rag::RagToolExecutionOutput,
+) -> Vec<runtime::agent::AgentTracePreview> {
+    output
+        .trace_candidates
+        .iter()
+        .take(3)
+        .map(|candidate| runtime::agent::AgentTracePreview {
+            page: candidate.page,
+            section_title: candidate.section_title.clone(),
+            quote: candidate.quote.clone(),
+            source: candidate.source.clone(),
+        })
+        .collect()
+}
+
+fn no_gain_tool_feedback(
+    call: &llm::chat::LlmRagToolCall,
+    output: &runtime::rag::RagToolExecutionOutput,
+) -> String {
+    let preview = trace_preview_from_rag_output(output)
+        .into_iter()
+        .map(|item| {
+            serde_json::json!({
+                "page": item.page,
+                "sectionTitle": item.section_title,
+                "quote": truncate_for_error(&item.quote, 240),
+                "source": item.source
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "tool": call.tool,
+        "args": call.args,
+        "reason": call.reason,
+        "status": output.tool_call.status,
+        "resultCount": output.tool_call.result_count,
+        "observation": "The tool call completed but added no new unique citations to current evidence.",
+        "preview": preview
+    })
+    .to_string()
+}
+
+fn maybe_open_table_page_fallback(
+    ctx: &LlmJudgeLoopInput<'_>,
+    agent_run: &mut runtime::agent::AgentRunResult,
+    call: &llm::chat::LlmRagToolCall,
+    output: &runtime::rag::RagToolExecutionOutput,
+    fallback_query: &str,
+) -> Result<usize, String> {
+    let Some(page) = table_page_fallback_page(ctx.question, call, output) else {
+        return Ok(0);
+    };
+    if agent_run.retrieval_run.citations.iter().any(|citation| {
+        citation.source == "open_pages"
+            && citation.page == page
+            && citation
+                .section_title
+                .as_deref()
+                .is_some_and(|title| title.contains(" lines "))
+    }) {
+        return Ok(0);
+    }
+
+    let page_args = serde_json::json!({
+        "page": page,
+        "mode": "full",
+        "limit": 40
+    });
+    let page_start = runtime::agent::AgentTraceEvent::new(
+        "tool_call",
+        "open_pages",
+        "running",
+        "Calling open_pages",
+        "Opening the source page because structured table extraction looked sparse or noisy",
+        format!(
+            "llm_judge follow-up tool=open_pages args={} fallback_query={}",
+            page_args, fallback_query
+        ),
+    )
+    .with_tool("open_pages", page_args.clone());
+    emit_agent_activity_optional(ctx.app, ctx.activity_event_id, page_start.clone());
+
+    let page_output = {
+        let conn = ctx
+            .database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        runtime::rag::execute_rag_tool_call_for_capabilities(
+            &conn,
+            ctx.document_id,
+            "open_pages",
+            &page_args,
+            fallback_query,
+            runtime::rag::RagToolCapabilities {
+                vision_enabled: ctx
+                    .provider
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "vision"),
+                max_quote_chars: agent_run.retrieval_run.context_budget.max_quote_chars,
+            },
+        )
+    };
+    let event = runtime::agent::AgentTraceEvent::new(
+        "tool_result",
+        page_output.tool_call.tool.clone(),
+        trace_event_status_from_tool_status(&page_output.tool_call.status),
+        format!("{} result", page_output.tool_call.tool),
+        format!(
+            "{} returned {} results",
+            page_output.tool_call.tool, page_output.tool_call.result_count
+        ),
+        format!(
+            "llm_judge follow-up tool={} results={} reason=structured table evidence was incomplete",
+            page_output.tool_call.tool, page_output.tool_call.result_count
+        ),
+    )
+    .with_tool(
+        page_output.tool_call.tool.clone(),
+        page_output.tool_call.input.clone(),
+    )
+    .with_result(
+        page_output.tool_call.result_count,
+        trace_preview_from_rag_output(&page_output),
+        page_output.tool_call.error.clone(),
+    );
+    emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
+    agent_run.trace.events.push(event);
+
+    Ok(apply_judge_tool_output(agent_run, &page_output).0)
+}
+
+fn table_page_fallback_page(
+    question: &str,
+    call: &llm::chat::LlmRagToolCall,
+    output: &runtime::rag::RagToolExecutionOutput,
+) -> Option<u32> {
+    if call.tool != "open_table" {
+        return None;
+    }
+    let requested = requested_table_number(question)?;
+    let requested_page = output
+        .citations
+        .iter()
+        .find(|citation| {
+            citation.source == "open_table"
+                && citation
+                    .section_title
+                    .as_deref()
+                    .and_then(requested_table_number)
+                    .as_deref()
+                    .is_some_and(|number| number == requested)
+        })
+        .map(|citation| citation.page)
+        .or_else(|| output.citations.first().map(|citation| citation.page))?;
+
+    let combined = output
+        .citations
+        .iter()
+        .map(|citation| citation.quote.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    let table_evidence_is_sparse = output.citations.len() < 6 || combined.chars().count() < 700;
+    let table_evidence_has_placeholder_columns = combined.contains("column 1")
+        || combined.contains("column 2")
+        || combined.contains("column 3")
+        || combined.contains("column 4");
+    if table_evidence_is_sparse || table_evidence_has_placeholder_columns {
+        Some(requested_page)
+    } else {
+        None
+    }
+}
+
+fn format_json_string_list(value: &serde_json::Value) -> String {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+pub(super) fn emit_agent_activity(
+    app: &tauri::AppHandle,
+    activity_event_id: Option<&str>,
+    event: runtime::agent::AgentTraceEvent,
+) {
+    if let Some(event_id) = activity_event_id {
+        let _ = app.emit(
+            "lumenfolio://agent-activity",
+            AgentActivityEventOutput {
+                event_id: event_id.to_string(),
+                event,
+            },
+        );
+    }
+}
+
+fn emit_agent_activity_optional(
+    app: Option<&tauri::AppHandle>,
+    activity_event_id: Option<&str>,
+    event: runtime::agent::AgentTraceEvent,
+) {
+    if let Some(app) = app {
+        emit_agent_activity(app, activity_event_id, event);
+    }
+}
+
+pub(super) fn has_image_context(input: &AskDocumentInput) -> bool {
+    input
+        .image_data_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+}
+
+pub(crate) fn retrieval_is_answerable(agent_run: &runtime::agent::AgentRunResult) -> bool {
+    let gate = &agent_run.retrieval_run.trace.finalize_gate;
+    let status_is_answerable = gate
+        .get("status")
+        .and_then(|value| value.as_str())
+        .is_some_and(|status| status == "answerable");
+    let runtime_is_llm_judge = gate
+        .get("runtime")
+        .and_then(|value| value.as_str())
+        .is_some_and(|runtime| runtime == "m4-llm-judge");
+    status_is_answerable && runtime_is_llm_judge
+}
+
+fn judge_tool_fallback_query(question: &str, intent: &str, tool: &str) -> String {
+    let normalized = question.to_lowercase();
+    if matches!(
+        tool,
+        "inspect_tree" | "read_tree_node_lines" | "open_section"
+    ) && (intent == "summarize"
+        || normalized.contains("这篇文章")
+        || normalized.contains("这篇论文")
+        || normalized.contains("文章讲")
+        || normalized.contains("论文讲")
+        || normalized.contains("关于什么")
+        || normalized.contains("主要内容")
+        || normalized.contains("总结")
+        || normalized.contains("概括")
+        || normalized.contains("what is this paper about")
+        || normalized.contains("what is this article about")
+        || normalized.contains("summarize this paper"))
+    {
+        return "abstract introduction contribution method approach experiments evaluation results conclusion"
+            .to_string();
+    }
+    question.to_string()
+}
+
+pub(super) fn retrieval_budget_exhausted(agent_run: &runtime::agent::AgentRunResult) -> bool {
+    agent_run
+        .retrieval_run
+        .trace
+        .finalize_gate
+        .get("budgetExhausted")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+}
+
+pub(super) fn retrieval_attempt_count(agent_run: &runtime::agent::AgentRunResult) -> u32 {
+    agent_run
+        .retrieval_run
+        .trace
+        .finalize_gate
+        .get("attempt")
+        .and_then(|value| value.as_u64())
+        .map(|attempt| attempt.saturating_add(1) as u32)
+        .unwrap_or(1)
+}
+
+pub(super) fn llm_judge_budget(max_steps: u32, attempt: u32) -> (u32, u32) {
+    let remaining_tool_steps = MAX_LLM_JUDGE_STEPS.min(max_steps.saturating_sub(attempt));
+    let judge_rounds = remaining_tool_steps.saturating_add(1).max(1);
+    (remaining_tool_steps, judge_rounds)
+}

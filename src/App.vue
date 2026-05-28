@@ -1,0 +1,4434 @@
+<script setup>
+import {
+  computed,
+  defineAsyncComponent,
+  h,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  reactive,
+  ref,
+  watch,
+} from 'vue'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { translationLanguages } from './mockData'
+import { messages } from './i18n'
+import { normalizeLinkedBlockHover } from './translationLinking'
+
+const UNCONFIGURED_CHAT_MODEL_ID = 'unconfigured-model'
+const ASSISTANT_STREAM_DRAIN_MS = 35
+const ASSISTANT_STREAM_CHARS_PER_TICK = 2
+const CHAT_STREAM_DEBUG_STORAGE_KEY = 'lumenfolio.chatStreamDebug'
+const ASYNC_COMPONENT_TIMEOUT_MS = 30000
+const CLEAR_CHAT_HISTORY_TIMEOUT_MS = 5000
+const WORKSPACE_FILE_DROP_DEBOUNCE_MS = 900
+const AsyncPanelLoading = {
+  render: () => h('div', {
+    class: 'async-panel-loading',
+    'aria-hidden': 'true',
+  }),
+}
+const WorkspaceSidebar = defineAsyncComponent({
+  loader: () => import('./components/WorkspaceSidebar.vue'),
+  loadingComponent: AsyncPanelLoading,
+  delay: 80,
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
+const ReaderPane = defineAsyncComponent({
+  loader: () => import('./components/ReaderPane.vue'),
+  loadingComponent: AsyncPanelLoading,
+  delay: 80,
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
+const ChatPane = defineAsyncComponent({
+  loader: () => import('./components/ChatPane.vue'),
+  loadingComponent: AsyncPanelLoading,
+  delay: 80,
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
+const MODEL_PROVIDER_PRESETS = {
+  'openai-compatible': {
+    name: 'OpenAI Compatible',
+    baseUrl: 'https://api.openai.com/v1',
+    model: '',
+  },
+  openai: {
+    name: 'OpenAI',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-4.1-mini',
+  },
+  deepseek: {
+    name: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com',
+    model: 'deepseek-v4-flash',
+  },
+  openrouter: {
+    name: 'OpenRouter',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    model: 'openai/gpt-4.1-mini',
+  },
+}
+const MODEL_CAPABILITY_OPTIONS = ['vision', 'reasoning', 'tool_use']
+
+const workspace = reactive({
+  roots: [],
+})
+const locale = ref('en')
+const ui = computed(() => messages[locale.value] || messages.en)
+const filter = ref('')
+const selectedDocId = ref('')
+const translationLang = ref('zh')
+const viewMode = ref('original')
+const activePage = ref(1)
+const activeBlockId = ref('')
+const activeCitationId = ref('')
+const activeHighlight = ref(null)
+const hoveredLinkedBlock = ref(null)
+const lastSelection = ref(null)
+const activeTranslation = ref(null)
+const inlineTranslateOpen = ref(false)
+const leftCollapsed = ref(false)
+const rightCollapsed = ref(false)
+const rightWidth = ref(500)
+const chatFocusRequest = ref(0)
+const viewerReloadKey = ref(0)
+const selectedChatModelId = ref(UNCONFIGURED_CHAT_MODEL_ID)
+const translationProvider = ref('google-web')
+let syncingTranslationLangFromDocument = false
+const translationFallbackEnabled = ref(true)
+const workspaceStatus = ref('idle')
+const workspaceError = ref('')
+const modelProviders = ref([])
+const editableProviders = ref([])
+const selectedProviderEditKey = ref('')
+const settingsOpen = ref(false)
+const settingsSection = ref('chat')
+const settingsStatus = ref('idle')
+const settingsError = ref('')
+const clearChatConfirmOpen = ref(false)
+const clearChatStatus = ref('idle')
+const clearChatError = ref('')
+const clearChatTargetDocId = ref('')
+const clearChatTargetTitle = ref('')
+const removeWorkspaceRootConfirmOpen = ref(false)
+const removeWorkspaceRootStatus = ref('idle')
+const removeWorkspaceRootError = ref('')
+const removeWorkspaceRootTarget = ref({
+  id: '',
+  name: '',
+  path: '',
+  docCount: 0,
+})
+const workspaceDropActive = ref(false)
+const lastWorkspaceDropAt = ref(0)
+const ignoreNextTauriFileDrop = ref(false)
+const providerTestStatus = ref('idle')
+const providerTestMessage = ref('')
+const modelFetchStatus = ref('idle')
+const modelFetchMessage = ref('')
+let localProviderDraftCounter = 1
+let localModelDraftCounter = 0
+const providerForm = reactive(createEmptyProviderForm())
+const microsoftForm = reactive(createEmptyMicrosoftForm())
+const pdfTranslationRuntime = ref({
+  checked: false,
+  ok: false,
+  error: '',
+})
+
+let dragCleanup = null
+let translationTimer = null
+let translationPageRefreshTimer = null
+const translationSinglePageRefreshTimers = new Map()
+const translationPageLoadsInFlight = new Set()
+let providerTypeSyncSuspended = false
+let agentActivityUnlisten = null
+let answerDeltaUnlisten = null
+let reasoningDeltaUnlisten = null
+let askDocumentDoneUnlisten = null
+let askDocumentErrorUnlisten = null
+let documentIndexUnlisten = null
+let visualIndexUnlisten = null
+let translationJobUnlisten = null
+let pdfTranslationUnlisten = null
+let localMessageCounter = 0
+let fileDropUnlisten = null
+let fileDropIgnoreTimer = null
+const clearedActivityEventIds = new Map()
+const assistantStreamTargets = new Map()
+const visualIndexRuns = new Set()
+let assistantStreamDrainTimer = null
+
+function chatStreamDebugEnabled() {
+  return typeof window !== 'undefined'
+    && window.localStorage?.getItem(CHAT_STREAM_DEBUG_STORAGE_KEY) === '1'
+}
+
+function chatStreamDebug(label, payload = {}) {
+  if (!chatStreamDebugEnabled()) return
+  console.debug(`[chat-stream] ${label}`, payload)
+}
+
+const allDocs = computed(() => workspace.roots.flatMap((workspaceRoot) => (
+  workspaceRoot.folders.flatMap((folder) => folder.docs)
+)))
+const configuredChatModels = computed(() => (
+  modelProviders.value
+    .flatMap((provider) => (
+      (provider.models || [])
+        .filter((model) => model.enabled)
+        .map((model) => ({
+          id: makeChatModelOptionId(provider.id, model.key),
+          providerId: provider.id,
+          provider: provider.name,
+          providerType: provider.providerType,
+          modelKey: model.key,
+          modelId: model.modelId,
+          label: model.nickname || model.modelId,
+          capabilities: model.capabilities?.length ? model.capabilities : ['text'],
+        }))
+    ))
+))
+const chatModelConfigured = computed(() => configuredChatModels.value.length > 0)
+const availableChatModels = computed(() => (
+  chatModelConfigured.value
+    ? configuredChatModels.value
+    : [{
+      id: UNCONFIGURED_CHAT_MODEL_ID,
+      provider: '',
+      label: ui.value.modelNotConfigured,
+      capabilities: ['text'],
+      disabled: true,
+    }]
+))
+const emptyDocument = computed(() => ({
+  id: 'empty',
+  title: ui.value.noDocumentSelected,
+  shortTitle: ui.value.noDocumentSelected,
+  status: 'stale',
+  statusTone: 'danger',
+  treeReady: false,
+  lastOpened: { en: '', zh: '' },
+  pageCount: 0,
+  indexVersion: 0,
+  currentIndexVersion: 0,
+  visualIndexStatus: 'pending',
+  visualIndexVersion: 0,
+  visualIndexError: '',
+  indexProgress: {
+    percent: 0,
+    stage: '',
+    label: '',
+  },
+  currentPage: 1,
+  chatModelId: UNCONFIGURED_CHAT_MODEL_ID,
+  quoteBlockId: '',
+  chatReady: false,
+  translation: {
+    status: 'idle',
+    progress: 0,
+    total: 0,
+    failedBlocks: 0,
+    lang: translationLang.value,
+    error: '',
+    jobId: '',
+    providerKey: '',
+    phase: '',
+    currentPage: 0,
+    pdfJobId: '',
+    pdfStatus: 'idle',
+    pdfProgressPercent: 0,
+    monoPdfPath: '',
+    dualPdfPath: '',
+    pdfArtifactScope: '',
+    pdfArtifactPages: '',
+    partialArtifacts: {},
+    cached: false,
+    pages: {},
+  },
+  pages: [],
+  messages: [],
+}))
+const selectedDocument = computed(() => (
+  allDocs.value.find((doc) => doc.id === selectedDocId.value)
+  || allDocs.value[0]
+  || emptyDocument.value
+))
+const activeWorkspaceRoot = computed(() => {
+  if (!workspace.roots.length) return null
+  const selectedId = selectedDocId.value
+  return workspace.roots.find((workspaceRoot) => (
+    workspaceRoot.folders.some((folder) => folder.docs.some((doc) => doc.id === selectedId))
+  )) || workspace.roots[0]
+})
+const currentChatModel = computed(() => {
+  return availableChatModels.value.find((model) => model.id === selectedChatModelId.value)
+    || availableChatModels.value[0]
+    || null
+})
+const translationProviderNote = computed(() => {
+  if (translationProvider.value === 'google-web') return ui.value.translationProviderGoogleWebNote
+  if (translationProvider.value === 'microsoft') return ui.value.translationProviderMicrosoftNote
+  if (translationProvider.value === 'llm') return ui.value.translationProviderLlmNote
+  return ui.value.translationProviderPlaceholderNote
+})
+const hasModelProviderDraft = computed(() => (
+  Boolean(providerForm.id)
+  || providerForm.models.some((model) => String(model.modelId || '').trim())
+  || Boolean(String(providerForm.apiKey || '').trim())
+))
+const providerConnectionSummary = computed(() => {
+  const keyState = providerForm.hasApiKey
+    ? ui.value.apiKeySaved
+    : ui.value.apiKeyNotSaved
+  return `${providerForm.name || ui.value.newProvider} · ${providerForm.baseUrl || providerTypePreset.value.baseUrl} · ${keyState}`
+})
+
+function defaultConfiguredChatModelId() {
+  if (!chatModelConfigured.value) return UNCONFIGURED_CHAT_MODEL_ID
+  const hasEnabledModel = (provider) => (provider?.models || []).some((model) => model.enabled)
+  const defaultProvider = modelProviders.value.find((provider) => provider.isDefault && hasEnabledModel(provider))
+    || modelProviders.value.find(hasEnabledModel)
+  const defaultModelId = defaultProvider ? defaultChatModelOptionId(defaultProvider) : ''
+  return configuredChatModels.value.some((model) => model.id === defaultModelId)
+    ? defaultModelId
+    : configuredChatModels.value[0]?.id || UNCONFIGURED_CHAT_MODEL_ID
+}
+
+function resolveChatModelId(modelId) {
+  const candidate = String(modelId || '')
+  if (availableChatModels.value.some((model) => model.id === candidate)) return candidate
+  return defaultConfiguredChatModelId()
+}
+
+function applySelectedChatModel(modelId, doc = selectedDocument.value) {
+  const nextModelId = resolveChatModelId(modelId)
+  selectedChatModelId.value = nextModelId
+  if (doc && doc.id !== 'empty') doc.chatModelId = nextModelId
+  return nextModelId
+}
+
+watch(selectedDocument, (doc) => {
+  if (!doc) return
+  syncingTranslationLangFromDocument = true
+  translationLang.value = doc.translation.lang || 'zh'
+  nextTick(() => {
+    syncingTranslationLangFromDocument = false
+  })
+  viewMode.value = 'original'
+  activePage.value = doc.currentPage || doc.pages[0]?.page || 1
+  activeBlockId.value = doc.quoteBlockId || doc.pages[0]?.blocks?.[0]?.id || ''
+  activeCitationId.value = doc.messages?.flatMap((message) => message.citations || [])[0]?.id || ''
+  activeHighlight.value = null
+  hoveredLinkedBlock.value = null
+  lastSelection.value = null
+  activeTranslation.value = null
+  inlineTranslateOpen.value = false
+  applySelectedChatModel(doc.chatModelId, doc)
+  scheduleIdleTask(() => scheduleDocumentVisualIndex(doc), 1800)
+}, { immediate: true })
+
+watch(translationLang, (lang, previousLang) => {
+  const doc = selectedDocument.value
+  if (!doc) return
+  if (syncingTranslationLangFromDocument) {
+    doc.translation.lang = lang
+    return
+  }
+  if (previousLang && previousLang !== lang) {
+    resetDocumentTranslationState(doc, lang)
+    if (['translated', 'dual'].includes(viewMode.value)) viewMode.value = 'original'
+    return
+  }
+  doc.translation.lang = lang
+})
+
+watch(translationProvider, () => {
+  const doc = selectedDocument.value
+  if (!doc || doc.id === 'empty') return
+  resetDocumentTranslationState(doc, translationLang.value)
+  if (['translated', 'dual'].includes(viewMode.value)) viewMode.value = 'original'
+})
+
+watch([selectedDocId, activePage, translationLang, viewMode], () => {
+  if (viewMode.value !== 'dual') hoveredLinkedBlock.value = null
+  if (['translated', 'dual'].includes(viewMode.value)) {
+    scheduleActivePageTranslationLoad(0)
+  }
+})
+
+watch(selectedChatModelId, (modelId) => {
+  const nextModelId = resolveChatModelId(modelId)
+  if (nextModelId !== modelId) {
+    selectedChatModelId.value = nextModelId
+    return
+  }
+  if (selectedDocument.value && selectedDocument.value.id !== 'empty') {
+    selectedDocument.value.chatModelId = nextModelId
+  }
+})
+
+watch(availableChatModels, () => {
+  applySelectedChatModel(selectedDocument.value?.chatModelId || selectedChatModelId.value)
+})
+
+watch(() => providerForm.providerType, (providerType) => {
+  if (providerTypeSyncSuspended) return
+  applyProviderTypePreset(providerType)
+}, { flush: 'sync' })
+
+const providerTypePreset = computed(() => (
+  MODEL_PROVIDER_PRESETS[providerForm.providerType] || MODEL_PROVIDER_PRESETS['openai-compatible']
+))
+
+function createEmptyProviderForm() {
+  const preset = MODEL_PROVIDER_PRESETS['openai-compatible']
+  return {
+    id: '',
+    name: preset.name,
+    providerType: 'openai-compatible',
+    baseUrl: preset.baseUrl,
+    models: [createProviderModelDraft('openai-compatible')],
+    defaultModelKey: '',
+    apiKey: '',
+    enabled: true,
+    isDefault: true,
+    hasApiKey: false,
+  }
+}
+
+function createProviderModelDraft(providerType = 'openai-compatible', model = null) {
+  const preset = MODEL_PROVIDER_PRESETS[providerType] || MODEL_PROVIDER_PRESETS['openai-compatible']
+  const modelId = model?.modelId ?? preset.model ?? ''
+  return {
+    key: model?.key || `draft-model-${localModelDraftCounter++}`,
+    modelId,
+    nickname: model?.nickname ?? modelId,
+    capabilities: normalizeCapabilities(model?.capabilities ?? inferModelCapabilities(providerType, modelId)),
+    enabled: model?.enabled ?? true,
+    isDefaultChatModel: model?.isDefaultChatModel ?? true,
+  }
+}
+
+function createEmptyMicrosoftForm() {
+  return {
+    endpoint: 'https://api.cognitive.microsofttranslator.com',
+    region: '',
+    apiKey: '',
+    hasApiKey: false,
+  }
+}
+
+function resetProviderForm(provider = null) {
+  const next = provider || createEmptyProviderForm()
+  providerTypeSyncSuspended = true
+  providerForm.id = next.id || ''
+  providerForm.name = next.name || 'OpenAI Compatible'
+  providerForm.providerType = next.providerType || 'openai-compatible'
+  providerForm.baseUrl = next.baseUrl || 'https://api.openai.com/v1'
+  providerForm.models = ((next.models && next.models.length) ? next.models : [createProviderModelDraft(next.providerType || 'openai-compatible')])
+    .map((model) => createProviderModelDraft(next.providerType || 'openai-compatible', model))
+  providerForm.defaultModelKey = next.defaultModelKey || providerForm.models.find((model) => model.isDefaultChatModel)?.key || providerForm.models[0]?.key || ''
+  providerForm.apiKey = ''
+  providerForm.enabled = true
+  providerForm.isDefault = next.isDefault ?? true
+  providerForm.hasApiKey = Boolean(next.hasApiKey)
+  providerTypeSyncSuspended = false
+}
+
+function providerEditKey(provider) {
+  return provider?._editKey || (provider?.id ? `saved:${provider.id}` : '')
+}
+
+function cloneProviderForEdit(provider, editKey = '') {
+  const providerType = provider?.providerType || 'openai-compatible'
+  const next = provider || createEmptyProviderForm()
+  return {
+    _editKey: editKey || providerEditKey(provider) || `draft-provider-${localProviderDraftCounter++}`,
+    id: next.id || '',
+    name: next.name || 'OpenAI Compatible',
+    providerType,
+    baseUrl: next.baseUrl || 'https://api.openai.com/v1',
+    models: ((next.models && next.models.length) ? next.models : [createProviderModelDraft(providerType)])
+      .map((model) => createProviderModelDraft(providerType, model)),
+    defaultModelKey: next.defaultModelKey || next.models?.find((model) => model.isDefaultChatModel)?.key || next.models?.[0]?.key || '',
+    apiKey: next.apiKey || '',
+    enabled: true,
+    isDefault: next.isDefault ?? false,
+    hasApiKey: Boolean(next.hasApiKey),
+  }
+}
+
+function snapshotProviderForm(editKey = selectedProviderEditKey.value) {
+  return {
+    _editKey: editKey,
+    id: providerForm.id || '',
+    name: providerForm.name,
+    providerType: providerForm.providerType,
+    baseUrl: providerForm.baseUrl,
+    models: providerForm.models.map((model) => ({
+      key: model.key,
+      modelId: model.modelId,
+      nickname: model.nickname,
+      capabilities: [...normalizeCapabilities(model.capabilities)],
+      enabled: model.enabled,
+      isDefaultChatModel: model.key === providerForm.defaultModelKey,
+    })),
+    defaultModelKey: providerForm.defaultModelKey,
+    apiKey: providerForm.apiKey,
+    enabled: true,
+    isDefault: providerForm.isDefault,
+    hasApiKey: providerForm.hasApiKey,
+  }
+}
+
+function persistCurrentProviderEdit() {
+  if (!selectedProviderEditKey.value) return
+  const index = editableProviders.value.findIndex((provider) => providerEditKey(provider) === selectedProviderEditKey.value)
+  if (index === -1) return
+  editableProviders.value[index] = snapshotProviderForm()
+}
+
+function initializeEditableProviders() {
+  editableProviders.value = modelProviders.value.map((provider) => cloneProviderForEdit(provider, `saved:${provider.id}`))
+  let selected = editableProviders.value.find((provider) => provider.isDefault) || editableProviders.value[0]
+  if (!selected) {
+    selected = cloneProviderForEdit(createEmptyProviderForm(), `draft-provider-${localProviderDraftCounter++}`)
+    selected.name = `${ui.value.newProvider} 1`
+    selected.isDefault = true
+    editableProviders.value.push(selected)
+  } else if (!editableProviders.value.some((provider) => provider.isDefault)) {
+    selected.isDefault = true
+  }
+  selectedProviderEditKey.value = providerEditKey(selected)
+  resetProviderForm(selected)
+}
+
+function providerListName(provider) {
+  return providerEditKey(provider) === selectedProviderEditKey.value
+    ? providerForm.name || ui.value.newProvider
+    : provider.name || ui.value.newProvider
+}
+
+function providerListMeta(provider) {
+  if (!provider.id) return ui.value.unsavedProvider
+  return `${provider.providerType} · ${providerModelCountLabel(provider)}`
+}
+
+function ensureProviderSelectionAfterRemoval(preferredKey = '') {
+  let next = editableProviders.value.find((provider) => providerEditKey(provider) === preferredKey)
+    || editableProviders.value.find((provider) => provider.isDefault)
+    || editableProviders.value[0]
+  if (!next) {
+    next = cloneProviderForEdit(createEmptyProviderForm(), `draft-provider-${localProviderDraftCounter++}`)
+    next.name = `${ui.value.newProvider} 1`
+    next.isDefault = true
+    editableProviders.value = [next]
+  }
+  if (!editableProviders.value.some((provider) => provider.isDefault)) {
+    next.isDefault = true
+  }
+  selectedProviderEditKey.value = providerEditKey(next)
+  resetProviderForm(next)
+}
+
+async function removeEditableProvider(provider) {
+  const key = providerEditKey(provider)
+  if (!key || settingsStatus.value === 'saving') return
+  persistCurrentProviderEdit()
+
+  if (provider.id) {
+    const providerName = providerListName(provider)
+    if (!window.confirm(ui.value.deleteProviderConfirm.replace('{name}', providerName))) return
+    settingsStatus.value = 'saving'
+    settingsError.value = ''
+    providerTestStatus.value = 'idle'
+    providerTestMessage.value = ''
+    modelFetchStatus.value = 'idle'
+    modelFetchMessage.value = ''
+    try {
+      await invoke('delete_model_provider', { input: { id: provider.id } })
+      const preferredKey = selectedProviderEditKey.value === key ? '' : selectedProviderEditKey.value
+      await loadModelProviders()
+      const unsavedDrafts = editableProviders.value
+        .filter((item) => !item.id && providerEditKey(item) !== key)
+      editableProviders.value = [
+        ...modelProviders.value.map((item) => cloneProviderForEdit(item, `saved:${item.id}`)),
+        ...unsavedDrafts,
+      ]
+      ensureProviderSelectionAfterRemoval(preferredKey)
+      settingsStatus.value = 'saved'
+    } catch (err) {
+      settingsStatus.value = 'failed'
+      settingsError.value = err?.message || String(err)
+    }
+    return
+  }
+
+  editableProviders.value = editableProviders.value.filter((item) => providerEditKey(item) !== key)
+  if (selectedProviderEditKey.value !== key) return
+  ensureProviderSelectionAfterRemoval()
+}
+
+function applyProviderTypePreset(providerType) {
+  const preset = MODEL_PROVIDER_PRESETS[providerType] || MODEL_PROVIDER_PRESETS['openai-compatible']
+  providerForm.name = preset.name
+  providerForm.baseUrl = preset.baseUrl
+  if (providerForm.models.length === 1) {
+    const firstModel = providerForm.models[0]
+    firstModel.modelId = preset.model
+    firstModel.nickname = preset.model || ''
+    firstModel.capabilities = normalizeCapabilities(inferModelCapabilities(providerType, preset.model || ''))
+  }
+}
+
+function resetMicrosoftForm(settings = null) {
+  microsoftForm.endpoint = settings?.microsoftEndpoint || 'https://api.cognitive.microsofttranslator.com'
+  microsoftForm.region = settings?.microsoftRegion || ''
+  microsoftForm.apiKey = ''
+  microsoftForm.hasApiKey = Boolean(settings?.microsoftHasApiKey)
+}
+
+async function loadModelProviders() {
+  try {
+    modelProviders.value = await invoke('list_model_providers')
+    const defaultProvider = modelProviders.value.find((provider) => provider.isDefault)
+      || modelProviders.value[0]
+    if (defaultProvider) {
+      resetProviderForm(defaultProvider)
+      selectedChatModelId.value = defaultChatModelOptionId(defaultProvider)
+    } else {
+      selectedChatModelId.value = UNCONFIGURED_CHAT_MODEL_ID
+    }
+  } catch (err) {
+    console.warn('Failed to load model providers', err)
+  }
+}
+
+function defaultChatModelOptionId(provider) {
+  const defaultModel = (provider.models || []).find((model) => model.key === provider.defaultModelKey && model.enabled)
+    || (provider.models || []).find((model) => model.enabled)
+  return defaultModel ? makeChatModelOptionId(provider.id, defaultModel.key) : UNCONFIGURED_CHAT_MODEL_ID
+}
+
+function makeChatModelOptionId(providerId, modelKey) {
+  return `${providerId}::${modelKey}`
+}
+
+function parseChatModelOptionId(value) {
+  const [providerId, modelKey] = String(value || '').split('::')
+  return {
+    providerId: providerId || '',
+    modelKey: modelKey || '',
+  }
+}
+
+function normalizeCapabilities(capabilities) {
+  const next = Array.isArray(capabilities) ? capabilities.map((capability) => String(capability).trim().toLowerCase()).filter(Boolean) : []
+  const unique = [...new Set(['text', ...next.filter((capability) => MODEL_CAPABILITY_OPTIONS.includes(capability))])]
+  return unique
+}
+
+function inferModelCapabilities(providerType, modelId) {
+  const normalized = String(modelId || '').toLowerCase()
+  const capabilities = []
+  if (
+    normalized.includes('gpt-4o')
+    || normalized.includes('gpt-4.1')
+    || normalized.includes('gpt-5')
+    || normalized.includes('o3')
+    || normalized.includes('o4')
+    || normalized.includes('claude-3')
+    || normalized.includes('claude-4')
+    || normalized.includes('gemini')
+    || normalized.includes('vision')
+    || normalized.includes('vl')
+    || normalized.includes('pixtral')
+  ) {
+    capabilities.push('vision')
+  }
+  if (
+    normalized.includes('reason')
+    || normalized.includes('reasoner')
+    || normalized.includes('thinking')
+    || normalized.includes('o3')
+    || normalized.includes('o4')
+    || normalized.includes('gpt-5')
+  ) {
+    capabilities.push('reasoning')
+  }
+  if (['openai', 'openrouter', 'openai-compatible'].includes(providerType) || normalized.includes('deepseek')) {
+    capabilities.push('tool_use')
+  }
+  return capabilities
+}
+
+function isEmptyProviderModelDraft(model) {
+  return !String(model?.modelId || '').trim()
+    && !String(model?.nickname || '').trim()
+}
+
+function mergeFetchedProviderModels(modelIds) {
+  const existingIds = new Set(
+    providerForm.models
+      .map((model) => String(model.modelId || '').trim().toLowerCase())
+      .filter(Boolean),
+  )
+  const imported = []
+  modelIds.forEach((modelId) => {
+    const normalizedModelId = String(modelId || '').trim()
+    if (!normalizedModelId) return
+    const dedupeKey = normalizedModelId.toLowerCase()
+    if (existingIds.has(dedupeKey)) return
+    existingIds.add(dedupeKey)
+    imported.push(createProviderModelDraft(providerForm.providerType, {
+      modelId: normalizedModelId,
+      nickname: normalizedModelId,
+      capabilities: inferModelCapabilities(providerForm.providerType, normalizedModelId),
+      enabled: true,
+      isDefaultChatModel: false,
+    }))
+  })
+
+  if (!imported.length) return 0
+  const onlyEmptyPlaceholder = providerForm.models.length === 1 && isEmptyProviderModelDraft(providerForm.models[0])
+  providerForm.models = onlyEmptyPlaceholder
+    ? imported
+    : [...providerForm.models, ...imported]
+  if (!providerForm.defaultModelKey || onlyEmptyPlaceholder) {
+    providerForm.defaultModelKey = providerForm.models[0]?.key || ''
+  }
+  setDefaultProviderModel(providerForm.models.find((model) => model.key === providerForm.defaultModelKey) || providerForm.models[0])
+  return imported.length
+}
+
+async function fetchProviderModels() {
+  modelFetchStatus.value = 'fetching'
+  modelFetchMessage.value = ''
+  settingsStatus.value = 'idle'
+  settingsError.value = ''
+  providerTestStatus.value = 'idle'
+  providerTestMessage.value = ''
+  try {
+    const result = await invoke('fetch_provider_models', {
+      input: {
+        id: providerForm.id || null,
+        providerType: providerForm.providerType,
+        baseUrl: providerForm.baseUrl,
+        apiKey: providerForm.apiKey || null,
+      },
+    })
+    const importedCount = mergeFetchedProviderModels(result?.modelIds || [])
+    persistCurrentProviderEdit()
+    modelFetchStatus.value = 'succeeded'
+    modelFetchMessage.value = importedCount > 0
+      ? ui.value.fetchModelsImported.replace('{count}', importedCount)
+      : ui.value.fetchModelsNoNewModels
+  } catch (err) {
+    modelFetchStatus.value = 'failed'
+    modelFetchMessage.value = err?.message || String(err)
+  }
+}
+
+function addProviderModel() {
+  const model = createProviderModelDraft(providerForm.providerType)
+  model.isDefaultChatModel = false
+  providerForm.models.push(model)
+  if (!providerForm.defaultModelKey) {
+    providerForm.defaultModelKey = providerForm.models.at(-1)?.key || ''
+  }
+}
+
+function removeProviderModel(index) {
+  if (providerForm.models.length === 1) return
+  const removed = providerForm.models[index]
+  providerForm.models.splice(index, 1)
+  if (providerForm.defaultModelKey === removed?.key) {
+    providerForm.defaultModelKey = providerForm.models[0]?.key || ''
+  }
+}
+
+function setDefaultProviderModel(model) {
+  providerForm.defaultModelKey = model.key
+  providerForm.models.forEach((item) => {
+    item.isDefaultChatModel = item.key === model.key
+  })
+}
+
+function toggleModelCapability(model, capability) {
+  const current = normalizeCapabilities(model.capabilities)
+  if (current.includes(capability)) {
+    model.capabilities = current.filter((item) => item !== capability)
+  } else {
+    model.capabilities = normalizeCapabilities([...current, capability])
+  }
+}
+
+function modelCapabilityLabel(capability) {
+  if (capability === 'vision') return ui.value.capabilityVision
+  if (capability === 'reasoning') return ui.value.capabilityReasoning
+  if (capability === 'tool_use') return ui.value.capabilityToolUse
+  return capability
+}
+
+async function loadTranslationSettings() {
+  try {
+    const settings = await invoke('load_translation_settings')
+    translationProvider.value = settings.provider || 'google-web'
+    translationFallbackEnabled.value = settings.enableFallback ?? true
+    resetMicrosoftForm(settings)
+  } catch (err) {
+    console.warn('Failed to load translation settings', err)
+  }
+}
+
+async function openSettings() {
+  settingsOpen.value = true
+  settingsSection.value = 'chat'
+  settingsStatus.value = 'idle'
+  settingsError.value = ''
+  providerTestStatus.value = 'idle'
+  providerTestMessage.value = ''
+  modelFetchStatus.value = 'idle'
+  modelFetchMessage.value = ''
+  await loadTranslationSettings()
+  initializeEditableProviders()
+}
+
+function closeSettings() {
+  settingsOpen.value = false
+}
+
+function switchSettingsSection(section) {
+  persistCurrentProviderEdit()
+  settingsSection.value = section
+  settingsStatus.value = 'idle'
+  settingsError.value = ''
+  providerTestStatus.value = 'idle'
+  providerTestMessage.value = ''
+  modelFetchStatus.value = 'idle'
+  modelFetchMessage.value = ''
+}
+
+function providerModelCount(provider) {
+  return (provider.models || []).filter((model) => model.enabled).length
+}
+
+function providerModelCountLabel(provider) {
+  const count = providerModelCount(provider)
+  return count === 1 ? ui.value.oneModel : `${count} ${ui.value.modelsCount}`
+}
+
+function selectModelProvider(provider) {
+  const nextKey = providerEditKey(provider)
+  if (nextKey === selectedProviderEditKey.value) return
+  persistCurrentProviderEdit()
+  settingsStatus.value = 'idle'
+  settingsError.value = ''
+  providerTestStatus.value = 'idle'
+  providerTestMessage.value = ''
+  modelFetchStatus.value = 'idle'
+  modelFetchMessage.value = ''
+  selectedProviderEditKey.value = nextKey
+  resetProviderForm(provider)
+}
+
+function setDefaultModelProvider(provider) {
+  const nextKey = providerEditKey(provider)
+  if (!nextKey || settingsStatus.value === 'saving') return
+  persistCurrentProviderEdit()
+  editableProviders.value = editableProviders.value.map((item) => ({
+    ...item,
+    isDefault: providerEditKey(item) === nextKey,
+    enabled: true,
+  }))
+  const selected = editableProviders.value.find((item) => providerEditKey(item) === nextKey)
+  if (!selected) return
+  selectedProviderEditKey.value = nextKey
+  resetProviderForm(selected)
+  settingsStatus.value = 'idle'
+  settingsError.value = ''
+}
+
+function createNewProvider() {
+  persistCurrentProviderEdit()
+  const next = createEmptyProviderForm()
+  const draftNumber = localProviderDraftCounter++
+  next._editKey = `draft-provider-${draftNumber}`
+  next.name = `${ui.value.newProvider} ${draftNumber}`
+  next.isDefault = editableProviders.value.length === 0
+  const draft = cloneProviderForEdit(next, next._editKey)
+  editableProviders.value.push(draft)
+  selectedProviderEditKey.value = providerEditKey(draft)
+  resetProviderForm(next)
+}
+
+async function saveProviderSettings() {
+  persistCurrentProviderEdit()
+  settingsStatus.value = 'saving'
+  settingsError.value = ''
+  providerTestStatus.value = 'idle'
+  providerTestMessage.value = ''
+  modelFetchStatus.value = 'idle'
+  modelFetchMessage.value = ''
+  try {
+    const savingProviderKey = selectedProviderEditKey.value
+    let saved = null
+    if (translationProvider.value === 'llm' || hasModelProviderDraft.value) {
+      saved = await saveChatModelProvider()
+    }
+    await invoke('save_translation_settings', {
+      input: {
+        provider: translationProvider.value,
+        enableFallback: translationFallbackEnabled.value,
+        microsoftEndpoint: microsoftForm.endpoint,
+        microsoftRegion: microsoftForm.region,
+        microsoftApiKey: microsoftForm.apiKey || null,
+      },
+    })
+    await loadTranslationSettings()
+    await loadModelProviders()
+    if (saved) {
+      const unsavedDrafts = editableProviders.value
+        .filter((provider) => !provider.id && providerEditKey(provider) !== savingProviderKey)
+      editableProviders.value = [
+        ...modelProviders.value.map((provider) => cloneProviderForEdit(provider, `saved:${provider.id}`)),
+        ...unsavedDrafts,
+      ]
+      selectedProviderEditKey.value = `saved:${saved.id}`
+      resetProviderForm(saved)
+      selectedChatModelId.value = defaultChatModelOptionId(saved)
+    }
+    settingsStatus.value = 'saved'
+  } catch (err) {
+    settingsStatus.value = 'failed'
+    settingsError.value = err?.message || String(err)
+  }
+}
+
+async function saveChatModelProvider() {
+  return invoke('save_model_provider', {
+    input: {
+      id: providerForm.id || null,
+      name: providerForm.name,
+      providerType: providerForm.providerType,
+      baseUrl: providerForm.baseUrl,
+      models: providerForm.models.map((model) => ({
+        key: model.key || null,
+        modelId: model.modelId,
+        nickname: model.nickname,
+        capabilities: model.capabilities.filter((capability) => capability !== 'text'),
+        enabled: model.enabled,
+        isDefaultChatModel: model.key === providerForm.defaultModelKey,
+      })),
+      defaultModelKey: providerForm.defaultModelKey || null,
+      apiKey: providerForm.apiKey || null,
+      enabled: true,
+      isDefault: providerForm.isDefault,
+    },
+  })
+}
+
+async function testProviderSettings() {
+  if (translationProvider.value !== 'llm') {
+    providerTestStatus.value = 'testing'
+    providerTestMessage.value = ''
+    try {
+      const result = await invoke('test_translation_provider', {
+        input: {
+          provider: translationProvider.value,
+          microsoftEndpoint: microsoftForm.endpoint,
+          microsoftRegion: microsoftForm.region,
+          microsoftApiKey: microsoftForm.apiKey || null,
+        },
+      })
+      providerTestStatus.value = result.ok ? 'succeeded' : 'failed'
+      providerTestMessage.value = result.message || ui.value.providerTestSucceeded
+    } catch (err) {
+      providerTestStatus.value = 'failed'
+      providerTestMessage.value = err?.message || String(err)
+    }
+    return
+  }
+  providerTestStatus.value = 'testing'
+  providerTestMessage.value = ''
+  try {
+    const result = await runChatModelProviderTest()
+    providerTestStatus.value = result.ok ? 'succeeded' : 'failed'
+    providerTestMessage.value = result.message || ui.value.providerTestSucceeded
+  } catch (err) {
+    providerTestStatus.value = 'failed'
+    providerTestMessage.value = err?.message || String(err)
+  }
+}
+
+async function runChatModelProviderTest() {
+  return invoke('test_model_provider', {
+    input: {
+      id: providerForm.id || null,
+      name: providerForm.name,
+      providerType: providerForm.providerType,
+      baseUrl: providerForm.baseUrl,
+      modelId: providerForm.models.find((model) => model.key === providerForm.defaultModelKey)?.modelId
+        || providerForm.models.find((model) => model.enabled)?.modelId
+        || '',
+      apiKey: providerForm.apiKey || null,
+    },
+  })
+}
+
+async function testChatModelProvider() {
+  providerTestStatus.value = 'testing'
+  providerTestMessage.value = ''
+  try {
+    const result = await runChatModelProviderTest()
+    providerTestStatus.value = result.ok ? 'succeeded' : 'failed'
+    providerTestMessage.value = result.message || ui.value.providerTestSucceeded
+  } catch (err) {
+    providerTestStatus.value = 'failed'
+    providerTestMessage.value = err?.message || String(err)
+  }
+}
+
+function selectDoc(docId) {
+  selectedDocId.value = docId
+  loadChatHistoryForDocument(docId)
+}
+
+function handleCitationClick(citation) {
+  activePage.value = citation.page
+  activeBlockId.value = citation.blockId
+  activeCitationId.value = citation.id
+  activeHighlight.value = createHighlight(citation)
+}
+
+function nextLocalId(prefix) {
+  localMessageCounter += 1
+  return `${prefix}-${Date.now()}-${localMessageCounter}`
+}
+
+async function handleSend(payload, selection = null) {
+  const doc = selectedDocument.value
+  if (doc?.source === 'local' && !doc.chatHistoryLoaded) {
+    await loadChatHistoryForDocument(doc.id)
+  }
+  const payloadObject = typeof payload === 'string' ? null : payload
+  const messageText = typeof payload === 'string' ? payload : String(payload?.text || '')
+  const imageDataUrl = typeof payload === 'string' ? '' : String(payload?.imageDataUrl || '')
+  const selectedQuote = selection || (payloadObject?.ignoreSelection ? null : lastSelection.value)
+  const maxRetrievalSteps = Number(payloadObject?.maxRetrievalSteps || 20)
+  const retrievalAttemptOffset = Number(payloadObject?.retrievalAttemptOffset || 0)
+  if ((!doc.chatReady && !selectedQuote) || !chatModelConfigured.value) return
+  const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
+  if (!messageText.trim() && !imageDataUrl) return
+  let citations = selectedQuote
+    ? [{
+      id: nextLocalId('selection-c'),
+      label: '[1]',
+      page: selectedQuote.page,
+      blockId: selectedQuote.blockId || '',
+      quote: selectedQuote.text,
+      bboxList: selectedQuote.bboxList || [],
+      documentId: doc.id,
+      source: 'selection',
+      sourceType: selectedQuote.sourceType || 'selection',
+    }]
+    : []
+
+  const userMessageId = nextLocalId('u')
+  const assistantMessageId = nextLocalId('a')
+  const activityEventId = `agent-${assistantMessageId}`
+  chatStreamDebug('send', {
+    documentId: doc.id,
+    eventId: activityEventId,
+    modelProviderId: providerId,
+    modelKey,
+    questionLength: messageText.trim().length,
+    hasImage: Boolean(imageDataUrl),
+  })
+  doc.messages.push({
+    id: userMessageId,
+    role: 'user',
+    content: {
+      en: messageText,
+      zh: messageText,
+    },
+    citations: [],
+    imageDataUrl: imageDataUrl || null,
+  })
+  doc.messages.push({
+    id: assistantMessageId,
+    role: 'assistant',
+    content: {
+      en: '',
+      zh: '',
+    },
+    citations,
+    status: 'running',
+    activityEventId,
+    activityEvents: [],
+    reasoningContent: '',
+    originalQuestion: messageText.trim() || ui.value.imageOnlyPrompt,
+    maxRetrievalSteps,
+    retrievalAttemptOffset,
+  })
+  if (citations.length && selectedDocument.value.id === doc.id) {
+    const firstCitation = citations[0]
+    activeCitationId.value = firstCitation.id
+    activeHighlight.value = firstCitation.source === 'selection' ? null : createHighlight(firstCitation)
+  }
+  if (selectedQuote && lastSelection.value?.text === selectedQuote.text) {
+    lastSelection.value = null
+  }
+
+  try {
+    await invoke('ask_document_stream', {
+      input: {
+        documentId: doc.id,
+        question: messageText.trim() || ui.value.imageOnlyPrompt,
+        locale: locale.value,
+        modelProviderId: chatModelConfigured.value ? providerId : null,
+        modelKey: chatModelConfigured.value ? modelKey : null,
+        selectedText: selectedQuote?.text || '',
+        selectedBlockId: selectedQuote?.blockId || '',
+        selectedBboxList: selectedQuote?.bboxList || [],
+        imageDataUrl: imageDataUrl || null,
+        page: selectedQuote?.page || citations[0]?.page || activePage.value || null,
+        viewportContext: {
+          activePage: activePage.value || null,
+          visiblePages: activePage.value ? [activePage.value] : [],
+          selectionPreview: selectedQuote?.text ? selectedQuote.text.slice(0, 500) : '',
+          capturedAt: Date.now(),
+          sensitivity: 'normal',
+          source: 'pdf-viewer',
+        },
+        maxRetrievalSteps,
+        retrievalAttemptOffset,
+        activityEventId,
+      },
+    })
+  } catch (err) {
+    const assistantMessage = doc.messages.find((message) => message.id === assistantMessageId)
+    if (!assistantMessage) return
+    const error = err?.message || String(err)
+    assistantMessage.content = {
+      en: `${messages.en.chatFailed}: ${error}`,
+      zh: `${messages.zh.chatFailed}: ${error}`,
+    }
+    assistantMessage.status = 'failed'
+  }
+}
+
+function findMessageByActivityEventId(eventId) {
+  return allDocs.value
+    .flatMap((doc) => doc.messages || [])
+    .find((item) => item.activityEventId === eventId)
+}
+
+function messageDisplayText(message) {
+  if (!message) return ''
+  return typeof message.content === 'object'
+    ? (message.content[locale.value] || message.content.en || message.content.zh || '')
+    : String(message.content || '')
+}
+
+function setMessageDisplayText(message, text) {
+  message.content = {
+    en: text,
+    zh: text,
+  }
+}
+
+function assistantStreamState(eventId) {
+  if (!assistantStreamTargets.has(eventId)) {
+    assistantStreamTargets.set(eventId, {
+      target: '',
+      doneResult: null,
+      finalReplacement: '',
+    })
+  }
+  return assistantStreamTargets.get(eventId)
+}
+
+function queueAssistantStreamText(eventId, text) {
+  if (!eventId || !text || clearedActivityEventIds.has(eventId)) return
+  const message = findMessageByActivityEventId(eventId)
+  if (!message) return
+  const state = assistantStreamState(eventId)
+  state.target += text
+  chatStreamDebug('delta queued', {
+    eventId,
+    deltaLength: text.length,
+    targetLength: state.target.length,
+    visibleLength: messageDisplayText(message).length,
+    preview: text.slice(0, 24),
+  })
+  scheduleAssistantStreamDrain()
+}
+
+function markAssistantStreamDone(eventId, result) {
+  if (!eventId || clearedActivityEventIds.has(eventId)) return
+  const message = findMessageByActivityEventId(eventId)
+  if (!message) return
+  const state = assistantStreamState(eventId)
+  const finalAnswer = String(result?.answer || '')
+  if (finalAnswer) {
+    if (!state.target) {
+      state.target = finalAnswer
+    } else if (finalAnswer.startsWith(state.target)) {
+      state.target = finalAnswer
+    } else if (state.target !== finalAnswer) {
+      state.finalReplacement = finalAnswer
+    }
+  }
+  state.doneResult = result || {}
+  chatStreamDebug('done queued', {
+    eventId,
+    finalAnswerLength: finalAnswer.length,
+    targetLength: state.target.length,
+    finalReplacementLength: state.finalReplacement.length,
+    visibleLength: messageDisplayText(message).length,
+  })
+  scheduleAssistantStreamDrain()
+}
+
+function scheduleAssistantStreamDrain() {
+  if (assistantStreamDrainTimer) return
+  assistantStreamDrainTimer = window.setTimeout(() => {
+    assistantStreamDrainTimer = null
+    drainAssistantStreamTargets()
+  }, ASSISTANT_STREAM_DRAIN_MS)
+}
+
+function drainAssistantStreamTargets() {
+  let hasPendingText = false
+  for (const [eventId, state] of assistantStreamTargets.entries()) {
+    const message = findMessageByActivityEventId(eventId)
+    if (!message) {
+      if (state.doneResult) assistantStreamTargets.delete(eventId)
+      continue
+    }
+    const currentText = messageDisplayText(message)
+    if (!state.target.startsWith(currentText)) {
+      setMessageDisplayText(message, '')
+    }
+    const refreshedText = messageDisplayText(message)
+    if (state.target.length > refreshedText.length) {
+      const nextText = state.target.slice(0, refreshedText.length + ASSISTANT_STREAM_CHARS_PER_TICK)
+      setMessageDisplayText(message, nextText)
+      if (refreshedText.length === 0 || nextText.length === state.target.length || nextText.length % 20 === 0) {
+        chatStreamDebug('drain tick', {
+          eventId,
+          visibleLength: nextText.length,
+          targetLength: state.target.length,
+          doneQueued: Boolean(state.doneResult),
+        })
+      }
+      hasPendingText = true
+      continue
+    }
+    if (state.doneResult) {
+      if (state.finalReplacement) {
+        setMessageDisplayText(message, state.finalReplacement)
+      }
+      chatStreamDebug('drain complete', {
+        eventId,
+        finalVisibleLength: messageDisplayText(message).length,
+        finalReplacementLength: state.finalReplacement.length,
+      })
+      applyAskDocumentMetadata(message, state.doneResult)
+      assistantStreamTargets.delete(eventId)
+    }
+  }
+  if (hasPendingText || Array.from(assistantStreamTargets.values()).some((state) => state.doneResult)) {
+    scheduleAssistantStreamDrain()
+  }
+}
+
+function clearAssistantStreamState(eventId) {
+  assistantStreamTargets.delete(eventId)
+}
+
+function applyAskDocumentMetadata(message, result) {
+  message.claims = result?.claims || []
+  message.provider = result?.provider || ''
+  message.reasoningContent = result?.reasoningContent || message.reasoningContent || ''
+  message.citations = result?.citations?.length ? result.citations : message.citations || []
+  message.retrievalTrace = result?.retrievalTrace || null
+  message.activityEvents = result?.retrievalTrace?.events || message.activityEvents || []
+  message.canContinueRetrieval = false
+  message.continuationRequest = null
+  message.status = 'succeeded'
+}
+
+function applyAskDocumentResult(eventId, result) {
+  chatStreamDebug('done event received', {
+    eventId,
+    answerLength: String(result?.answer || '').length,
+    hasMessage: Boolean(findMessageByActivityEventId(eventId)),
+  })
+  if (clearedActivityEventIds.has(eventId)) {
+    const documentId = clearedActivityEventIds.get(eventId)
+    clearAssistantStreamState(eventId)
+    clearedActivityEventIds.delete(eventId)
+    invoke('clear_chat_turns', { input: { documentId, turnIds: [eventId] } }).catch((err) => {
+      console.warn(ui.value.clearChatHistoryFailed, err)
+    })
+    return
+  }
+  const message = findMessageByActivityEventId(eventId)
+  if (!message) return
+  markAssistantStreamDone(eventId, result)
+}
+
+async function loadChatHistoryForDocument(docId) {
+  const doc = allDocs.value.find((item) => item.id === docId)
+  if (!doc || doc.id === 'empty' || doc.chatHistoryLoaded) return
+  if (doc.chatHistoryLoading) return doc.chatHistoryLoading
+  const clearGeneration = Number(doc.chatHistoryClearGeneration || 0)
+  doc.chatHistoryLoading = (async () => {
+    try {
+      const history = await invoke('load_chat_turns', {
+        input: {
+          documentId: doc.id,
+          limit: 60,
+        },
+      })
+      if (Number(doc.chatHistoryClearGeneration || 0) !== clearGeneration) return
+      doc.chatHistoryLoaded = true
+      if (!Array.isArray(history) || !history.length) return
+      const historyMessages = history.map((message) => ({
+        id: message.id,
+        turnId: message.turnId || '',
+        role: message.role,
+        content: {
+          en: message.content || '',
+          zh: message.content || '',
+        },
+        provider: message.provider || '',
+        reasoningContent: message.reasoningContent || '',
+        citations: message.citations || [],
+        claims: message.claims || [],
+        retrievalTrace: message.retrievalTrace || null,
+        activityEvents: message.retrievalTrace?.events || [],
+        imageDataUrl: message.imageDataUrl || null,
+        status: 'succeeded',
+        canContinueRetrieval: false,
+        continuationRequest: null,
+        persisted: true,
+      }))
+      mergeChatHistoryMessages(doc, historyMessages)
+      if (selectedDocId.value === doc.id) {
+        activeCitationId.value = doc.messages.flatMap((message) => message.citations || [])[0]?.id || ''
+      }
+    } catch (err) {
+      doc.chatHistoryLoaded = false
+      console.warn('Failed to load chat history', err)
+    } finally {
+      doc.chatHistoryLoading = null
+    }
+  })()
+  return doc.chatHistoryLoading
+}
+
+function mergeChatHistoryMessages(doc, historyMessages) {
+  const existingMessages = Array.isArray(doc.messages) ? doc.messages : []
+  const onlyWelcome = existingMessages.length === 0
+    || existingMessages.every((message) => String(message.id || '').startsWith(`welcome-${doc.id}`))
+  if (onlyWelcome) {
+    doc.messages = historyMessages
+    return
+  }
+
+  const existingIds = new Set(existingMessages.map((message) => message.id))
+  const existingFingerprints = new Set(existingMessages.map(messageFingerprint))
+  const missingHistory = historyMessages.filter((message) => (
+    !existingIds.has(message.id) && !existingFingerprints.has(messageFingerprint(message))
+  ))
+  doc.messages = [...missingHistory, ...existingMessages]
+}
+
+function isChatMessage(message) {
+  return Boolean(message && typeof message === 'object')
+}
+
+function createWelcomeMessage(documentId) {
+  return {
+    id: `welcome-${documentId}-${Date.now()}`,
+    role: 'assistant',
+    content: {
+      en: '',
+      zh: '',
+    },
+    citations: [],
+  }
+}
+
+function messageFingerprint(message) {
+  if (!isChatMessage(message)) return ''
+  const content = typeof message.content === 'object'
+    ? (message.content.en || message.content.zh || '')
+    : String(message.content || '')
+  return `${message.role || ''}:${String(content).trim()}`
+}
+
+function chatTurnIdFromMessage(message) {
+  const turnId = String(message?.turnId || '').trim()
+  if (turnId) return turnId
+  const id = String(message?.id || '')
+  return id.endsWith(':user') || id.endsWith(':assistant')
+    ? id.slice(0, id.lastIndexOf(':'))
+    : ''
+}
+
+function openClearChatHistoryConfirm() {
+  const doc = selectedDocument.value
+  if (!doc || doc.id === 'empty') return
+  clearChatError.value = ''
+  clearChatStatus.value = 'idle'
+  clearChatTargetDocId.value = doc.id
+  clearChatTargetTitle.value = doc.shortTitle || doc.title || ''
+  clearChatConfirmOpen.value = true
+}
+
+function closeClearChatHistoryConfirm() {
+  clearChatConfirmOpen.value = false
+  clearChatError.value = ''
+  clearChatTargetDocId.value = ''
+  clearChatTargetTitle.value = ''
+}
+
+function resetClearChatConfirm() {
+  clearChatConfirmOpen.value = false
+  clearChatStatus.value = 'idle'
+  clearChatError.value = ''
+  clearChatTargetDocId.value = ''
+  clearChatTargetTitle.value = ''
+}
+
+function resetRemoveWorkspaceRootConfirm() {
+  removeWorkspaceRootConfirmOpen.value = false
+  removeWorkspaceRootStatus.value = 'idle'
+  removeWorkspaceRootError.value = ''
+  removeWorkspaceRootTarget.value = {
+    id: '',
+    name: '',
+    path: '',
+    docCount: 0,
+  }
+}
+
+function openRemoveWorkspaceRootConfirm(workspaceRoot = null) {
+  if (!workspaceRoot?.id || workspaceStatus.value === 'scanning') return
+  removeWorkspaceRootError.value = ''
+  removeWorkspaceRootStatus.value = 'idle'
+  removeWorkspaceRootTarget.value = {
+    id: workspaceRoot.id,
+    name: String(workspaceRoot.name?.en || workspaceRoot.name?.zh || workspaceRoot.path || ''),
+    path: workspaceRoot.path || '',
+    docCount: (workspaceRoot.folders || []).reduce((count, folder) => {
+      count += Array.isArray(folder.docs) ? folder.docs.length : 0
+      return count
+    }, 0),
+  }
+  removeWorkspaceRootConfirmOpen.value = true
+}
+
+function closeRemoveWorkspaceRootConfirm() {
+  resetRemoveWorkspaceRootConfirm()
+}
+
+function confirmRemoveWorkspaceRoot() {
+  const target = removeWorkspaceRootTarget.value
+  if (!target?.id || removeWorkspaceRootStatus.value === 'removing') return
+  removeWorkspaceRootStatus.value = 'removing'
+  removeWorkspaceRootError.value = ''
+
+  void (async () => {
+    try {
+      await invoke('remove_workspace_root', { rootId: target.id })
+
+      const removedRootId = target.id
+      let removedIndex = workspace.roots.findIndex((item) => item.id === removedRootId)
+      if (removedIndex < 0 && String(removedRootId) !== String(target.path)) {
+        removedIndex = workspace.roots.findIndex((item) => item.path === target.path)
+      }
+      if (removedIndex >= 0) {
+        workspace.roots.splice(removedIndex, 1)
+      }
+
+      if (!workspace.roots.length) {
+        selectedDocId.value = ''
+        inlineTranslateOpen.value = false
+        resetRemoveWorkspaceRootConfirm()
+        return
+      }
+
+      if (!allDocs.value.some((doc) => doc.id === selectedDocId.value)) {
+        selectedDocId.value = allDocs.value[0]?.id || ''
+      }
+
+      if (selectedDocId.value) {
+        loadChatHistoryForDocument(selectedDocId.value)
+      }
+
+      resetRemoveWorkspaceRootConfirm()
+    } catch (err) {
+      removeWorkspaceRootStatus.value = 'failed'
+      removeWorkspaceRootError.value = err?.message || String(err)
+    }
+  })()
+}
+
+function clearChatTurnsWithTimeout(documentId, turnIds) {
+  const clearPromise = invoke('clear_chat_turns', {
+    input: {
+      documentId,
+      turnIds,
+    },
+  })
+  let timeoutId = 0
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = window.setTimeout(() => {
+      const error = new Error('Local database is busy; persistence cleanup will continue in the background.')
+      error.name = 'ClearChatHistoryTimeout'
+      reject(error)
+    }, CLEAR_CHAT_HISTORY_TIMEOUT_MS)
+  })
+  clearPromise.catch((err) => {
+    console.warn(ui.value.clearChatHistoryFailed, err)
+  })
+  return Promise.race([clearPromise, timeoutPromise])
+    .finally(() => {
+      if (timeoutId) window.clearTimeout(timeoutId)
+    })
+}
+
+async function finishClearChatPersistence(doc, previousMessages, clearedEventIds, turnIds, clearWelcomeId) {
+  try {
+    await clearChatTurnsWithTimeout(doc.id, turnIds)
+  } catch (err) {
+    if (err?.name === 'ClearChatHistoryTimeout') {
+      console.warn(ui.value.clearChatHistoryFailed, err)
+      return
+    }
+    const stillShowingClearPlaceholder = doc.messages?.length === 1 && doc.messages[0]?.id === clearWelcomeId
+    if (stillShowingClearPlaceholder) doc.messages = previousMessages
+    clearedEventIds.forEach((eventId) => clearedActivityEventIds.delete(eventId))
+    clearChatTargetDocId.value = doc.id
+    clearChatTargetTitle.value = doc.shortTitle || doc.title || ''
+    clearChatStatus.value = 'failed'
+    clearChatError.value = err?.message || String(err)
+    clearChatConfirmOpen.value = true
+  }
+}
+
+function confirmClearChatHistory() {
+  const doc = allDocs.value.find((item) => item.id === clearChatTargetDocId.value)
+  if (!doc || doc.id === 'empty') {
+    closeClearChatHistoryConfirm()
+    return
+  }
+  if (clearChatStatus.value === 'clearing') return
+  clearChatStatus.value = 'clearing'
+  clearChatError.value = ''
+  doc.chatHistoryClearGeneration = Number(doc.chatHistoryClearGeneration || 0) + 1
+  const previousMessages = Array.isArray(doc.messages) ? doc.messages.filter(isChatMessage) : []
+  const clearedEventIds = previousMessages
+    .map((message) => message.activityEventId)
+    .filter(Boolean)
+  const turnIds = [...new Set(previousMessages.map(chatTurnIdFromMessage).filter(Boolean))]
+  clearedEventIds.forEach((eventId) => {
+    clearedActivityEventIds.set(eventId, doc.id)
+    clearAssistantStreamState(eventId)
+  })
+  doc.messages = [createWelcomeMessage(doc.id)]
+  const clearWelcomeId = doc.messages[0]?.id || ''
+  doc.chatHistoryLoaded = true
+  doc.chatHistoryLoading = null
+  if (selectedDocId.value === doc.id) {
+    activeCitationId.value = ''
+    activeBlockId.value = ''
+    activeHighlight.value = null
+  }
+  resetClearChatConfirm()
+  void finishClearChatPersistence(doc, previousMessages, clearedEventIds, turnIds, clearWelcomeId)
+}
+
+function applyAskDocumentError(eventId, errorMessage) {
+  if (clearedActivityEventIds.has(eventId)) {
+    clearAssistantStreamState(eventId)
+    clearedActivityEventIds.delete(eventId)
+    return
+  }
+  const message = findMessageByActivityEventId(eventId)
+  if (!message) return
+  clearAssistantStreamState(eventId)
+  const error = errorMessage || 'Unknown error'
+  message.content = {
+    en: `${messages.en.chatFailed}: ${error}`,
+    zh: `${messages.zh.chatFailed}: ${error}`,
+  }
+  message.status = 'failed'
+  if (!Array.isArray(message.activityEvents)) message.activityEvents = []
+  message.activityEvents.push({
+    type: 'error',
+    step: 'error',
+    status: 'error',
+    title: locale.value === 'zh' ? 'Agent 失败' : 'Agent failed',
+    summary: error,
+    detail: error,
+    ts: Date.now(),
+  })
+}
+
+function handleAgentActivity(payload) {
+  const eventId = payload?.eventId
+  const event = payload?.event
+  if (!eventId || !event) return
+  if (clearedActivityEventIds.has(eventId)) return
+  const message = findMessageByActivityEventId(eventId)
+  if (!message) return
+  if (!Array.isArray(message.activityEvents)) message.activityEvents = []
+  message.activityEvents.push(event)
+}
+
+function handleAnswerDelta(payload) {
+  const eventId = payload?.eventId
+  const delta = String(payload?.delta || '')
+  if (!eventId || !delta) return
+  if (clearedActivityEventIds.has(eventId)) return
+  chatStreamDebug('delta event received', {
+    eventId,
+    deltaLength: delta.length,
+    hasMessage: Boolean(findMessageByActivityEventId(eventId)),
+    preview: delta.slice(0, 24),
+  })
+  queueAssistantStreamText(eventId, delta)
+}
+
+function handleReasoningDelta(payload) {
+  const eventId = payload?.eventId
+  const delta = String(payload?.delta || '')
+  if (!eventId || !delta) return
+  if (clearedActivityEventIds.has(eventId)) return
+  const message = findMessageByActivityEventId(eventId)
+  if (!message) return
+  message.reasoningContent = `${message.reasoningContent || ''}${delta}`
+}
+
+function canOpenTranslatedView(doc = selectedDocument.value) {
+  const translation = doc?.translation
+  if (!translation) return false
+  if (['pending', 'queued', 'running', 'partial', 'succeeded', 'failed'].includes(translation.status)) {
+    return true
+  }
+  return translation.status === 'canceled' && Boolean(translation.monoPdfPath || translation.dualPdfPath)
+}
+
+function resetDocumentTranslationState(doc, lang = translationLang.value, options = {}) {
+  if (!doc?.translation) return
+  if (options.cancelLoads !== false) {
+    cancelQueuedTranslationPageLoads()
+  }
+  doc.translation.status = 'idle'
+  doc.translation.progress = 0
+  doc.translation.total = 0
+  doc.translation.failedBlocks = 0
+  doc.translation.lang = lang
+  doc.translation.error = ''
+  doc.translation.jobId = ''
+  doc.translation.providerKey = ''
+  doc.translation.phase = ''
+  doc.translation.currentPage = 0
+  doc.translation.pdfJobId = ''
+  doc.translation.pdfStatus = 'idle'
+  doc.translation.pdfProgressPercent = 0
+  doc.translation.monoPdfPath = ''
+  doc.translation.dualPdfPath = ''
+  doc.translation.pdfArtifactScope = ''
+  doc.translation.pdfArtifactPages = ''
+  doc.translation.partialArtifacts = {}
+  doc.translation.cached = false
+  doc.translation.pages = {}
+}
+
+function resetTranslationAfterIndexChange(doc) {
+  if (!doc?.translation) return
+  const lang = doc.translation.lang || translationLang.value
+  const isSelected = doc.id === selectedDocId.value
+  resetDocumentTranslationState(doc, lang, { cancelLoads: isSelected })
+  if (isSelected && ['translated', 'dual'].includes(viewMode.value)) {
+    viewMode.value = 'original'
+  }
+}
+
+function setViewMode(mode) {
+  if (['translated', 'dual'].includes(mode) && !canOpenTranslatedView()) return
+  viewMode.value = mode
+  if (mode !== 'dual') hoveredLinkedBlock.value = null
+  if (['translated', 'dual'].includes(mode)) {
+    loadActivePageTranslation()
+  }
+}
+
+function normalizePositivePage(value, fallback = 1) {
+  const page = Number(value)
+  return Number.isFinite(page) && page > 0 ? Math.floor(page) : fallback
+}
+
+function normalizeVisiblePages(value, fallbackPage) {
+  const pages = Array.isArray(value) ? value : []
+  const seen = new Set()
+  const normalized = []
+  for (const item of pages) {
+    const page = normalizePositivePage(item, 0)
+    if (!page || seen.has(page)) continue
+    seen.add(page)
+    normalized.push(page)
+  }
+  if (!normalized.length && fallbackPage) normalized.push(fallbackPage)
+  return normalized
+}
+
+function parsePdfArtifactPages(value, fallbackPage = 0) {
+  const pages = String(value || '')
+    .split(',')
+    .flatMap((part) => {
+      const token = part.trim()
+      if (!token) return []
+      const [startValue, endValue] = token.split('-').map((item) => Number(item.trim()))
+      if (!Number.isFinite(startValue) || startValue <= 0) return []
+      if (!Number.isFinite(endValue) || endValue <= startValue) return [Math.floor(startValue)]
+      const range = []
+      for (let page = Math.floor(startValue); page <= Math.floor(endValue); page += 1) {
+        range.push(page)
+      }
+      return range
+    })
+  if (!pages.length && fallbackPage) pages.push(fallbackPage)
+  return pages
+}
+
+function formatPdfTranslationError(message) {
+  const text = String(message || '')
+  if (locale.value !== 'zh' || !text.includes('Translation is unavailable')) return text
+  if (text.includes('TLS connection failed')) {
+    return '翻译不可用：Google Web / Microsoft(Bing) Web 网络检测未通过。检测到 TLS 连接失败，通常是当前网络、代理或服务端连接被中断导致。请检查代理/VPN，或切换到 LLM Provider。'
+  }
+  if (text.includes('Request timed out')) {
+    return '翻译不可用：Google Web / Microsoft(Bing) Web 网络检测超时。请检查网络或代理，稍后重试，或切换到 LLM Provider。'
+  }
+  if (text.includes('Authentication') || text.includes('not configured')) {
+    return '翻译不可用：翻译 Provider 鉴权失败或配置不完整。请检查 Provider 设置后重试。'
+  }
+  return '翻译不可用：Google Web / Microsoft(Bing) Web 均未通过网络检测。请检查网络/代理，或切换到 LLM Provider。'
+}
+
+async function handleTranslationAction(viewerContext = {}) {
+  const doc = selectedDocument.value
+  if (!doc?.chatReady) return
+  const translation = doc.translation
+  if (translation.status === 'succeeded') {
+    viewMode.value = viewMode.value === 'dual' ? 'original' : 'dual'
+    if (viewMode.value === 'dual') rightCollapsed.value = true
+    loadActivePageTranslation()
+    return
+  }
+
+  if (['pending', 'queued', 'running', 'partial'].includes(translation.status)) {
+    return
+  }
+
+  translation.error = ''
+  translation.status = 'pending'
+  translation.progress = 0
+  translation.total = 0
+  translation.failedBlocks = 0
+  const canTryPdfSidecar = doc.source === 'local'
+    && (!pdfTranslationRuntime.value.checked || pdfTranslationRuntime.value.ok)
+  translation.phase = canTryPdfSidecar ? 'checking_provider' : 'queued'
+  const priorityPage = normalizePositivePage(
+    viewerContext.currentPage || activePage.value || doc.currentPage,
+    1,
+  )
+  const visiblePages = normalizeVisiblePages(viewerContext.visiblePages, priorityPage)
+  const sidecarPageCount = normalizePositivePage(
+    viewerContext.pageCount || doc.pageCount,
+    0,
+  ) || undefined
+  translation.currentPage = priorityPage
+  translation.pdfJobId = ''
+  translation.pdfStatus = 'queued'
+  translation.pdfProgressPercent = 0
+  translation.monoPdfPath = ''
+  translation.dualPdfPath = ''
+  translation.pdfArtifactScope = ''
+  translation.pdfArtifactPages = ''
+  translation.cached = false
+  translation.pages = {}
+  viewMode.value = 'dual'
+  rightCollapsed.value = true
+
+  try {
+    const usePdfSidecar = canTryPdfSidecar
+    const result = usePdfSidecar
+      ? await invoke('start_pdf_translation', {
+        input: {
+          documentId: doc.id,
+          targetLang: translationLang.value,
+          sourceLang: 'en',
+          provider: translationProvider.value,
+          artifactMode: 'mono',
+          priorityPage,
+          visiblePages,
+          nearbyPageRadius: 1,
+          pageCount: sidecarPageCount,
+          forceRefresh: false,
+        },
+      })
+      : await invoke('start_document_translation', {
+        input: {
+          documentId: doc.id,
+          targetLang: translationLang.value,
+          provider: translationProvider.value,
+          scope: 'document',
+          priorityPage,
+          forceRefresh: false,
+        },
+      })
+    if (selectedDocId.value !== doc.id) return
+    if (usePdfSidecar) {
+      if (!isPdfTranslationJobRelevant(doc, result)) return
+      applyPdfTranslationJobResult(doc, result)
+    } else {
+      if (!isTranslationJobRelevant(doc, result)) return
+      applyTranslationJobResult(doc, result)
+    }
+    if (canOpenTranslatedView(doc) && ['translated', 'dual'].includes(viewMode.value)) {
+      scheduleActivePageTranslationLoad(0)
+    }
+  } catch (err) {
+    translation.status = 'failed'
+    translation.error = formatPdfTranslationError(err?.message || String(err))
+  }
+}
+
+async function cancelTranslation() {
+  const doc = selectedDocument.value
+  if (!doc) return
+  const translation = doc.translation
+  clearInterval(translationTimer)
+  const jobId = translation.jobId
+  const pdfJobId = translation.pdfJobId
+  const translationJobActive = ['pending', 'queued', 'running', 'partial'].includes(translation.status)
+  if (!translationJobActive || (!jobId && !pdfJobId)) return
+  if (translationJobActive) {
+    translation.status = 'canceled'
+    translation.pdfStatus = 'canceled'
+  }
+  try {
+    await Promise.resolve(
+      pdfJobId && translationJobActive
+        ? invoke('cancel_pdf_translation', { input: { jobId: pdfJobId } })
+        : jobId && translationJobActive
+        ? invoke('cancel_translation_job', { input: { jobId } })
+        : Promise.resolve(),
+    )
+  } catch (err) {
+    translation.error = err?.message || String(err)
+  }
+}
+
+function applyTranslationJobResult(doc, result) {
+  if (!doc || !result) return
+  doc.translation.jobId = result.jobId || doc.translation.jobId || ''
+  doc.translation.status = result.status || doc.translation.status || 'idle'
+  doc.translation.progress = Number(result.translatedBlocks || 0)
+  doc.translation.total = Number(result.totalBlocks || 0)
+  doc.translation.failedBlocks = Number(result.failedBlocks || 0)
+  doc.translation.providerKey = result.providerKey || doc.translation.providerKey || ''
+  doc.translation.phase = result.phase || doc.translation.phase || ''
+  doc.translation.currentPage = Number(result.currentPage || doc.translation.currentPage || 0)
+  doc.translation.error = result.error || ''
+}
+
+function applyPdfTranslationJobResult(doc, result) {
+  if (!doc || !result) return
+  doc.translation.pdfJobId = result.jobId || doc.translation.pdfJobId || ''
+  doc.translation.jobId = result.jobId || doc.translation.jobId || ''
+  doc.translation.status = result.status || doc.translation.status || 'idle'
+  doc.translation.pdfStatus = result.status || doc.translation.pdfStatus || 'idle'
+  doc.translation.progress = Number(result.progressPercent || 0)
+  doc.translation.total = 100
+  doc.translation.failedBlocks = 0
+  doc.translation.providerKey = result.providerKey || doc.translation.providerKey || ''
+  doc.translation.phase = result.phase || doc.translation.phase || ''
+  doc.translation.currentPage = Number(result.currentPage || doc.translation.currentPage || 0)
+  doc.translation.pdfProgressPercent = Number(result.progressPercent || 0)
+  doc.translation.monoPdfPath = result.monoPdfPath || doc.translation.monoPdfPath || ''
+  doc.translation.dualPdfPath = result.dualPdfPath || doc.translation.dualPdfPath || ''
+  doc.translation.pdfArtifactScope = result.artifactScope || doc.translation.pdfArtifactScope || ''
+  doc.translation.pdfArtifactPages = result.artifactPages || doc.translation.pdfArtifactPages || ''
+  if (result.artifactScope === 'partial' && result.monoPdfPath) {
+    const artifactPages = parsePdfArtifactPages(
+      result.artifactPages,
+      Number(result.currentPage || doc.translation.currentPage || 0),
+    )
+    const nextArtifacts = { ...(doc.translation.partialArtifacts || {}) }
+    for (const page of artifactPages) {
+      nextArtifacts[page] = {
+        monoPdfPath: result.monoPdfPath || '',
+        dualPdfPath: result.dualPdfPath || '',
+        artifactPages: result.artifactPages || String(page),
+      }
+    }
+    doc.translation.partialArtifacts = nextArtifacts
+  }
+  doc.translation.cached = Boolean(result.cached)
+  doc.translation.error = result.error || ''
+}
+
+function isTranslationJobRelevant(doc, payload) {
+  if (!doc?.translation || !payload) return false
+  if (payload.documentId && payload.documentId !== doc.id) return false
+  if (payload.targetLang && payload.targetLang !== doc.translation.lang) return false
+  if (doc.translation.jobId && payload.jobId && payload.jobId !== doc.translation.jobId) {
+    return false
+  }
+  if (!doc.translation.jobId && !['pending', 'queued', 'running'].includes(doc.translation.status)) {
+    return false
+  }
+  return true
+}
+
+function isPdfTranslationJobRelevant(doc, payload) {
+  if (!doc?.translation || !payload) return false
+  if (payload.documentId && payload.documentId !== doc.id) return false
+  if (payload.targetLang && payload.targetLang !== doc.translation.lang) return false
+  if (doc.translation.pdfJobId && payload.jobId && payload.jobId !== doc.translation.pdfJobId) {
+    return false
+  }
+  if (!doc.translation.pdfJobId && !['pending', 'queued', 'running', 'partial'].includes(doc.translation.status)) {
+    return false
+  }
+  return true
+}
+
+function handleTranslationJobEvent(payload) {
+  const documentId = payload?.documentId
+  if (!documentId) return
+  const doc = allDocs.value.find((item) => item.id === documentId)
+  if (!doc) return
+  if (!isTranslationJobRelevant(doc, payload)) return
+  applyTranslationJobResult(doc, payload)
+  if (doc.id === selectedDocId.value) {
+    const eventPage = Number(payload?.currentPage || 0)
+    const status = payload?.status || ''
+    if (['translated', 'dual'].includes(viewMode.value)) {
+      if (eventPage) {
+        scheduleTranslationPageLoad(documentId, payload?.jobId || '', eventPage)
+      } else if (['partial', 'succeeded', 'failed', 'canceled'].includes(status)) {
+        scheduleActivePageTranslationLoad()
+      }
+      return
+    }
+    const shouldRefreshPage = !eventPage
+      || eventPage === Number(activePage.value)
+      || ['partial', 'succeeded', 'failed', 'canceled'].includes(status)
+    if (shouldRefreshPage) scheduleActivePageTranslationLoad()
+  }
+}
+
+function handlePdfTranslationEvent(payload) {
+  const documentId = payload?.documentId
+  if (!documentId) return
+  const doc = allDocs.value.find((item) => item.id === documentId)
+  if (!doc) return
+  if (!isPdfTranslationJobRelevant(doc, payload)) return
+  applyPdfTranslationJobResult(doc, payload)
+  if (doc.id === selectedDocId.value && ['translated', 'dual'].includes(viewMode.value)) {
+    scheduleActivePageTranslationLoad()
+  }
+}
+
+function cancelQueuedTranslationPageLoads() {
+  for (const timer of translationSinglePageRefreshTimers.values()) {
+    clearTimeout(timer)
+  }
+  translationSinglePageRefreshTimers.clear()
+  translationPageLoadsInFlight.clear()
+}
+
+function scheduleTranslationPageLoad(documentId, jobId, pageNo, delay = 350) {
+  const normalizedPage = Number(pageNo)
+  if (!documentId || !normalizedPage) return
+  const key = `${documentId}:${jobId || 'unknown'}:${normalizedPage}`
+  const existing = translationSinglePageRefreshTimers.get(key)
+  if (existing) clearTimeout(existing)
+  const timer = window.setTimeout(() => {
+    translationSinglePageRefreshTimers.delete(key)
+    loadPageTranslation(normalizedPage, {
+      requireActivePage: false,
+      expectedDocumentId: documentId,
+      expectedJobId: jobId || '',
+    })
+  }, delay)
+  translationSinglePageRefreshTimers.set(key, timer)
+}
+
+function scheduleActivePageTranslationLoad(delay = 350) {
+  clearTimeout(translationPageRefreshTimer)
+  translationPageRefreshTimer = setTimeout(() => {
+    translationPageRefreshTimer = null
+    loadActivePageTranslation()
+  }, delay)
+}
+
+async function loadActivePageTranslation() {
+  const doc = selectedDocument.value
+  if (!doc || doc.id === 'empty' || !canOpenTranslatedView(doc)) return
+  const pageNo = Number(activePage.value || doc.currentPage || 1)
+  if (!pageNo) return
+  await loadPageTranslation(pageNo, { requireActivePage: true })
+}
+
+async function handleTranslationPageRequest(pageNo) {
+  const doc = selectedDocument.value
+  const normalizedPage = Number(pageNo)
+  if (!doc || doc.id === 'empty' || !normalizedPage || !canOpenTranslatedView(doc)) return
+  const cached = doc.translation.pages?.[normalizedPage]
+  if (isTranslationPageTerminal(cached)) return
+  await loadPageTranslation(normalizedPage, {
+    requireActivePage: false,
+    expectedDocumentId: doc.id,
+    expectedJobId: doc.translation.jobId,
+  })
+}
+
+async function handlePdfTranslationPagesRequest(payload = {}) {
+  const doc = selectedDocument.value
+  if (!doc || doc.id === 'empty') return
+  const jobId = payload.jobId || doc.translation.pdfJobId
+  if (!jobId || jobId !== doc.translation.pdfJobId) return
+  const pages = normalizeVisiblePages(payload.pages, 0)
+  if (!pages.length) return
+  try {
+    await invoke('request_pdf_translation_pages', {
+      input: {
+        jobId,
+        pages,
+      },
+    })
+  } catch (err) {
+    doc.translation.error = err?.message || String(err)
+  }
+}
+
+function isTranslationPageTerminal(pageTranslation) {
+  return ['succeeded', 'partial', 'failed'].includes(pageTranslation?.status)
+}
+
+async function loadPageTranslation(pageNo, options = {}) {
+  const requireActivePage = options.requireActivePage !== false
+  const doc = selectedDocument.value
+  if (!doc || doc.id === 'empty' || !canOpenTranslatedView(doc)) return
+  if (options.expectedDocumentId && doc.id !== options.expectedDocumentId) return
+  if (options.expectedJobId && doc.translation.jobId !== options.expectedJobId) return
+  if (!pageNo) return
+  const loadKey = [
+    doc.id,
+    doc.translation.jobId || 'no-job',
+    translationLang.value,
+    translationProvider.value,
+    pageNo,
+  ].join(':')
+  if (translationPageLoadsInFlight.has(loadKey)) return
+  translationPageLoadsInFlight.add(loadKey)
+  try {
+    const result = await invoke('get_page_translation', {
+      input: {
+        documentId: doc.id,
+        pageNo,
+        targetLang: translationLang.value,
+        provider: translationProvider.value,
+        providerKey: doc.translation.providerKey || '',
+      },
+    })
+    if (selectedDocId.value !== doc.id) return
+    if (options.expectedDocumentId && selectedDocId.value !== options.expectedDocumentId) return
+    if (options.expectedJobId && doc.translation.jobId !== options.expectedJobId) return
+    if (requireActivePage && Number(activePage.value) !== pageNo) return
+    doc.translation.pages = {
+      ...(doc.translation.pages || {}),
+      [pageNo]: {
+        ...result,
+      },
+    }
+  } catch (err) {
+    doc.translation.error = err?.message || String(err)
+  } finally {
+    translationPageLoadsInFlight.delete(loadKey)
+  }
+}
+
+function toggleInlineTranslate() {
+  inlineTranslateOpen.value = !inlineTranslateOpen.value
+}
+
+function setPage(page, blockId = '', source = null) {
+  activePage.value = page
+  if (source) hoveredLinkedBlock.value = null
+  if (blockId) {
+    activeBlockId.value = blockId
+    activeCitationId.value = ''
+  }
+  if (source?.bboxList?.length) {
+    activeHighlight.value = createHighlight({
+      page,
+      bboxList: source.bboxList,
+    })
+  } else if (source?.clearHighlight) {
+    activeHighlight.value = null
+  }
+  if (selectedDocument.value?.source === 'local') {
+    selectedDocument.value.currentPage = page
+    invoke('update_document_reading_state', {
+      input: {
+        documentId: selectedDocument.value.id,
+        page,
+        zoom: 1.18,
+      },
+    }).catch((err) => {
+      console.warn('Failed to save reading state', err)
+    })
+  }
+}
+
+function setLinkedBlockHover(block = null) {
+  hoveredLinkedBlock.value = normalizeLinkedBlockHover(block)
+}
+
+function handleDocumentLoaded(payload) {
+  if (!selectedDocument.value || selectedDocument.value.id === 'empty') return
+  selectedDocument.value.pageCount = payload.pageCount
+  selectedDocument.value.chatReady = selectedDocument.value.indexStatus === 'indexed'
+    && selectedDocument.value.indexVersion === selectedDocument.value.currentIndexVersion
+  selectedDocument.value.translation.error = ''
+  if (shouldQueueBackendIndex(selectedDocument.value)) {
+    enqueueBackendDocumentIndex(selectedDocument.value)
+  }
+}
+
+function handleDocumentLoadFailed(payload) {
+  if (!selectedDocument.value || selectedDocument.value.id === 'empty') return
+  selectedDocument.value.chatReady = false
+  selectedDocument.value.status = 'stale'
+  selectedDocument.value.statusTone = 'danger'
+  selectedDocument.value.indexStatus = 'stale'
+  selectedDocument.value.indexVersion = 0
+  selectedDocument.value.treeReady = false
+  selectedDocument.value.indexProgress = indexProgressState(0, '', '')
+  selectedDocument.value.translation.error = payload?.error || ''
+}
+
+function handleDocumentIndexStarted() {
+  if (!selectedDocument.value || selectedDocument.value.id === 'empty') return
+  resetTranslationAfterIndexChange(selectedDocument.value)
+  selectedDocument.value.status = 'indexing'
+  selectedDocument.value.statusTone = 'warning'
+  selectedDocument.value.indexStatus = 'indexing'
+  selectedDocument.value.indexVersion = 0
+  selectedDocument.value.treeReady = false
+  selectedDocument.value.chatReady = false
+  selectedDocument.value.indexProgress = indexProgressState(1, 'starting', '')
+}
+
+function handleDocumentIndexComplete(payload) {
+  if (!selectedDocument.value || selectedDocument.value.id === 'empty') return
+  resetTranslationAfterIndexChange(selectedDocument.value)
+  delete selectedDocument.value.indexBeforeReindex
+  selectedDocument.value.pageCount = payload.pageCount
+  selectedDocument.value.indexVersion = payload.indexVersion || selectedDocument.value.currentIndexVersion
+  selectedDocument.value.status = 'indexed'
+  selectedDocument.value.statusTone = 'success'
+  selectedDocument.value.indexStatus = 'indexed'
+  selectedDocument.value.treeReady = Boolean(payload.treeReady ?? true)
+  selectedDocument.value.chatReady = selectedDocument.value.treeReady
+  selectedDocument.value.indexProgress = indexProgressState(100, 'complete', '')
+  selectedDocument.value.visualIndexStatus = payload.visualIndexStatus || 'pending'
+  selectedDocument.value.visualIndexVersion = Number(payload.visualIndexVersion || 0)
+  selectedDocument.value.visualIndexError = payload.visualIndexError || ''
+  workspaceError.value = ''
+  scheduleDocumentVisualIndex(selectedDocument.value)
+}
+
+function handleDocumentIndexFailed(payload) {
+  if (!selectedDocument.value || selectedDocument.value.id === 'empty') return
+  resetTranslationAfterIndexChange(selectedDocument.value)
+  selectedDocument.value.status = 'stale'
+  selectedDocument.value.statusTone = 'danger'
+  selectedDocument.value.indexStatus = 'stale'
+  selectedDocument.value.indexVersion = 0
+  selectedDocument.value.treeReady = false
+  selectedDocument.value.indexProgress = indexProgressState(0, 'failed', '')
+  selectedDocument.value.visualIndexStatus = 'pending'
+  selectedDocument.value.visualIndexVersion = 0
+  selectedDocument.value.visualIndexError = ''
+  selectedDocument.value.translation.error = payload?.error || ''
+  workspaceError.value = payload?.error ? `Index failed: ${payload.error}` : ''
+}
+
+function scheduleDocumentVisualIndex(doc) {
+  if (!doc || doc.id === 'empty') return
+  if (doc.source !== 'local' || doc.indexStatus !== 'indexed' || !doc.treeReady) return
+  if (Number(doc.indexVersion || 0) !== Number(doc.currentIndexVersion || 0)) return
+  if (doc.visualIndexStatus === 'succeeded'
+    && Number(doc.visualIndexVersion || 0) === Number(doc.currentIndexVersion || 0)) {
+    return
+  }
+  if (visualIndexRuns.has(doc.id)) return
+  visualIndexRuns.add(doc.id)
+  doc.visualIndexStatus = 'running'
+  doc.visualIndexError = ''
+  invoke('enqueue_document_visual_index', { documentId: doc.id })
+    .then((result) => {
+      const target = allDocs.value.find((item) => item.id === result.documentId) || doc
+      target.visualIndexStatus = result.status || 'queued'
+      target.visualIndexVersion = Number(result.version || target.currentIndexVersion || 0)
+      target.visualIndexError = result.error || ''
+    })
+    .catch((err) => {
+      const target = allDocs.value.find((item) => item.id === doc.id) || doc
+      target.visualIndexStatus = 'failed'
+      target.visualIndexError = err?.message || String(err)
+      workspaceError.value = `Visual index failed: ${target.visualIndexError}`
+      visualIndexRuns.delete(doc.id)
+    })
+}
+
+function handleVisualIndexEvent(payload) {
+  const documentId = payload?.documentId
+  if (!documentId) return
+  const target = allDocs.value.find((item) => item.id === documentId)
+  if (!target) return
+  target.visualIndexStatus = payload.status || target.visualIndexStatus || 'pending'
+  target.visualIndexVersion = Number(payload.version || target.visualIndexVersion || 0)
+  target.visualIndexError = payload.error || ''
+  if (target.visualIndexStatus === 'failed' && target.visualIndexError) {
+    workspaceError.value = `Visual index failed: ${target.visualIndexError}`
+  }
+  if (['succeeded', 'failed', 'cancelled'].includes(target.visualIndexStatus)) {
+    visualIndexRuns.delete(documentId)
+  }
+}
+
+function handleSelection(selection) {
+  activePage.value = selection.page
+  activeBlockId.value = selection.blockId || ''
+  activeHighlight.value = null
+}
+
+function clearPendingSelection() {
+  lastSelection.value = null
+}
+
+function clearActiveTranslation() {
+  activeTranslation.value = null
+}
+
+function retryActiveTranslation() {
+  const source = activeTranslation.value?.source
+  if (!source) return
+  handleTranslateSelection(source, { forceRefresh: true })
+}
+
+function handleAskSelection(selection) {
+  const selected = selection || lastSelection.value
+  if (!selected) return
+  handleSelection(selected)
+  lastSelection.value = selected
+  if (rightCollapsed.value) rightCollapsed.value = false
+  nextTick(() => {
+    chatFocusRequest.value += 1
+  })
+}
+
+async function handleTranslateSelection(selection, options = {}) {
+  const selected = selection || lastSelection.value
+  if (!selected) return
+  lastSelection.value = null
+  activePage.value = selected.page
+  activeBlockId.value = selected.blockId || ''
+  activeHighlight.value = null
+  inlineTranslateOpen.value = false
+
+  const doc = selectedDocument.value
+  const translationId = nextLocalId('translation')
+  activeTranslation.value = {
+    id: translationId,
+    status: 'running',
+    source: selected,
+    targetLang: translationLang.value,
+    translatedText: '',
+    provider: '',
+    cached: false,
+    error: '',
+  }
+
+  try {
+    const result = await invoke('translate_text', {
+      input: {
+        documentId: doc.id,
+        page: selected.page,
+        blockId: selected.blockId || '',
+        text: selected.text,
+        targetLang: translationLang.value,
+        sourceVersion: selected.sourceVersion || '',
+        forceRefresh: Boolean(options.forceRefresh),
+      },
+    })
+    if (activeTranslation.value?.id !== translationId) return
+    activeTranslation.value = {
+      ...activeTranslation.value,
+      status: 'succeeded',
+      translatedText: result.translatedText || '',
+      provider: result.provider || '',
+      cached: Boolean(result.cached),
+      sourceHash: result.sourceHash || '',
+    }
+  } catch (err) {
+    if (activeTranslation.value?.id !== translationId) return
+    activeTranslation.value = {
+      ...activeTranslation.value,
+      status: 'failed',
+      error: err?.message || String(err),
+    }
+  }
+}
+
+function handleNoteSelection(selection) {
+  const selected = selection || lastSelection.value
+  if (!selected) return
+  handleSelection(selected)
+  handleSend(`${ui.value.noteCreated}\n\n"${selected.text}"`, selected)
+}
+
+function handleRealign() {
+  selectedDocument.value.messages.push({
+    id: nextLocalId('system'),
+    role: 'assistant',
+    content: {
+      en: messages.en.realignDone,
+      zh: messages.zh.realignDone,
+    },
+    citations: [],
+  })
+}
+
+function sanitizeWorkspaceDropPath(rawPath) {
+  if (!rawPath || typeof rawPath !== 'string') return ''
+  let path = rawPath.trim()
+  if (!path) return ''
+
+  if (path.startsWith('file://')) {
+    try {
+      const url = new URL(path)
+      path = decodeURIComponent(url.pathname || '')
+      if (url.hostname && !url.pathname) {
+        path = ''
+      }
+      if (/^\/[a-zA-Z]:\//.test(path)) {
+        path = path.slice(1)
+      }
+    } catch {
+      path = path.replace(/^file:\/\//i, '')
+    }
+  }
+
+  path = path.replace(/\\/g, '/')
+  try {
+    path = decodeURIComponent(path)
+  } catch {
+    // Keep the original escaped path if it cannot be decoded.
+  }
+  if (!path) return ''
+  if (/\.pdf$/i.test(path)) {
+    const lastSlash = path.lastIndexOf('/')
+    if (lastSlash > 0) path = path.slice(0, lastSlash)
+  }
+
+  const isWindowsDriveRoot = /^[A-Za-z]:\/$/.test(path)
+  const withoutTrailingSlash = path.endsWith('/') && path.length > 1 && !isWindowsDriveRoot
+    ? path.replace(/\/+$/g, '')
+    : path
+  return withoutTrailingSlash
+}
+
+function normalizeWorkspaceDropPaths(rawPaths) {
+  if (!Array.isArray(rawPaths)) return []
+  const existingRoots = new Set(
+    workspace.roots.map((root) => String(root.path || '').trim().replace(/\\/g, '/')).filter(Boolean),
+  )
+  const seen = new Set()
+  const normalized = []
+
+  for (const rawPath of rawPaths) {
+    const path = sanitizeWorkspaceDropPath(rawPath)
+    if (!path || seen.has(path) || existingRoots.has(path)) continue
+    seen.add(path)
+    normalized.push(path)
+  }
+
+  return normalized
+}
+
+function setWorkspaceDropActive(nextState) {
+  workspaceDropActive.value = Boolean(nextState)
+}
+
+async function addWorkspaceRootsFromDrop(rawPaths) {
+  if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return
+  const workspacePaths = normalizeWorkspaceDropPaths(rawPaths)
+  if (!workspacePaths.length) return false
+  ignoreNextTauriFileDrop.value = true
+  lastWorkspaceDropAt.value = Date.now()
+  workspaceStatus.value = 'scanning'
+  workspaceError.value = ''
+  const previousDocId = selectedDocId.value
+  try {
+    const snapshots = []
+    const errors = []
+    for (const folder of workspacePaths) {
+      try {
+        snapshots.push(await invoke('scan_workspace_pdfs', { root: folder }))
+      } catch (err) {
+        errors.push(err?.message || String(err))
+      }
+    }
+    if (errors.length) {
+      workspaceError.value = errors.length === 1
+        ? errors[0]
+        : `Some folders failed to scan (${errors.length}/${workspacePaths.length}).`
+    }
+    if (!snapshots.length) return false
+    snapshots.forEach(upsertWorkspaceRootSnapshot)
+    const previousDocStillExists = allDocs.value.some((doc) => doc.id === previousDocId)
+    selectedDocId.value = previousDocStillExists ? previousDocId : allDocs.value[0]?.id || ''
+    if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
+  } finally {
+    workspaceStatus.value = 'idle'
+    if (fileDropIgnoreTimer) clearTimeout(fileDropIgnoreTimer)
+    fileDropIgnoreTimer = setTimeout(() => {
+      ignoreNextTauriFileDrop.value = false
+    }, WORKSPACE_FILE_DROP_DEBOUNCE_MS)
+  }
+  return true
+}
+
+async function handleWorkspaceDrop(rawPaths = []) {
+  await addWorkspaceRootsFromDrop(rawPaths)
+}
+
+async function handleTauriWorkspaceDrop(payload = null) {
+  const now = Date.now()
+  if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return
+  let paths = []
+  if (Array.isArray(payload?.paths)) {
+    paths = payload.paths
+  } else if (Array.isArray(payload?.path)) {
+    paths = payload.path
+  } else if (typeof payload?.path === 'string') {
+    paths = [payload.path]
+  } else if (Array.isArray(payload)) {
+    paths = payload
+  } else if (typeof payload === 'string') {
+    paths = [payload]
+  }
+  if (!paths.length) return
+
+  if (ignoreNextTauriFileDrop.value && now - lastWorkspaceDropAt.value < WORKSPACE_FILE_DROP_DEBOUNCE_MS) {
+    ignoreNextTauriFileDrop.value = false
+    return
+  }
+  if (ignoreNextTauriFileDrop.value && now - lastWorkspaceDropAt.value >= WORKSPACE_FILE_DROP_DEBOUNCE_MS) {
+    ignoreNextTauriFileDrop.value = false
+  }
+  lastWorkspaceDropAt.value = now
+  await addWorkspaceRootsFromDrop(paths)
+}
+
+async function chooseWorkspace() {
+  workspaceStatus.value = 'choosing'
+  workspaceError.value = ''
+  try {
+    const folder = await invoke('choose_workspace')
+    if (!folder) {
+      workspaceStatus.value = 'idle'
+      return
+    }
+    await scanWorkspace(folder, { mode: 'add' })
+  } catch (err) {
+    workspaceStatus.value = 'failed'
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
+async function rescanWorkspace() {
+  if (!workspace.roots.length || workspaceStatus.value === 'choosing' || workspaceStatus.value === 'scanning') {
+    return
+  }
+  try {
+    await scanWorkspaces(workspace.roots.map((workspaceRoot) => workspaceRoot.path))
+  } catch (err) {
+    workspaceStatus.value = 'failed'
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
+async function openWorkspaceInFileManager(rootId = '') {
+  const workspaceRoot = workspace.roots.find((item) => item.id === rootId) || activeWorkspaceRoot.value
+  const path = String(workspaceRoot?.path || '').trim()
+  if (!path) return
+  workspaceError.value = ''
+  try {
+    await invoke('open_path_in_file_manager', { path })
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
+function toggleWorkspaceRoot(rootId) {
+  const workspaceRoot = workspace.roots.find((item) => item.id === rootId)
+  if (!workspaceRoot) return
+  workspaceRoot.collapsed = !workspaceRoot.collapsed
+}
+
+async function reindexSelectedDocument() {
+  const doc = selectedDocument.value
+  if (!doc || doc.id === 'empty' || workspaceStatus.value === 'scanning') return
+  await enqueueBackendDocumentIndex(doc, { force: true })
+}
+
+function shouldQueueBackendIndex(doc) {
+  if (!doc || doc.id === 'empty' || doc.source !== 'local') return false
+  if (doc.backendIndexFailed) return false
+  if (['queued', 'indexing'].includes(doc.indexStatus)) return false
+  if (doc.indexStatus !== 'indexed') return true
+  if (Number(doc.indexVersion || 0) !== Number(doc.currentIndexVersion || 0)) return true
+  return !doc.treeReady
+}
+
+async function enqueueBackendDocumentIndex(doc, options = {}) {
+  if (!doc || doc.id === 'empty') return
+  if (!options.force && !shouldQueueBackendIndex(doc)) return
+  try {
+    workspaceError.value = ''
+    doc.indexBeforeReindex = snapshotUsableIndexState(doc)
+    resetTranslationAfterIndexChange(doc)
+    doc.status = 'stale'
+    doc.statusTone = 'warning'
+    doc.indexStatus = 'indexing'
+    doc.indexVersion = 0
+    doc.treeReady = false
+    doc.chatReady = false
+    doc.indexProgress = indexProgressState(1, 'queued', '')
+    doc.backendIndexFailed = false
+    doc.translation.error = ''
+    const queued = await invoke('enqueue_document_reindex', { documentId: doc.id })
+    applyDocumentIndexPendingState(doc, queued)
+  } catch (err) {
+    doc.backendIndexFailed = true
+    workspaceError.value = err?.message || String(err)
+    await invoke('mark_document_stale', { documentId: doc.id }).catch(() => {})
+    viewerReloadKey.value += 1
+  }
+}
+
+function handleDocumentIndexEvent(payload) {
+  const documentId = payload?.documentId
+  if (!documentId) return
+  const target = allDocs.value.find((item) => item.id === documentId)
+  if (!target) return
+  if (payload.status === 'indexed') {
+    resetTranslationAfterIndexChange(target)
+    delete target.indexBeforeReindex
+    target.pageCount = payload.pageCount || target.pageCount
+    target.indexVersion = payload.indexVersion || target.currentIndexVersion
+    target.status = 'indexed'
+    target.statusTone = 'success'
+    target.indexStatus = 'indexed'
+    target.treeReady = Boolean(payload.treeReady)
+    target.chatReady = Boolean(payload.treeReady)
+    target.indexProgress = indexProgressState(
+      100,
+      payload.stage || 'complete',
+      payload.stageLabel || '',
+    )
+    target.visualIndexStatus = payload.visualIndexStatus || 'pending'
+    target.visualIndexVersion = Number(payload.visualIndexVersion || 0)
+    target.visualIndexError = payload.visualIndexError || ''
+    if (selectedDocId.value === documentId) workspaceError.value = ''
+    scheduleDocumentVisualIndex(target)
+    return
+  }
+  if (payload.status === 'failed') {
+    if (restoreUsableIndexState(target)) {
+      if (selectedDocId.value === documentId) workspaceError.value = ''
+      return
+    }
+    resetTranslationAfterIndexChange(target)
+    target.status = 'stale'
+    target.statusTone = 'danger'
+    target.indexStatus = 'stale'
+    target.treeReady = false
+    target.chatReady = false
+    target.indexProgress = indexProgressState(
+      0,
+      payload.stage || 'failed',
+      payload.stageLabel || '',
+    )
+    target.backendIndexFailed = true
+    workspaceError.value = payload.error
+      ? `Backend reindex failed, falling back to PDF.js: ${payload.error}`
+      : 'Backend reindex failed, falling back to PDF.js'
+    if (selectedDocId.value === documentId) {
+      viewerReloadKey.value += 1
+    }
+    return
+  }
+  applyDocumentIndexPendingState(target, payload)
+}
+
+function snapshotUsableIndexState(doc) {
+  if (!doc || doc.indexStatus !== 'indexed') return null
+  if (Number(doc.indexVersion || 0) !== Number(doc.currentIndexVersion || 0)) return null
+  if (!doc.treeReady) return null
+  return {
+    status: doc.status,
+    statusTone: doc.statusTone,
+    indexStatus: doc.indexStatus,
+    indexVersion: doc.indexVersion,
+    treeReady: doc.treeReady,
+    chatReady: doc.chatReady,
+    indexProgress: { ...(doc.indexProgress || {}) },
+    visualIndexStatus: doc.visualIndexStatus,
+    visualIndexVersion: doc.visualIndexVersion,
+    visualIndexError: doc.visualIndexError,
+  }
+}
+
+function restoreUsableIndexState(doc) {
+  const previous = doc?.indexBeforeReindex
+  delete doc.indexBeforeReindex
+  if (!previous) return false
+  doc.status = previous.status || 'indexed'
+  doc.statusTone = previous.statusTone || 'success'
+  doc.indexStatus = previous.indexStatus || 'indexed'
+  doc.indexVersion = previous.indexVersion || doc.currentIndexVersion
+  doc.treeReady = Boolean(previous.treeReady)
+  doc.chatReady = Boolean(previous.chatReady)
+  doc.indexProgress = indexProgressState(
+    previous.indexProgress?.percent ?? 100,
+    previous.indexProgress?.stage || 'complete',
+    previous.indexProgress?.label || '',
+  )
+  doc.visualIndexStatus = previous.visualIndexStatus || doc.visualIndexStatus || 'pending'
+  doc.visualIndexVersion = Number(previous.visualIndexVersion || doc.visualIndexVersion || 0)
+  doc.visualIndexError = previous.visualIndexError || ''
+  doc.backendIndexFailed = true
+  return true
+}
+
+function applyDocumentIndexPendingState(doc, payload = {}) {
+  const event = typeof payload === 'string' ? { status: payload } : (payload || {})
+  const wasIndexing = doc.indexStatus === 'indexing'
+  if (!wasIndexing) {
+    resetTranslationAfterIndexChange(doc)
+  }
+  const status = event.status
+  const normalized = status === 'queued' ? 'indexing' : status || 'indexing'
+  const previousPercent = Number(doc.indexProgress?.percent || 0)
+  const eventPercent = event.progressPercent == null
+    ? previousPercent
+    : Number(event.progressPercent)
+  const nextPercent = wasIndexing
+    ? Math.max(
+        Number.isFinite(previousPercent) ? previousPercent : 0,
+        Number.isFinite(eventPercent) ? eventPercent : 0,
+      )
+    : eventPercent
+  doc.status = 'indexing'
+  doc.statusTone = 'warning'
+  doc.indexStatus = normalized
+  doc.indexVersion = 0
+  doc.treeReady = false
+  doc.chatReady = false
+  doc.indexProgress = indexProgressState(
+    nextPercent,
+    event.stage || doc.indexProgress?.stage || normalized,
+    event.stageLabel || doc.indexProgress?.label || '',
+  )
+}
+
+function indexProgressState(percent, stage, label) {
+  const numeric = Number(percent)
+  return {
+    percent: Number.isFinite(numeric) ? Math.max(0, Math.min(100, Math.round(numeric))) : 0,
+    stage: String(stage || ''),
+    label: String(label || ''),
+  }
+}
+
+function workspaceRootName(path) {
+  const normalized = String(path || '').replace(/[/\\]+$/, '')
+  const name = normalized.split(/[/\\]/).filter(Boolean).pop()
+  return name || 'Workspace'
+}
+
+function createWorkspaceRoot(snapshot) {
+  const rootSnapshot = snapshot?.root || {}
+  const rootId = String(rootSnapshot.id || '')
+  const path = String(rootSnapshot.path || '')
+  const existing = workspace.roots.find((item) => item.id === rootId)
+  const docs = Array.isArray(snapshot?.documents)
+    ? snapshot.documents.map(createLocalDocument)
+    : []
+  return {
+    id: rootId,
+    name: {
+      en: workspaceRootName(path),
+      zh: workspaceRootName(path),
+    },
+    path,
+    collapsed: Boolean(existing?.collapsed),
+    folders: [{
+      id: `${rootId || path || 'workspace'}-pdfs`,
+      name: { en: 'PDFs', zh: 'PDF 文件' },
+      docs,
+    }],
+    recents: docs.slice(0, 5).map((doc) => doc.id),
+  }
+}
+
+function upsertWorkspaceRootSnapshot(snapshot) {
+  const nextRoot = createWorkspaceRoot(snapshot)
+  if (!nextRoot.id && !nextRoot.path) return { root: nextRoot, existed: false }
+  const existingIndex = workspace.roots.findIndex((item) => (
+    item.id === nextRoot.id || (nextRoot.path && item.path === nextRoot.path)
+  ))
+  const existed = existingIndex >= 0
+  if (existingIndex >= 0) {
+    workspace.roots.splice(existingIndex, 1, nextRoot)
+  } else {
+    workspace.roots.push(nextRoot)
+  }
+  return { root: nextRoot, existed }
+}
+
+async function scanWorkspace(folder, options = {}) {
+  const previousDocId = selectedDocId.value
+  workspaceStatus.value = 'scanning'
+  workspaceError.value = ''
+  const snapshot = await invoke('scan_workspace_pdfs', { root: folder })
+  const { root: workspaceRoot, existed } = upsertWorkspaceRootSnapshot(snapshot)
+  const docs = workspaceRoot.folders.flatMap((item) => item.docs)
+  const previousDocStillExists = allDocs.value.some((doc) => doc.id === previousDocId)
+  const shouldPreserveSelection = options.preserveSelection || options.mode === 'refresh' || existed || !docs.length
+  selectedDocId.value = shouldPreserveSelection && previousDocStillExists
+    ? previousDocId
+    : docs[0]?.id || ''
+  if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
+  workspaceStatus.value = 'idle'
+}
+
+async function scanWorkspaces(folders) {
+  const previousDocId = selectedDocId.value
+  workspaceStatus.value = 'scanning'
+  workspaceError.value = ''
+  const snapshots = []
+  for (const folder of folders) {
+    snapshots.push(await invoke('scan_workspace_pdfs', { root: folder }))
+  }
+  snapshots.forEach(upsertWorkspaceRootSnapshot)
+  const previousDocStillExists = allDocs.value.some((doc) => doc.id === previousDocId)
+  selectedDocId.value = previousDocStillExists
+    ? previousDocId
+    : allDocs.value[0]?.id || ''
+  if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
+  workspaceStatus.value = 'idle'
+}
+
+async function loadLastWorkspace() {
+  workspaceStatus.value = 'loading'
+  workspaceError.value = ''
+  try {
+    const snapshot = await invoke('load_last_workspace')
+    if (!Array.isArray(snapshot?.roots) || !snapshot.roots.length) {
+      workspaceStatus.value = 'idle'
+      return
+    }
+    workspace.roots = snapshot.roots.map((rootSnapshot) => createWorkspaceRoot(rootSnapshot))
+    selectedDocId.value = allDocs.value[0]?.id || ''
+    if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
+    workspaceStatus.value = 'idle'
+  } catch (err) {
+    workspaceStatus.value = 'failed'
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
+function createLocalDocument(pdf) {
+  const title = pdf.title || pdf.short_title || 'Untitled.pdf'
+  const indexStatus = pdf.index_status || 'pending'
+  const indexVersion = Number(pdf.index_version || 0)
+  const currentIndexVersion = Number(pdf.current_index_version || 0)
+  const indexFresh = indexStatus === 'indexed' && indexVersion === currentIndexVersion
+  return {
+    id: pdf.id,
+    source: 'local',
+    workspaceRootId: pdf.workspace_root_id || '',
+    path: pdf.path,
+    title,
+    shortTitle: pdf.short_title || title,
+    status: indexFresh ? 'indexed' : indexStatus === 'stale' ? 'stale' : 'indexing',
+    statusTone: indexFresh ? 'success' : indexStatus === 'stale' ? 'danger' : 'warning',
+    indexStatus: indexFresh ? 'indexed' : indexStatus,
+    indexVersion,
+    currentIndexVersion,
+    treeReady: indexFresh && Boolean(pdf.tree_ready),
+    backendIndexFailed: false,
+    visualIndexStatus: pdf.visual_index_status || 'pending',
+    visualIndexVersion: Number(pdf.visual_index_version || 0),
+    visualIndexError: pdf.visual_index_error || '',
+    indexProgress: indexProgressState(
+      indexFresh ? 100 : 0,
+      indexFresh ? 'complete' : indexStatus,
+      '',
+    ),
+    lastOpened: {
+      en: formatFileSize(pdf.size),
+      zh: formatFileSize(pdf.size),
+    },
+    pageCount: pdf.page_count || 0,
+    currentPage: pdf.current_page || 1,
+    chatModelId: chatModelConfigured.value
+      ? configuredChatModels.value[0]?.id || ''
+      : UNCONFIGURED_CHAT_MODEL_ID,
+    quoteBlockId: '',
+    chatReady: indexFresh,
+    translation: {
+      status: 'idle',
+      progress: 0,
+      total: 0,
+      failedBlocks: 0,
+      lang: translationLang.value,
+      error: '',
+      jobId: '',
+      providerKey: '',
+      phase: '',
+      currentPage: 0,
+      pdfJobId: '',
+      pdfStatus: 'idle',
+      pdfProgressPercent: 0,
+      monoPdfPath: '',
+      dualPdfPath: '',
+      pdfArtifactScope: '',
+      pdfArtifactPages: '',
+      partialArtifacts: {},
+      cached: false,
+      pages: {},
+    },
+    pages: [],
+    chatHistoryLoaded: false,
+    chatHistoryLoading: null,
+    messages: [],
+  }
+}
+
+function createHighlight(source) {
+  return {
+    page: source.page,
+    bboxList: source.bboxList || [],
+  }
+}
+
+function formatFileSize(size) {
+  if (!Number.isFinite(size) || size <= 0) return ''
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+function startResize(event) {
+  const startX = event.clientX
+  const startWidth = rightWidth.value
+  const onMove = (moveEvent) => {
+    const delta = startX - moveEvent.clientX
+    rightWidth.value = Math.max(420, Math.min(680, startWidth + delta))
+  }
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+    dragCleanup = null
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+  dragCleanup = onUp
+}
+
+function toggleCollapse() {
+  rightCollapsed.value = !rightCollapsed.value
+}
+
+function toggleLeftCollapse() {
+  leftCollapsed.value = !leftCollapsed.value
+}
+
+function markStartup(label) {
+  const markName = `lumenfolio:${label}`
+  performance.mark?.(markName)
+  if (label !== 'app-mounted') {
+    try {
+      performance.measure?.(`lumenfolio:main-to-${label}`, 'lumenfolio:main-start', markName)
+    } catch {
+      // Performance marks are diagnostic only.
+    }
+  }
+}
+
+function afterFirstPaint(task) {
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(task)
+  })
+}
+
+function scheduleIdleTask(task, timeout = 1200) {
+  if ('requestIdleCallback' in window) {
+    window.requestIdleCallback(task, { timeout })
+    return
+  }
+  window.setTimeout(task, Math.min(timeout, 250))
+}
+
+function loadLastWorkspaceAfterFirstPaint() {
+  return loadLastWorkspace().finally(() => {
+    markStartup('workspace-loaded')
+  })
+}
+
+async function probePdfTranslationRuntime() {
+  try {
+    const result = await invoke('probe_pdf_translation_runtime')
+    pdfTranslationRuntime.value = {
+      checked: true,
+      ok: Boolean(result?.ok),
+      error: result?.error || '',
+    }
+  } catch (err) {
+    pdfTranslationRuntime.value = {
+      checked: true,
+      ok: false,
+      error: err?.message || String(err),
+    }
+  }
+}
+
+onBeforeUnmount(() => {
+  clearInterval(translationTimer)
+  clearTimeout(translationPageRefreshTimer)
+  cancelQueuedTranslationPageLoads()
+  if (assistantStreamDrainTimer) clearTimeout(assistantStreamDrainTimer)
+  if (dragCleanup) dragCleanup()
+  if (agentActivityUnlisten) agentActivityUnlisten()
+  if (answerDeltaUnlisten) answerDeltaUnlisten()
+  if (reasoningDeltaUnlisten) reasoningDeltaUnlisten()
+  if (askDocumentDoneUnlisten) askDocumentDoneUnlisten()
+  if (askDocumentErrorUnlisten) askDocumentErrorUnlisten()
+  if (documentIndexUnlisten) documentIndexUnlisten()
+  if (visualIndexUnlisten) visualIndexUnlisten()
+  if (translationJobUnlisten) translationJobUnlisten()
+  if (pdfTranslationUnlisten) pdfTranslationUnlisten()
+  if (fileDropUnlisten) fileDropUnlisten()
+  if (fileDropIgnoreTimer) clearTimeout(fileDropIgnoreTimer)
+})
+
+onMounted(() => {
+  markStartup('app-mounted')
+  afterFirstPaint(() => {
+    markStartup('app-first-frame')
+    loadTranslationSettings()
+    loadLastWorkspaceAfterFirstPaint()
+    scheduleIdleTask(() => loadModelProviders(), 1200)
+    scheduleIdleTask(() => probePdfTranslationRuntime(), 2000)
+  })
+  listen('lumenfolio://agent-activity', (event) => {
+    handleAgentActivity(event.payload)
+  }).then((unlisten) => {
+    agentActivityUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for agent activity', err)
+  })
+  listen('lumenfolio://answer-delta', (event) => {
+    handleAnswerDelta(event.payload)
+  }).then((unlisten) => {
+    chatStreamDebug('listener ready', { event: 'lumenfolio://answer-delta' })
+    answerDeltaUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for answer stream', err)
+  })
+  listen('lumenfolio://reasoning-delta', (event) => {
+    handleReasoningDelta(event.payload)
+  }).then((unlisten) => {
+    reasoningDeltaUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for reasoning stream', err)
+  })
+  listen('lumenfolio://ask-document-done', (event) => {
+    applyAskDocumentResult(event.payload?.eventId, event.payload?.result)
+  }).then((unlisten) => {
+    chatStreamDebug('listener ready', { event: 'lumenfolio://ask-document-done' })
+    askDocumentDoneUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for ask completion', err)
+  })
+  listen('lumenfolio://ask-document-error', (event) => {
+    applyAskDocumentError(event.payload?.eventId, event.payload?.message)
+  }).then((unlisten) => {
+    askDocumentErrorUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for ask errors', err)
+  })
+  listen('lumenfolio://document-index', (event) => {
+    handleDocumentIndexEvent(event.payload)
+  }).then((unlisten) => {
+    documentIndexUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for document index events', err)
+  })
+  listen('lumenfolio://visual-index', (event) => {
+    handleVisualIndexEvent(event.payload)
+  }).then((unlisten) => {
+    visualIndexUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for visual index events', err)
+  })
+  listen('lumenfolio://translation-job', (event) => {
+    handleTranslationJobEvent(event.payload)
+  }).then((unlisten) => {
+    translationJobUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for translation job events', err)
+  })
+  listen('lumenfolio://pdf-translation', (event) => {
+    handlePdfTranslationEvent(event.payload)
+  }).then((unlisten) => {
+    pdfTranslationUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for PDF translation events', err)
+  })
+  listen('tauri://file-drop', (event) => {
+    void handleTauriWorkspaceDrop(event.payload)
+  }).then((unlisten) => {
+    fileDropUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for file drop events', err)
+  })
+})
+</script>
+
+<template>
+  <div class="app-shell" :class="{ 'left-collapsed': leftCollapsed }">
+    <WorkspaceSidebar
+      :roots="workspace.roots"
+      :selected-doc-id="selectedDocId"
+      :selected-doc="selectedDocument"
+      :filter="filter"
+      :scan-status="workspaceStatus"
+      :scan-error="workspaceError"
+      :collapsed="leftCollapsed"
+      :locale="locale"
+      :ui="ui"
+      :drop-active="workspaceDropActive"
+      @update:filter="filter = $event"
+      @select-doc="selectDoc"
+      @set-locale="locale = $event"
+      @add-folder="chooseWorkspace"
+      @rescan="rescanWorkspace"
+      @reindex-doc="reindexSelectedDocument"
+      @open-workspace="openWorkspaceInFileManager"
+      @delete-root="openRemoveWorkspaceRootConfirm"
+      @set-drop-active="setWorkspaceDropActive"
+      @workspace-drop="handleWorkspaceDrop"
+      @toggle-root="toggleWorkspaceRoot"
+      @open-settings="openSettings"
+      @toggle-collapse="toggleLeftCollapse"
+    />
+
+    <button
+      type="button"
+      class="left-collapse-btn"
+      :class="{ collapsed: leftCollapsed }"
+      :title="leftCollapsed ? ui.expand : ui.collapse"
+      :aria-label="leftCollapsed ? ui.expand : ui.collapse"
+      @click="toggleLeftCollapse"
+    >
+      {{ leftCollapsed ? '❯' : '❮' }}
+    </button>
+
+    <ReaderPane
+      :key="`${selectedDocument.id}:${viewerReloadKey}`"
+      :document="selectedDocument"
+      :translation-languages="translationLanguages"
+      :translation-lang="translationLang"
+      :view-mode="viewMode"
+      :active-page="activePage"
+      :active-block-id="activeBlockId"
+      :active-highlight="activeHighlight"
+      :hovered-linked-block="hoveredLinkedBlock"
+      :active-translation="activeTranslation"
+      :page-translation="selectedDocument.translation.pages?.[activePage] || null"
+      :selection-locked="Boolean(lastSelection)"
+      :inline-translate-open="inlineTranslateOpen"
+      :locale="locale"
+      :ui="ui"
+      @update:translationLang="translationLang = $event"
+      @translation-action="handleTranslationAction"
+      @cancel-translation="cancelTranslation"
+      @set-view-mode="setViewMode"
+      @toggle-inline-translate="toggleInlineTranslate"
+      @select-page="setPage"
+      @linked-block-hover="setLinkedBlockHover"
+      @request-translation-page="handleTranslationPageRequest"
+      @request-pdf-translation-pages="handlePdfTranslationPagesRequest"
+      @document-loaded="handleDocumentLoaded"
+      @document-load-failed="handleDocumentLoadFailed"
+      @document-index-started="handleDocumentIndexStarted"
+      @document-index-complete="handleDocumentIndexComplete"
+      @document-index-failed="handleDocumentIndexFailed"
+      @selection="handleSelection"
+      @ask-selection="handleAskSelection"
+      @translate-selection="handleTranslateSelection"
+      @note-selection="handleNoteSelection"
+      @close-translation="clearActiveTranslation"
+      @retry-translation="retryActiveTranslation"
+      @realign="handleRealign"
+    />
+
+    <div v-if="!rightCollapsed" class="drag-handle" @mousedown.prevent="startResize" />
+
+    <ChatPane
+      :document="selectedDocument"
+      :collapsed="rightCollapsed"
+      :width="rightWidth"
+      :active-citation-id="activeCitationId"
+      :available-models="availableChatModels"
+      :current-model-id="selectedChatModelId"
+      :current-model="currentChatModel"
+      :model-configured="chatModelConfigured"
+      :pending-selection="lastSelection"
+      :focus-request="chatFocusRequest"
+      :locale="locale"
+      :ui="ui"
+      @toggle-collapse="toggleCollapse"
+      @citation-click="handleCitationClick"
+      @update:model-id="selectedChatModelId = $event"
+      @clear-selection="clearPendingSelection"
+      @clear-history="openClearChatHistoryConfirm"
+      @send="handleSend"
+    />
+
+    <div v-if="clearChatConfirmOpen" class="confirm-backdrop" @click.self="closeClearChatHistoryConfirm">
+      <section class="confirm-modal" role="dialog" aria-modal="true" :aria-label="ui.clearChatHistory">
+        <div class="confirm-head">
+          <div class="confirm-title">{{ ui.clearChatHistory }}</div>
+          <button
+            class="confirm-close"
+            type="button"
+            :aria-label="ui.close"
+            :disabled="clearChatStatus === 'clearing'"
+            @click="closeClearChatHistoryConfirm"
+          >
+            ×
+          </button>
+        </div>
+        <div class="confirm-body">
+          <p>{{ ui.clearChatHistoryConfirm }}</p>
+          <div class="confirm-target">{{ clearChatTargetTitle }}</div>
+          <div v-if="clearChatStatus === 'failed'" class="confirm-error">
+            {{ ui.clearChatHistoryFailed }}: {{ clearChatError }}
+          </div>
+        </div>
+        <div class="confirm-actions">
+          <button
+            type="button"
+            class="confirm-btn"
+            :disabled="clearChatStatus === 'clearing'"
+            @click="closeClearChatHistoryConfirm"
+          >
+            {{ ui.cancel }}
+          </button>
+          <button
+            type="button"
+            class="confirm-btn danger"
+            :disabled="clearChatStatus === 'clearing'"
+            @click="confirmClearChatHistory"
+          >
+            {{ clearChatStatus === 'clearing' ? `${ui.clearChatHistoryShort}...` : ui.clearChatHistoryShort }}
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="removeWorkspaceRootConfirmOpen" class="confirm-backdrop" @click.self="closeRemoveWorkspaceRootConfirm">
+      <section class="confirm-modal" role="dialog" aria-modal="true" :aria-label="ui.removeWorkspace">
+        <div class="confirm-head">
+          <div class="confirm-title">{{ ui.removeWorkspace }}</div>
+          <button
+            class="confirm-close"
+            type="button"
+            :aria-label="ui.close"
+            :disabled="removeWorkspaceRootStatus === 'removing'"
+            @click="closeRemoveWorkspaceRootConfirm"
+          >
+            ×
+          </button>
+        </div>
+        <div class="confirm-body">
+          <p>{{ ui.removeWorkspaceConfirm.replace('{name}', removeWorkspaceRootTarget.name || removeWorkspaceRootTarget.path) }}</p>
+          <div class="confirm-target">{{ removeWorkspaceRootTarget.path }}</div>
+          <p v-if="removeWorkspaceRootTarget.docCount">
+            {{ ui.removeWorkspaceSummary }}: {{ removeWorkspaceRootTarget.docCount }}
+          </p>
+          <div v-if="removeWorkspaceRootStatus === 'failed'" class="confirm-error">
+            {{ ui.removeWorkspaceFailed }}: {{ removeWorkspaceRootError }}
+          </div>
+        </div>
+        <div class="confirm-actions">
+          <button
+            type="button"
+            class="confirm-btn"
+            :disabled="removeWorkspaceRootStatus === 'removing'"
+            @click="closeRemoveWorkspaceRootConfirm"
+          >
+            {{ ui.cancel }}
+          </button>
+          <button
+            type="button"
+            class="confirm-btn danger"
+            :disabled="removeWorkspaceRootStatus === 'removing'"
+            @click="confirmRemoveWorkspaceRoot"
+          >
+            {{ removeWorkspaceRootStatus === 'removing' ? `${ui.removeWorkspace}...` : ui.removeWorkspace }}
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="settingsOpen" class="settings-backdrop" @click.self="closeSettings">
+      <section class="settings-modal" role="dialog" aria-modal="true" :aria-label="ui.modelSettings">
+        <div class="settings-head">
+          <div>
+            <div class="settings-title">{{ ui.modelSettings }}</div>
+            <div class="settings-subtitle">{{ ui.providerConfig }}</div>
+          </div>
+          <button class="settings-close" type="button" :aria-label="ui.close" @click="closeSettings">×</button>
+        </div>
+
+        <div class="settings-layout">
+          <nav class="settings-nav" :aria-label="ui.settingsSections">
+            <button
+              type="button"
+              class="settings-nav-item"
+              :class="{ active: settingsSection === 'chat' }"
+              @click="switchSettingsSection('chat')"
+            >
+              <span>{{ ui.chatProvidersNav }}</span>
+              <small>{{ ui.chatProvidersNavHint }}</small>
+            </button>
+            <button
+              type="button"
+              class="settings-nav-item"
+              :class="{ active: settingsSection === 'translation' }"
+              @click="switchSettingsSection('translation')"
+            >
+              <span>{{ ui.translationNav }}</span>
+              <small>{{ ui.translationNavHint }}</small>
+            </button>
+          </nav>
+
+          <div v-if="settingsSection === 'chat'" class="settings-panel provider-settings-panel">
+            <aside class="provider-list">
+              <div class="provider-list-head">
+                <div>
+                  <div class="settings-section-title compact">{{ ui.chatProvidersNav }}</div>
+                  <div class="settings-note">{{ ui.chatProvidersListNote }}</div>
+                </div>
+                <button type="button" class="provider-add-btn" @click="createNewProvider">+</button>
+              </div>
+
+              <div
+                v-for="provider in editableProviders"
+                :key="providerEditKey(provider)"
+                class="provider-list-item"
+                :class="{ active: selectedProviderEditKey === providerEditKey(provider) }"
+              >
+                <button
+                  type="button"
+                  class="provider-list-select"
+                  @click="selectModelProvider(provider)"
+                >
+                  <span class="provider-list-name">{{ providerListName(provider) }}</span>
+                  <span class="provider-list-meta">{{ providerListMeta(provider) }}</span>
+                  <span v-if="provider.isDefault" class="provider-list-badge">{{ ui.defaultProviderShort }}</span>
+                </button>
+                <div class="provider-list-actions">
+                  <button
+                    v-if="!provider.isDefault"
+                    type="button"
+                    class="provider-list-default"
+                    :disabled="settingsStatus === 'saving'"
+                    :title="ui.setDefaultProvider"
+                    :aria-label="ui.setDefaultProvider"
+                    @click.stop="setDefaultModelProvider(provider)"
+                  >
+                    {{ ui.defaultShort }}
+                  </button>
+                  <button
+                    type="button"
+                    class="provider-list-delete"
+                    :disabled="settingsStatus === 'saving'"
+                    :title="ui.remove"
+                    :aria-label="ui.remove"
+                    @click.stop="removeEditableProvider(provider)"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+            </aside>
+
+            <section class="provider-detail">
+              <div class="provider-detail-head">
+                <div>
+                  <div class="settings-section-title compact">{{ ui.chatModelProviderSection }}</div>
+                  <div class="settings-note">{{ ui.chatModelProviderNote }}</div>
+                </div>
+                <div class="provider-summary">{{ providerConnectionSummary }}</div>
+              </div>
+
+              <div class="provider-form-grid">
+                <label class="settings-field">
+                  <span>{{ ui.providerName }}</span>
+                  <input v-model="providerForm.name" type="text" />
+                </label>
+
+                <label class="settings-field">
+                  <span>{{ ui.providerType }}</span>
+                  <select v-model="providerForm.providerType">
+                    <option value="openai-compatible">OpenAI-compatible</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="openrouter">OpenRouter</option>
+                  </select>
+                </label>
+
+                <label class="settings-field full">
+                  <span>{{ ui.baseUrl }}</span>
+                  <input v-model="providerForm.baseUrl" type="url" :placeholder="providerTypePreset.baseUrl" />
+                </label>
+
+                <label class="settings-field">
+                  <span>{{ ui.apiKey }}</span>
+                  <input v-model="providerForm.apiKey" type="password" :placeholder="ui.apiKeyPlaceholder" />
+                </label>
+
+                <div v-if="providerForm.hasApiKey" class="settings-note">{{ ui.apiKeySaved }}</div>
+              </div>
+
+              <div class="models-head">
+                <div>
+                  <div class="settings-section-title compact">{{ ui.availableModels }}</div>
+                  <div class="settings-note">{{ ui.modelsForProviderNote }}</div>
+                </div>
+                <div class="models-head-actions">
+                  <button
+                    type="button"
+                    class="settings-btn primary-subtle"
+                    :disabled="modelFetchStatus === 'fetching' || settingsStatus === 'saving' || !providerForm.baseUrl"
+                    @click="fetchProviderModels"
+                  >
+                    {{ modelFetchStatus === 'fetching' ? `${ui.fetchModels}...` : ui.fetchModels }}
+                  </button>
+                  <button
+                    type="button"
+                    class="settings-btn"
+                    :disabled="settingsStatus === 'saving'"
+                    @click="addProviderModel"
+                  >
+                    {{ ui.addManually }}
+                  </button>
+                </div>
+              </div>
+
+              <div class="model-table">
+                <div class="model-table-head" aria-hidden="true">
+                  <span>{{ ui.defaultShort }}</span>
+                  <span>{{ ui.modelNickname }}</span>
+                  <span>{{ ui.modelId }}</span>
+                  <span>{{ ui.modelCapabilities }}</span>
+                  <span>{{ ui.enabled }}</span>
+                  <span></span>
+                </div>
+
+                <article
+                  v-for="(model, index) in providerForm.models"
+                  :key="model.key || `draft-${index}`"
+                  class="model-row"
+                >
+                  <label class="model-default-cell" :title="ui.defaultChatModel">
+                    <input
+                      :checked="providerForm.defaultModelKey === model.key"
+                      type="radio"
+                      name="default-chat-model"
+                      @change="setDefaultProviderModel(model)"
+                    />
+                    <span>{{ index + 1 }}</span>
+                  </label>
+
+                  <label class="model-field-cell">
+                    <span>{{ ui.modelNickname }}</span>
+                    <input v-model="model.nickname" type="text" :placeholder="model.modelId || ui.modelNickname" />
+                  </label>
+
+                  <label class="model-field-cell model-id-cell">
+                    <span>{{ ui.modelId }}</span>
+                    <input v-model="model.modelId" type="text" :placeholder="providerTypePreset.model || 'gpt-4o / deepseek-chat'" />
+                  </label>
+
+                  <div class="model-capability-cell" :aria-label="ui.modelCapabilities">
+                    <span class="capability-chip fixed">{{ ui.capabilityText }}</span>
+                    <button
+                      v-for="capability in MODEL_CAPABILITY_OPTIONS"
+                      :key="`${model.key || index}-${capability}`"
+                      type="button"
+                      class="capability-chip"
+                      :class="{ active: model.capabilities.includes(capability) }"
+                      @click="toggleModelCapability(model, capability)"
+                    >
+                      {{ modelCapabilityLabel(capability) }}
+                    </button>
+                  </div>
+
+                  <label class="model-enabled-cell" :title="ui.enabled">
+                    <input v-model="model.enabled" type="checkbox" />
+                    <span>{{ ui.enabled }}</span>
+                  </label>
+
+                  <button
+                    type="button"
+                    class="model-remove-btn"
+                    :disabled="providerForm.models.length === 1"
+                    :title="ui.remove"
+                    :aria-label="ui.remove"
+                    @click="removeProviderModel(index)"
+                  >
+                    ×
+                  </button>
+                </article>
+              </div>
+
+              <div class="settings-inline-actions">
+                <button
+                  type="button"
+                  class="settings-btn"
+                  :disabled="providerTestStatus === 'testing' || settingsStatus === 'saving'"
+                  @click="testChatModelProvider"
+                >
+                  {{ ui.testChatModel }}
+                </button>
+              </div>
+            </section>
+          </div>
+
+          <div v-else class="settings-panel settings-body">
+            <div class="settings-section-title full">{{ ui.translationProviderSection }}</div>
+            <label class="settings-field full">
+              <span>{{ ui.translationProviderMode }}</span>
+              <select v-model="translationProvider">
+                <option value="google-web">{{ ui.translationProviderGoogleWeb }}</option>
+                <option value="microsoft">{{ ui.translationProviderMicrosoft }}</option>
+                <option value="llm">{{ ui.translationProviderLlm }}</option>
+                <option value="local-placeholder">{{ ui.translationProviderPlaceholder }}</option>
+              </select>
+            </label>
+
+            <div class="settings-note full">
+              {{ translationProviderNote }}
+            </div>
+
+            <label class="settings-check full">
+              <input v-model="translationFallbackEnabled" type="checkbox" />
+              <span>{{ ui.translationFallback }}</span>
+            </label>
+
+            <div class="settings-note full">
+              {{ ui.translationFallbackNote }}
+            </div>
+
+            <template v-if="translationProvider === 'microsoft'">
+              <label class="settings-field full">
+                <span>{{ ui.microsoftEndpoint }}</span>
+                <input
+                  v-model="microsoftForm.endpoint"
+                  type="url"
+                  placeholder="https://api.cognitive.microsofttranslator.com"
+                />
+              </label>
+
+              <label class="settings-field">
+                <span>{{ ui.microsoftRegion }}</span>
+                <input v-model="microsoftForm.region" type="text" placeholder="eastus" />
+              </label>
+
+              <label class="settings-field">
+                <span>{{ ui.apiKey }}</span>
+                <input v-model="microsoftForm.apiKey" type="password" :placeholder="ui.apiKeyPlaceholder" />
+              </label>
+
+              <div v-if="microsoftForm.hasApiKey" class="settings-note full">{{ ui.apiKeySaved }}</div>
+            </template>
+          </div>
+        </div>
+
+        <div
+          v-if="settingsStatus === 'saved' || settingsStatus === 'failed' || providerTestStatus !== 'idle' || modelFetchStatus !== 'idle'"
+          class="settings-message"
+          :class="{ failed: settingsStatus === 'failed' || providerTestStatus === 'failed' || modelFetchStatus === 'failed' }"
+        >
+          <template v-if="settingsStatus === 'failed'">
+            {{ ui.settingsSaveFailed }}: {{ settingsError }}
+          </template>
+          <template v-else-if="settingsStatus === 'saved'">
+            {{ ui.settingsSaved }}
+          </template>
+          <template v-else-if="providerTestStatus === 'testing'">
+            {{ ui.testConnection }}...
+          </template>
+          <template v-else-if="providerTestStatus === 'succeeded'">
+            {{ ui.providerTestSucceeded }}: {{ providerTestMessage }}
+          </template>
+          <template v-else-if="providerTestStatus === 'failed'">
+            {{ ui.providerTestFailed }}: {{ providerTestMessage }}
+          </template>
+          <template v-else-if="modelFetchStatus === 'fetching'">
+            {{ ui.fetchingModels }}
+          </template>
+          <template v-else-if="modelFetchStatus === 'succeeded'">
+            {{ modelFetchMessage }}
+          </template>
+          <template v-else-if="modelFetchStatus === 'failed'">
+            {{ ui.fetchModelsFailed }}: {{ modelFetchMessage }}
+          </template>
+        </div>
+
+        <div class="settings-actions">
+          <button type="button" class="settings-btn" @click="closeSettings">{{ ui.close }}</button>
+          <button
+            type="button"
+            class="settings-btn"
+            :disabled="providerTestStatus === 'testing' || settingsStatus === 'saving'"
+            @click="testProviderSettings"
+          >
+            {{ ui.testConnection }}
+          </button>
+          <button
+            type="button"
+            class="settings-btn primary"
+            :disabled="settingsStatus === 'saving'"
+            @click="saveProviderSettings"
+          >
+            {{ settingsStatus === 'saving' ? `${ui.save}...` : ui.save }}
+          </button>
+        </div>
+      </section>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.app-shell {
+  height: 100vh;
+  background: var(--bg-app);
+  display: flex;
+  overflow: hidden;
+}
+
+.async-panel-loading {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-panel);
+}
+
+.async-panel-loading::before {
+  content: "";
+  position: absolute;
+  inset: 18px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.055), transparent),
+    rgba(255, 255, 255, 0.025);
+  background-size: 220% 100%;
+  animation: async-panel-shimmer 1.25s ease-in-out infinite;
+}
+
+@keyframes async-panel-shimmer {
+  0% {
+    background-position: 180% 0;
+  }
+
+  100% {
+    background-position: -80% 0;
+  }
+}
+
+.left-collapse-btn {
+  width: 24px;
+  height: 34px;
+  margin-left: -12px;
+  margin-right: -12px;
+  align-self: flex-start;
+  margin-top: 5px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  cursor: pointer;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  line-height: 1;
+}
+
+.left-collapse-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.075);
+}
+
+.drag-handle {
+  width: 10px;
+  margin-left: -5px;
+  cursor: col-resize;
+  position: relative;
+  z-index: 3;
+}
+
+.drag-handle::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 14px;
+  bottom: 14px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateX(-50%);
+}
+
+.settings-backdrop,
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.confirm-backdrop {
+  z-index: 22;
+}
+
+.confirm-modal {
+  width: min(430px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background: #202329;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4);
+}
+
+.confirm-head,
+.confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.confirm-head {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.confirm-title {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 760;
+}
+
+.confirm-close {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 18px;
+}
+
+.confirm-close:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.confirm-body {
+  padding: 18px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.confirm-body p {
+  margin: 0;
+}
+
+.confirm-target {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.confirm-error {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 117, 117, 0.28);
+  background: rgba(255, 89, 89, 0.1);
+  color: #ffc0c0;
+  font-size: 12px;
+}
+
+.confirm-actions {
+  justify-content: flex-end;
+  border-top: 1px solid var(--line-soft);
+}
+
+.confirm-btn {
+  min-width: 86px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 8px 13px;
+  font-weight: 700;
+}
+
+.confirm-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.confirm-btn.danger {
+  border-color: rgba(255, 128, 128, 0.38);
+  background: rgba(255, 91, 91, 0.15);
+  color: #ffd2d2;
+}
+
+.confirm-btn.danger:hover:not(:disabled) {
+  background: rgba(255, 91, 91, 0.24);
+}
+
+.confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+.settings-modal {
+  width: min(1080px, 100%);
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 16px;
+  background: #202329;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+}
+
+.settings-head,
+.settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px;
+}
+
+.settings-head {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.settings-title {
+  font-size: 17px;
+  font-weight: 750;
+  color: var(--text-primary);
+}
+
+.settings-subtitle {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.settings-close {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 20px;
+}
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  min-height: 560px;
+}
+
+.settings-nav {
+  padding: 16px 12px;
+  border-right: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.018);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-nav-item {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 10px 12px;
+  text-align: left;
+}
+
+.settings-nav-item span,
+.settings-nav-item small {
+  display: block;
+}
+
+.settings-nav-item span {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.settings-nav-item small {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.settings-nav-item.active {
+  border-color: rgba(106, 169, 255, 0.24);
+  background: rgba(106, 169, 255, 0.1);
+}
+
+.settings-panel {
+  min-width: 0;
+}
+
+.settings-body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 20px;
+}
+
+.provider-settings-panel {
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+  min-width: 0;
+}
+
+.provider-list {
+  padding: 18px 14px;
+  border-right: 1px solid var(--line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.provider-list-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.settings-section-title.compact {
+  padding-top: 0;
+  margin-top: 0;
+  border-top: none;
+}
+
+.provider-add-btn {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.provider-list-item {
+  position: relative;
+  width: 100%;
+  min-height: 72px;
+  border-radius: 12px;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--text-secondary);
+  padding: 0;
+  overflow: hidden;
+}
+
+.provider-list-item.active {
+  border-color: rgba(106, 169, 255, 0.34);
+  background: rgba(106, 169, 255, 0.1);
+}
+
+.provider-list-select {
+  width: 100%;
+  min-height: 70px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 12px 74px 12px 12px;
+  text-align: left;
+}
+
+.provider-list-actions {
+  position: absolute;
+  top: 9px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.provider-list-default,
+.provider-list-delete {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.provider-list-default {
+  min-height: 26px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.provider-list-default:hover:not(:disabled) {
+  border-color: rgba(106, 169, 255, 0.28);
+  background: rgba(106, 169, 255, 0.1);
+  color: var(--accent);
+}
+
+.provider-list-delete {
+  width: 26px;
+  height: 26px;
+  border-radius: 999px;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.provider-list-delete:hover:not(:disabled) {
+  border-color: rgba(255, 179, 179, 0.26);
+  background: rgba(255, 99, 99, 0.08);
+  color: #ffb3b3;
+}
+
+.provider-list-default:disabled,
+.provider-list-delete:disabled {
+  cursor: not-allowed;
+  opacity: 0.3;
+}
+
+.provider-list-name,
+.provider-list-meta {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-list-name {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.provider-list-meta {
+  margin-top: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.provider-list-badge {
+  display: inline-flex;
+  margin-top: 8px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(106, 169, 255, 0.14);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.provider-detail {
+  min-width: 0;
+  padding: 20px;
+}
+
+.provider-detail-head,
+.models-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.models-head-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.provider-summary {
+  max-width: 360px;
+  min-height: 30px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text-muted);
+  padding: 7px 10px;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding-bottom: 18px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.settings-field,
+.settings-check {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.settings-field.full,
+.settings-check.full,
+.settings-note.full {
+  grid-column: 1 / -1;
+}
+
+.settings-section-title.full,
+.settings-inline-actions.full,
+.model-table.full {
+  grid-column: 1 / -1;
+}
+
+.settings-section-title {
+  padding-top: 6px;
+  margin-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.settings-field span,
+.settings-check span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.settings-field input,
+.settings-field select {
+  width: 100%;
+  min-height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  padding: 0 12px;
+  outline: none;
+}
+
+.settings-check {
+  flex-direction: row;
+  align-items: center;
+  min-height: 32px;
+}
+
+.settings-check.inline {
+  min-height: 28px;
+}
+
+.settings-check input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.settings-note,
+.settings-message {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.settings-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.model-table {
+  display: flex;
+  flex-direction: column;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.model-table-head,
+.model-row {
+  display: grid;
+  grid-template-columns: 48px minmax(140px, 1fr) minmax(190px, 1.1fr) minmax(260px, 1.25fr) 48px 34px;
+  gap: 8px;
+  align-items: center;
+  min-width: 760px;
+}
+
+.model-table-head {
+  min-height: 36px;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.model-row {
+  min-height: 68px;
+  padding: 10px;
+}
+
+.model-row + .model-row {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.model-default-cell,
+.model-enabled-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.model-default-cell {
+  justify-content: center;
+}
+
+.model-default-cell input,
+.model-enabled-cell input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.model-default-cell span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.model-enabled-cell span {
+  display: none;
+}
+
+.model-field-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.model-field-cell span {
+  display: none;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.model-field-cell input {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  padding: 0 11px;
+  outline: none;
+}
+
+.model-field-cell input:focus {
+  border-color: rgba(106, 169, 255, 0.32);
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.model-capability-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  min-width: 0;
+}
+
+.capability-chip {
+  min-height: 26px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.capability-chip.fixed {
+  display: inline-flex;
+  align-items: center;
+  cursor: default;
+  color: var(--text-muted);
+}
+
+.capability-chip.active {
+  border-color: rgba(106, 169, 255, 0.36);
+  background: rgba(106, 169, 255, 0.16);
+  color: var(--text-primary);
+}
+
+.model-remove-btn {
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.model-remove-btn:hover:not(:disabled) {
+  border-color: rgba(255, 179, 179, 0.26);
+  background: rgba(255, 99, 99, 0.08);
+  color: #ffb3b3;
+}
+
+.model-remove-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+
+.settings-message {
+  margin: 0 20px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(106, 169, 255, 0.24);
+  background: rgba(106, 169, 255, 0.08);
+  color: var(--text-secondary);
+}
+
+.settings-message.failed {
+  border-color: rgba(255, 179, 179, 0.28);
+  background: rgba(255, 99, 99, 0.08);
+  color: #ffb3b3;
+}
+
+.settings-actions {
+  justify-content: flex-end;
+  border-top: 1px solid var(--line-soft);
+}
+
+.settings-btn {
+  min-height: 38px;
+  border-radius: 10px;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0 14px;
+}
+
+.settings-btn.primary {
+  background: var(--accent-soft);
+  border-color: rgba(106, 169, 255, 0.32);
+  color: var(--text-primary);
+}
+
+.settings-btn.primary-subtle {
+  background: rgba(106, 169, 255, 0.12);
+  border-color: rgba(106, 169, 255, 0.28);
+  color: var(--text-primary);
+}
+
+.settings-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+@media (max-width: 720px) {
+  .settings-layout,
+  .provider-settings-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-nav {
+    border-right: none;
+    border-bottom: 1px solid var(--line-soft);
+    flex-direction: row;
+    overflow-x: auto;
+  }
+
+  .settings-nav-item {
+    min-width: 160px;
+  }
+
+  .provider-list {
+    border-right: none;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .provider-detail-head,
+  .models-head {
+    flex-direction: column;
+  }
+
+  .provider-summary {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .provider-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-body {
+    grid-template-columns: 1fr;
+  }
+
+  .model-table {
+    border-radius: 12px;
+  }
+
+  .model-table-head {
+    display: none;
+  }
+
+  .model-row {
+    grid-template-columns: 34px 1fr 30px;
+    gap: 10px;
+    align-items: start;
+    min-width: 0;
+  }
+
+  .model-field-cell,
+  .model-capability-cell,
+  .model-enabled-cell {
+    grid-column: 2 / 3;
+  }
+
+  .model-default-cell {
+    grid-column: 1 / 2;
+    grid-row: 1 / 4;
+    padding-top: 26px;
+  }
+
+  .model-remove-btn {
+    grid-column: 3 / 4;
+    grid-row: 1;
+  }
+
+  .model-field-cell span {
+    display: block;
+  }
+
+  .model-enabled-cell span {
+    display: inline;
+  }
+}
+</style>

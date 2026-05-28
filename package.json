@@ -1,0 +1,42 @@
+{
+  "name": "lumenfolio-desktop-prototype",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "test:e2e": "VITE_E2E=1 playwright test",
+    "check:translation-linking": "node scripts/check-translation-linking.mjs",
+    "check:prod-no-testids": "node scripts/check-prod-no-testids.mjs",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "node scripts/tauri-dev.mjs",
+    "tauri:dev:pdf2zh": "node scripts/tauri-dev-pdf2zh.mjs",
+    "setup:pdf2zh": "node scripts/setup-pdf2zh-runtime.mjs",
+    "smoke:pdf2zh": "node scripts/smoke-pdf2zh-worker.mjs",
+    "qa:pdf2zh": "node scripts/qa-pdf2zh-samples.mjs",
+    "perf:pdf2zh": "node scripts/perf-pdf2zh-samples.mjs",
+    "build:pdf2zh-runtime:macos": "node scripts/build-pdf2zh-macos-runtime.mjs",
+    "build:pdf2zh-runtime:windows": "node scripts/build-pdf2zh-windows-runtime.mjs",
+    "sign:pdf2zh-runtime:macos": "node scripts/check-pdf2zh-macos-signing.mjs --sign",
+    "check:pdf2zh-macos-signing": "node scripts/check-pdf2zh-macos-signing.mjs",
+    "check:pdf2zh-macos-release-env": "node scripts/check-pdf2zh-macos-release-env.mjs",
+    "check:pdf2zh-windows-readiness": "node scripts/check-pdf2zh-windows-readiness.mjs",
+    "check:pdf2zh-release": "node scripts/check-pdf2zh-release-readiness.mjs",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.10.1",
+    "markdown-it": "^14.1.1",
+    "markdown-it-link-attributes": "^4.0.1",
+    "pdfjs-dist": "^5.6.205",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@tauri-apps/cli": "^2.10.1",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.3.5"
+  }
+}

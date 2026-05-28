@@ -1,0 +1,46 @@
+{
+  "sidecarVersion": "lumenfolio-pdf2zh-sidecar-0.1.0",
+  "protocolVersion": "lumenfolio-pdf2zh-v1",
+  "pdf2zhNextVersion": "2.7.1",
+  "babeldocVersion": "0.5.24",
+  "pythonVersionRange": ">=3.11,<3.13",
+  "worker": "worker/lumenfolio_pdf2zh_worker.py",
+  "runtimeLayouts": {
+    "dev": ".venv-pdf2zh/bin/python",
+    "macosPrivateRuntime": "pdf2zh-sidecar/python/bin/python3",
+    "windowsPrivateRuntime": "pdf2zh-sidecar/python/python.exe",
+    "windowsFrozenExecutable": "pdf2zh-sidecar/pdf2zh-sidecar.exe"
+  },
+  "requiredPythonPackages": [
+    "pdf2zh-next==2.7.1",
+    "babeldoc==0.5.24",
+    "pymupdf==1.25.2",
+    "onnxruntime>=1.26.0",
+    "rapidocr-onnxruntime>=1.4.4",
+    "scikit-learn>=1.7.1",
+    "scikit-image>=0.25.2",
+    "opencv-python-headless>=4.10.0.84",
+    "fonttools",
+    "httpx",
+    "openai>=1.0.0"
+  ],
+  "mutableDataDirs": [
+    "logs",
+    "cache",
+    "artifacts",
+    "runtime",
+    "tmp"
+  ],
+  "cacheInvalidationInputs": [
+    "sidecarVersion",
+    "protocolVersion",
+    "pdf2zhNextVersion",
+    "babeldocVersion",
+    "sourcePdfHash",
+    "sourceLang",
+    "targetLang",
+    "providerKey",
+    "artifactMode",
+    "pages"
+  ]
+}
