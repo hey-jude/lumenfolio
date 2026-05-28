@@ -105,5 +105,5 @@ Question
 
 This project is licensed under the PolyForm Noncommercial License 1.0.0.
 
-Commercial use is not permitted under this license. If you need commercial licensing, contact the copyright holder.
+Commercial use is not permitted under this license. If you need commercial licensing, contact the copyright holder at `tanghui315@126.com`.
 

@@ -105,5 +105,5 @@ Question
 
 本项目采用 PolyForm Noncommercial License 1.0.0。
 
-该许可证禁止商业化使用。如需商用授权，请联系版权所有者。
+该许可证禁止商业化使用。如需商用授权，请联系版权所有者：`tanghui315@126.com`。
 
