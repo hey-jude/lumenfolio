@@ -306,6 +306,7 @@ fn default_db_path() -> Option<PathBuf> {
     let home = env::var("HOME").ok()?;
     let candidates = [
         "Library/Application Support/com.sotarium.lumenfolio/lumenfolio.sqlite",
+        "Library/Application Support/Lumenfolio/lumenfolio.sqlite",
         "Library/Application Support/Lumenfolio Desktop/lumenfolio.sqlite",
     ];
     candidates
