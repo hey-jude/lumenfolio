@@ -101,16 +101,9 @@ Question
 - API keys are currently stored locally (keychain migration is planned later).
 - If cloud model/translation providers are configured, selected text/questions may be sent to those providers.
 
-## Important Docs
-
-- `AGENTS.md`
-- `docs/lumenfolio_desktop_plan.md`
-- `docs/lumenfolio_desktop_ia.md`
-- `docs/lumenfolio_local_rag_plan.md`
-- `docs/lumenfolio_agentic_rag_runtime_plan.md`
-- `docs/lumenfolio_pdf_render_translation_plan.md`
-
 ## License
 
-Internal project status (add explicit license text here when finalized).
+This project is licensed under the PolyForm Noncommercial License 1.0.0.
+
+Commercial use is not permitted under this license. If you need commercial licensing, contact the copyright holder.
 

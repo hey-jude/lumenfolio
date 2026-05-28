@@ -2,6 +2,7 @@
   "name": "lumenfolio-desktop-prototype",
   "version": "0.0.1",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",

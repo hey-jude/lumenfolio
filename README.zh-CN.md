@@ -101,16 +101,9 @@ Question
 - API Key 当前仍是本地存储（后续再迁移到系统 keychain）。
 - 若配置云端模型/翻译 Provider，选中文本与问题可能会发送到对应服务商。
 
-## 关键文档
-
-- `AGENTS.md`
-- `docs/lumenfolio_desktop_plan.md`
-- `docs/lumenfolio_desktop_ia.md`
-- `docs/lumenfolio_local_rag_plan.md`
-- `docs/lumenfolio_agentic_rag_runtime_plan.md`
-- `docs/lumenfolio_pdf_render_translation_plan.md`
-
 ## License
 
-当前为内部项目状态（待后续明确并补充正式许可证文本）。
+本项目采用 PolyForm Noncommercial License 1.0.0。
+
+该许可证禁止商业化使用。如需商用授权，请联系版权所有者。
 
