@@ -44,6 +44,10 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  dropTargetRootId: {
+    type: String,
+    default: '',
+  },
 })
 
 const emit = defineEmits([
@@ -382,7 +386,13 @@ function triggerDeleteRoot(root, event = null) {
     </label>
 
     <div class="tree-area">
-      <section v-for="workspaceRoot in roots" :key="workspaceRoot.id || workspaceRoot.path" class="folder-group">
+      <section
+        v-for="workspaceRoot in roots"
+        :key="workspaceRoot.id || workspaceRoot.path"
+        class="folder-group"
+        :class="{ 'drop-target': isDropActive && workspaceRoot.id && workspaceRoot.id === dropTargetRootId }"
+        :data-workspace-root-id="workspaceRoot.id"
+      >
         <div class="workspace-title-row">
           <button
             type="button"
@@ -905,13 +915,34 @@ function triggerDeleteRoot(root, event = null) {
 
 .tree-area {
   flex: 1;
+  min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding-right: 4px;
 }
 
 .folder-group + .folder-group {
   margin-top: 18px;
+}
+
+.folder-group {
+  position: relative;
+  border-radius: 14px;
+  padding: 6px 4px 4px;
+  margin-top: -6px;
+  transition: background 140ms ease, box-shadow 140ms ease;
+}
+
+.folder-group.drop-target {
+  background: rgba(106, 169, 255, 0.14);
+  box-shadow:
+    inset 0 0 0 1px rgba(132, 183, 255, 0.55),
+    0 0 0 1px rgba(132, 183, 255, 0.2);
+}
+
+.folder-group.drop-target .folder-title {
+  color: var(--text-primary);
 }
 
 .recent-title {

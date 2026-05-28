@@ -121,6 +121,7 @@ const removeWorkspaceRootTarget = ref({
   docCount: 0,
 })
 const workspaceDropActive = ref(false)
+const workspaceDropTargetRootId = ref('')
 const lastWorkspaceDropAt = ref(0)
 const ignoreNextTauriFileDrop = ref(false)
 const providerTestStatus = ref('idle')
@@ -153,7 +154,10 @@ let visualIndexUnlisten = null
 let translationJobUnlisten = null
 let pdfTranslationUnlisten = null
 let localMessageCounter = 0
-let fileDropUnlisten = null
+let dragEnterUnlisten = null
+let dragOverUnlisten = null
+let dragLeaveUnlisten = null
+let dragDropUnlisten = null
 let fileDropIgnoreTimer = null
 const clearedActivityEventIds = new Map()
 const assistantStreamTargets = new Map()
@@ -2354,10 +2358,6 @@ function sanitizeWorkspaceDropPath(rawPath) {
     // Keep the original escaped path if it cannot be decoded.
   }
   if (!path) return ''
-  if (/\.pdf$/i.test(path)) {
-    const lastSlash = path.lastIndexOf('/')
-    if (lastSlash > 0) path = path.slice(0, lastSlash)
-  }
 
   const isWindowsDriveRoot = /^[A-Za-z]:\/$/.test(path)
   const withoutTrailingSlash = path.endsWith('/') && path.length > 1 && !isWindowsDriveRoot
@@ -2368,51 +2368,123 @@ function sanitizeWorkspaceDropPath(rawPath) {
 
 function normalizeWorkspaceDropPaths(rawPaths) {
   if (!Array.isArray(rawPaths)) return []
-  const existingRoots = new Set(
-    workspace.roots.map((root) => String(root.path || '').trim().replace(/\\/g, '/')).filter(Boolean),
-  )
   const seen = new Set()
   const normalized = []
-
   for (const rawPath of rawPaths) {
     const path = sanitizeWorkspaceDropPath(rawPath)
-    if (!path || seen.has(path) || existingRoots.has(path)) continue
+    if (!path || seen.has(path)) continue
     seen.add(path)
     normalized.push(path)
   }
-
   return normalized
 }
 
 function setWorkspaceDropActive(nextState) {
   workspaceDropActive.value = Boolean(nextState)
+  if (!workspaceDropActive.value) {
+    workspaceDropTargetRootId.value = ''
+  }
 }
 
-async function addWorkspaceRootsFromDrop(rawPaths) {
-  if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return
-  const workspacePaths = normalizeWorkspaceDropPaths(rawPaths)
-  if (!workspacePaths.length) return false
+function setWorkspaceDropTargetRootId(rootId) {
+  workspaceDropTargetRootId.value = rootId || ''
+}
+
+function tauriPayloadCssPoint(payload) {
+  const x = Number(payload?.position?.x ?? NaN)
+  const y = Number(payload?.position?.y ?? NaN)
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+  if (typeof window === 'undefined') return null
+  const ratio = window.devicePixelRatio || 1
+  return { x: x / ratio, y: y / ratio }
+}
+
+function getSidebarRect() {
+  if (typeof document === 'undefined') return null
+  const sidebarEl = document.querySelector('.sidebar')
+  if (!sidebarEl) return null
+  const rect = sidebarEl.getBoundingClientRect()
+  if (!rect || (rect.width === 0 && rect.height === 0)) return null
+  return rect
+}
+
+function pointInsideRect(point, rect) {
+  if (!point || !rect) return false
+  return (
+    point.x >= rect.left
+    && point.x <= rect.right
+    && point.y >= rect.top
+    && point.y <= rect.bottom
+  )
+}
+
+function pickTargetRootIdForPoint(point) {
+  if (!point || typeof document === 'undefined') return ''
+  const groups = Array.from(document.querySelectorAll('.folder-group[data-workspace-root-id]'))
+    .map((el) => ({
+      id: el.getAttribute('data-workspace-root-id') || '',
+      rect: el.getBoundingClientRect(),
+    }))
+    .filter((entry) => entry.id && entry.rect && entry.rect.height > 0)
+  if (!groups.length) return ''
+
+  for (const group of groups) {
+    if (
+      point.y >= group.rect.top
+      && point.y <= group.rect.bottom
+    ) {
+      return group.id
+    }
+  }
+
+  let nearest = groups[0]
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (const group of groups) {
+    const center = group.rect.top + group.rect.height / 2
+    const distance = Math.abs(center - point.y)
+    if (distance < nearestDistance) {
+      nearestDistance = distance
+      nearest = group
+    }
+  }
+  return nearest?.id || ''
+}
+
+function applyTauriDragPosition(payload) {
+  const point = tauriPayloadCssPoint(payload)
+  const sidebarRect = getSidebarRect()
+  const insideSidebar = pointInsideRect(point, sidebarRect)
+  setWorkspaceDropActive(insideSidebar)
+  if (insideSidebar) {
+    setWorkspaceDropTargetRootId(pickTargetRootIdForPoint(point))
+  }
+  return { point, insideSidebar }
+}
+
+async function addWorkspaceRootsFromDrop(rawPaths, options = {}) {
+  if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return false
+  const sourcePaths = normalizeWorkspaceDropPaths(rawPaths)
+  if (!sourcePaths.length) return false
+  const targetRootId = String(options.targetRootId || '').trim() || null
   ignoreNextTauriFileDrop.value = true
   lastWorkspaceDropAt.value = Date.now()
   workspaceStatus.value = 'scanning'
   workspaceError.value = ''
   const previousDocId = selectedDocId.value
   try {
-    const snapshots = []
-    const errors = []
-    for (const folder of workspacePaths) {
-      try {
-        snapshots.push(await invoke('scan_workspace_pdfs', { root: folder }))
-      } catch (err) {
-        errors.push(err?.message || String(err))
-      }
+    let snapshots = []
+    try {
+      snapshots = await invoke('import_workspace_paths', {
+        args: {
+          targetRootId,
+          sourcePaths,
+        },
+      })
+    } catch (err) {
+      workspaceError.value = err?.message || String(err)
+      return false
     }
-    if (errors.length) {
-      workspaceError.value = errors.length === 1
-        ? errors[0]
-        : `Some folders failed to scan (${errors.length}/${workspacePaths.length}).`
-    }
-    if (!snapshots.length) return false
+    if (!Array.isArray(snapshots) || !snapshots.length) return false
     snapshots.forEach(upsertWorkspaceRootSnapshot)
     const previousDocStillExists = allDocs.value.some((doc) => doc.id === previousDocId)
     selectedDocId.value = previousDocStillExists ? previousDocId : allDocs.value[0]?.id || ''
@@ -2428,10 +2500,12 @@ async function addWorkspaceRootsFromDrop(rawPaths) {
 }
 
 async function handleWorkspaceDrop(rawPaths = []) {
-  await addWorkspaceRootsFromDrop(rawPaths)
+  const targetRootId = workspaceDropTargetRootId.value
+  setWorkspaceDropActive(false)
+  await addWorkspaceRootsFromDrop(rawPaths, { targetRootId })
 }
 
-async function handleTauriWorkspaceDrop(payload = null) {
+async function handleTauriWorkspaceDrop(payload = null, options = {}) {
   const now = Date.now()
   if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return
   let paths = []
@@ -2456,7 +2530,8 @@ async function handleTauriWorkspaceDrop(payload = null) {
     ignoreNextTauriFileDrop.value = false
   }
   lastWorkspaceDropAt.value = now
-  await addWorkspaceRootsFromDrop(paths)
+  const targetRootId = options.targetRootId || ''
+  await addWorkspaceRootsFromDrop(paths, { targetRootId })
 }
 
 async function chooseWorkspace() {
@@ -2949,7 +3024,10 @@ onBeforeUnmount(() => {
   if (visualIndexUnlisten) visualIndexUnlisten()
   if (translationJobUnlisten) translationJobUnlisten()
   if (pdfTranslationUnlisten) pdfTranslationUnlisten()
-  if (fileDropUnlisten) fileDropUnlisten()
+  if (dragEnterUnlisten) dragEnterUnlisten()
+  if (dragOverUnlisten) dragOverUnlisten()
+  if (dragLeaveUnlisten) dragLeaveUnlisten()
+  if (dragDropUnlisten) dragDropUnlisten()
   if (fileDropIgnoreTimer) clearTimeout(fileDropIgnoreTimer)
 })
 
@@ -3027,12 +3105,38 @@ onMounted(() => {
   }).catch((err) => {
     console.warn('Failed to listen for PDF translation events', err)
   })
-  listen('tauri://file-drop', (event) => {
-    void handleTauriWorkspaceDrop(event.payload)
+  listen('tauri://drag-enter', (event) => {
+    applyTauriDragPosition(event.payload)
   }).then((unlisten) => {
-    fileDropUnlisten = unlisten
+    dragEnterUnlisten = unlisten
   }).catch((err) => {
-    console.warn('Failed to listen for file drop events', err)
+    console.warn('Failed to listen for drag enter events', err)
+  })
+  listen('tauri://drag-over', (event) => {
+    applyTauriDragPosition(event.payload)
+  }).then((unlisten) => {
+    dragOverUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for drag over events', err)
+  })
+  listen('tauri://drag-leave', () => {
+    setWorkspaceDropActive(false)
+  }).then((unlisten) => {
+    dragLeaveUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for drag leave events', err)
+  })
+  listen('tauri://drag-drop', (event) => {
+    const payload = event.payload
+    const { insideSidebar } = applyTauriDragPosition(payload)
+    const targetRootId = workspaceDropTargetRootId.value
+    setWorkspaceDropActive(false)
+    if (!insideSidebar) return
+    void handleTauriWorkspaceDrop(payload, { targetRootId })
+  }).then((unlisten) => {
+    dragDropUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for drag drop events', err)
   })
 })
 </script>
@@ -3050,6 +3154,7 @@ onMounted(() => {
       :locale="locale"
       :ui="ui"
       :drop-active="workspaceDropActive"
+      :drop-target-root-id="workspaceDropTargetRootId"
       @update:filter="filter = $event"
       @select-doc="selectDoc"
       @set-locale="locale = $event"

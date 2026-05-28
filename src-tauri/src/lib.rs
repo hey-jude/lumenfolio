@@ -761,6 +761,187 @@ fn scan_workspace_pdfs(
     })
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ImportWorkspacePathsArgs {
+    #[serde(default)]
+    target_root_id: Option<String>,
+    #[serde(default)]
+    source_paths: Vec<String>,
+}
+
+#[tauri::command]
+fn import_workspace_paths(
+    args: ImportWorkspacePathsArgs,
+    registry: State<'_, PdfRegistry>,
+    database: State<'_, AppDatabase>,
+) -> Result<Vec<WorkspaceRootSnapshot>, String> {
+    let ImportWorkspacePathsArgs {
+        target_root_id,
+        source_paths,
+    } = args;
+
+    let target_root_id = target_root_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let mut pdf_files: Vec<PathBuf> = Vec::new();
+    let mut directories: Vec<PathBuf> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    for raw in source_paths {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let canonical = match PathBuf::from(trimmed).canonicalize() {
+            Ok(path) => path,
+            Err(err) => {
+                errors.push(format!("Cannot access {trimmed}: {err}"));
+                continue;
+            }
+        };
+        let metadata = match fs::metadata(&canonical) {
+            Ok(metadata) => metadata,
+            Err(err) => {
+                errors.push(format!("Cannot read {}: {err}", canonical.display()));
+                continue;
+            }
+        };
+        if metadata.is_dir() {
+            directories.push(canonical);
+        } else if metadata.is_file() {
+            let is_pdf = canonical
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
+            if is_pdf {
+                pdf_files.push(canonical);
+            }
+        }
+    }
+
+    let target_root_info = match target_root_id.as_deref() {
+        Some(root_id) => documents::lookup_workspace_root_path(&database, root_id)?
+            .map(|path| (root_id.to_string(), path)),
+        None => None,
+    };
+
+    let mut snapshots: HashMap<String, WorkspaceRootSnapshot> = HashMap::new();
+    let mut snapshot_order: Vec<String> = Vec::new();
+
+    for dir in directories {
+        let workspace_root_id = documents::stable_path_id("root", &dir);
+        let mut docs = Vec::new();
+        documents::collect_pdfs(&dir, &workspace_root_id, &mut docs)?;
+        docs.sort_by(|left, right| {
+            left.short_title
+                .to_lowercase()
+                .cmp(&right.short_title.to_lowercase())
+        });
+        documents::persist_workspace_scan(&database, &workspace_root_id, &dir, &docs)?;
+        let snapshot_docs = documents::load_documents_for_root(&database, &workspace_root_id)?;
+        documents::upsert_registry_paths(&registry, &snapshot_docs)?;
+        let snapshot = WorkspaceRootSnapshot {
+            root: WorkspaceRoot {
+                id: workspace_root_id.clone(),
+                path: dir.to_string_lossy().to_string(),
+            },
+            documents: snapshot_docs,
+        };
+        if !snapshots.contains_key(&workspace_root_id) {
+            snapshot_order.push(workspace_root_id.clone());
+        }
+        snapshots.insert(workspace_root_id, snapshot);
+    }
+
+    let mut grouped_files: HashMap<String, (PathBuf, Vec<PathBuf>)> = HashMap::new();
+    let mut grouped_order: Vec<String> = Vec::new();
+
+    for source in pdf_files {
+        let (root_id, root_path, final_path) = match &target_root_info {
+            Some((root_id, root_path)) => {
+                let final_path = if source.starts_with(root_path) {
+                    source.clone()
+                } else {
+                    let file_name = source
+                        .file_name()
+                        .ok_or_else(|| format!("Invalid file name for {}", source.display()))?;
+                    let destination = documents::unique_destination_path(root_path, file_name);
+                    fs::copy(&source, &destination).map_err(|err| {
+                        format!(
+                            "Failed to copy {} into {}: {err}",
+                            source.display(),
+                            root_path.display()
+                        )
+                    })?;
+                    destination
+                        .canonicalize()
+                        .unwrap_or(destination)
+                };
+                (root_id.clone(), root_path.clone(), final_path)
+            }
+            None => {
+                let parent = source.parent().ok_or_else(|| {
+                    format!("Cannot resolve parent folder for {}", source.display())
+                })?;
+                let root_path = parent.to_path_buf();
+                let root_id = documents::stable_path_id("root", &root_path);
+                (root_id, root_path, source.clone())
+            }
+        };
+
+        let entry = grouped_files
+            .entry(root_id.clone())
+            .or_insert_with(|| (root_path.clone(), Vec::new()));
+        entry.1.push(final_path);
+        if !grouped_order.contains(&root_id) {
+            grouped_order.push(root_id);
+        }
+    }
+
+    for root_id in grouped_order {
+        let Some((root_path, files)) = grouped_files.remove(&root_id) else {
+            continue;
+        };
+        let mut docs = Vec::new();
+        for file_path in &files {
+            if let Some(doc) = documents::build_document_for_path(file_path, &root_id)? {
+                docs.push(doc);
+            }
+        }
+        if docs.is_empty() {
+            continue;
+        }
+        documents::additive_upsert_documents(&database, &root_id, &root_path, &docs)?;
+        let snapshot_docs = documents::load_documents_for_root(&database, &root_id)?;
+        documents::upsert_registry_paths(&registry, &snapshot_docs)?;
+        let snapshot = WorkspaceRootSnapshot {
+            root: WorkspaceRoot {
+                id: root_id.clone(),
+                path: root_path.to_string_lossy().to_string(),
+            },
+            documents: snapshot_docs,
+        };
+        if !snapshots.contains_key(&root_id) {
+            snapshot_order.push(root_id.clone());
+        }
+        snapshots.insert(root_id, snapshot);
+    }
+
+    if snapshots.is_empty() && !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+
+    let mut result = Vec::with_capacity(snapshot_order.len());
+    for root_id in snapshot_order {
+        if let Some(snapshot) = snapshots.remove(&root_id) {
+            result.push(snapshot);
+        }
+    }
+    Ok(result)
+}
+
 #[tauri::command]
 fn remove_workspace_root(
     root_id: String,
@@ -3329,6 +3510,7 @@ pub fn run() {
             open_path_in_file_manager,
             pdf_layout_dump::dump_pdf_layout,
             scan_workspace_pdfs,
+            import_workspace_paths,
             load_last_workspace,
             read_pdf_bytes,
             pdf2zh_sidecar::read_pdf_artifact_bytes,

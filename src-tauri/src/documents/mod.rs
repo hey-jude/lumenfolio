@@ -1,11 +1,12 @@
 use std::{
     collections::HashSet,
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use tauri::State;
 
 use crate::{AppDatabase, PdfDocument, PdfRegistry, CURRENT_INDEX_VERSION};
@@ -287,54 +288,194 @@ pub(crate) fn collect_pdfs(
             continue;
         }
 
-        let canonical_path = match path.canonicalize() {
-            Ok(canonical_path) => canonical_path,
-            Err(err) => {
-                log::warn!("Skipping unresolved PDF {}: {err}", path.display());
-                continue;
-            }
-        };
-        let metadata = match fs::metadata(&canonical_path) {
-            Ok(metadata) => metadata,
-            Err(err) => {
-                log::warn!(
-                    "Skipping PDF with unreadable metadata {}: {err}",
-                    canonical_path.display()
-                );
-                continue;
-            }
-        };
-        let title = canonical_path
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            .unwrap_or("Untitled.pdf")
-            .to_string();
-
-        docs.push(PdfDocument {
-            id: stable_path_id("pdf", &canonical_path),
-            workspace_root_id: workspace_root_id.to_string(),
-            short_title: title.clone(),
-            title,
-            path: canonical_path.to_string_lossy().to_string(),
-            size: metadata.len(),
-            modified: metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map_or(0, |duration| duration.as_secs()),
-            page_count: 0,
-            current_page: 1,
-            index_status: "pending".to_string(),
-            index_version: 0,
-            current_index_version: CURRENT_INDEX_VERSION,
-            tree_ready: false,
-            visual_index_status: "pending".to_string(),
-            visual_index_version: 0,
-            visual_index_error: String::new(),
-        });
+        if let Some(doc) = build_document_for_path(&path, workspace_root_id)? {
+            docs.push(doc);
+        }
     }
 
     Ok(())
+}
+
+pub(crate) fn build_document_for_path(
+    path: &Path,
+    workspace_root_id: &str,
+) -> Result<Option<PdfDocument>, String> {
+    let canonical_path = match path.canonicalize() {
+        Ok(canonical_path) => canonical_path,
+        Err(err) => {
+            log::warn!("Skipping unresolved PDF {}: {err}", path.display());
+            return Ok(None);
+        }
+    };
+    let metadata = match fs::metadata(&canonical_path) {
+        Ok(metadata) => metadata,
+        Err(err) => {
+            log::warn!(
+                "Skipping PDF with unreadable metadata {}: {err}",
+                canonical_path.display()
+            );
+            return Ok(None);
+        }
+    };
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+    if !canonical_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
+    {
+        return Ok(None);
+    }
+    let title = canonical_path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .unwrap_or("Untitled.pdf")
+        .to_string();
+
+    Ok(Some(PdfDocument {
+        id: stable_path_id("pdf", &canonical_path),
+        workspace_root_id: workspace_root_id.to_string(),
+        short_title: title.clone(),
+        title,
+        path: canonical_path.to_string_lossy().to_string(),
+        size: metadata.len(),
+        modified: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map_or(0, |duration| duration.as_secs()),
+        page_count: 0,
+        current_page: 1,
+        index_status: "pending".to_string(),
+        index_version: 0,
+        current_index_version: CURRENT_INDEX_VERSION,
+        tree_ready: false,
+        visual_index_status: "pending".to_string(),
+        visual_index_version: 0,
+        visual_index_error: String::new(),
+    }))
+}
+
+pub(crate) fn additive_upsert_documents(
+    database: &State<'_, AppDatabase>,
+    workspace_root_id: &str,
+    root_path: &Path,
+    docs: &[PdfDocument],
+) -> Result<(), String> {
+    let mut conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("Failed to start workspace transaction: {err}"))?;
+    tx.execute(
+        "INSERT INTO workspace_roots (id, path, name, created_at, updated_at, last_opened_at)
+         VALUES (?1, ?2, ?3, unixepoch(), unixepoch(), unixepoch())
+         ON CONFLICT(id) DO UPDATE SET
+           path = excluded.path,
+           name = excluded.name,
+           updated_at = unixepoch(),
+           last_opened_at = unixepoch()",
+        params![
+            workspace_root_id,
+            root_path.to_string_lossy(),
+            root_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("Workspace")
+        ],
+    )
+    .map_err(|err| format!("Failed to save workspace root: {err}"))?;
+
+    for doc in docs {
+        tx.execute(
+            "INSERT INTO documents
+                (id, workspace_root_id, path, title, short_title, file_size, modified,
+                 page_count, last_page, index_status, index_version, created_at, updated_at,
+                 last_opened_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, unixepoch(), unixepoch(),
+                     unixepoch())
+             ON CONFLICT(id) DO UPDATE SET
+               workspace_root_id = excluded.workspace_root_id,
+               path = excluded.path,
+               title = excluded.title,
+               short_title = excluded.short_title,
+               file_size = excluded.file_size,
+               modified = excluded.modified,
+               updated_at = unixepoch(),
+               index_status = CASE
+                 WHEN documents.modified != excluded.modified
+                   OR documents.file_size != excluded.file_size
+                   OR (
+                     documents.index_status = 'indexed'
+                     AND documents.index_version != ?11
+                   )
+                 THEN 'stale'
+                 ELSE documents.index_status
+               END",
+            params![
+                doc.id,
+                doc.workspace_root_id,
+                doc.path,
+                doc.title,
+                doc.short_title,
+                doc.size,
+                doc.modified,
+                doc.page_count,
+                doc.current_page,
+                doc.index_status,
+                CURRENT_INDEX_VERSION,
+            ],
+        )
+        .map_err(|err| format!("Failed to save document: {err}"))?;
+    }
+
+    tx.commit()
+        .map_err(|err| format!("Failed to commit workspace additive upsert: {err}"))
+}
+
+pub(crate) fn lookup_workspace_root_path(
+    database: &State<'_, AppDatabase>,
+    workspace_root_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let path: Option<String> = conn
+        .query_row(
+            "SELECT path FROM workspace_roots WHERE id = ?1",
+            params![workspace_root_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| format!("Failed to look up workspace root: {err}"))?;
+    Ok(path.map(PathBuf::from))
+}
+
+pub(crate) fn unique_destination_path(root_path: &Path, file_name: &OsStr) -> PathBuf {
+    let initial = root_path.join(file_name);
+    if !initial.exists() {
+        return initial;
+    }
+    let name_string = file_name.to_string_lossy().into_owned();
+    let (stem, extension) = match name_string.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), Some(ext.to_string())),
+        _ => (name_string.clone(), None),
+    };
+    for counter in 1u32..10_000 {
+        let candidate_name = match &extension {
+            Some(ext) => format!("{stem} ({counter}).{ext}"),
+            None => format!("{stem} ({counter})"),
+        };
+        let candidate = root_path.join(&candidate_name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    root_path.join(file_name)
 }
 
 pub(crate) fn stable_path_id(prefix: &str, path: &Path) -> String {
