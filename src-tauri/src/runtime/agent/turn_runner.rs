@@ -4,13 +4,15 @@ use crate::runtime::rag::{self, Citation, RetrievalRequest, RetrievalRun};
 
 use super::compact::{compact_session, CompactResult};
 use super::context::build_chat_context;
-use super::finalize::{finalize_citations, FinalizeDecision};
+use super::decision::{FinalizeStatus, RetrievalAttempts};
+use super::policy::{finalize_citations, FinalizeDecision};
 use super::memory::{preview_text, summarize_citations, RecentTurnSummary};
 use super::protocol::{AgentIntent, AgentStepKind};
 use super::session::AgentSessionStore;
-#[cfg(test)]
-use super::tools::AgentToolName;
-use super::trace::{event, skipped_event, AgentTrace, AgentTraceEvent, AgentTracePreview};
+use super::trace::{
+    event, skipped_event, tool_call_event, tool_result_event, trace_preview_from_output,
+    trace_status_from_tool_status, AgentTrace, AgentTraceEvent,
+};
 
 const DEFAULT_MAX_RETRIEVAL_STEPS: u32 = 20;
 const MAX_RETRIEVAL_STEPS: u32 = 20;
@@ -34,6 +36,9 @@ pub struct AgentRunResult {
     pub retrieval_run: RetrievalRun,
     pub trace: AgentTrace,
     pub session_context: String,
+    /// Single source of truth for how many retrieval steps the agent run used.
+    /// Read this instead of recomputing from `retrieval_run.trace.finalize_gate`.
+    pub attempts: RetrievalAttempts,
 }
 
 pub fn run_turn_with_activity<F>(
@@ -95,10 +100,17 @@ where
         Some(compacted.compact.clone()),
     );
 
+    let attempts = RetrievalAttempts::new(
+        finalize.attempt.saturating_add(1),
+        max_retrieval_attempts,
+        finalize.budget_exhausted,
+    );
+
     Ok(AgentRunResult {
         retrieval_run,
         trace,
         session_context,
+        attempts,
     })
 }
 
@@ -199,33 +211,24 @@ where
             attempt,
             max_attempts,
         );
+        let next_tool_name = decision
+            .next_tool_call
+            .as_ref()
+            .map(|call| call.tool.as_str())
+            .unwrap_or("none");
         let detail = format!(
             "attempt={} status={} reason={} next_tool={}",
             attempt + 1,
             decision.status,
             decision.reason,
-            decision
-                .next_tool_call
-                .as_ref()
-                .map(|call| call.tool.as_str())
-                .or(decision.next_tool.as_deref())
-                .unwrap_or("none")
+            next_tool_name
         );
         let finalize_event = AgentTraceEvent::new(
             "judge_result",
             AgentStepKind::FinalizeAnswer.as_str(),
             "completed",
             "M3 rule evidence check",
-            format!(
-                "status={} next_tool={}",
-                decision.status,
-                decision
-                    .next_tool_call
-                    .as_ref()
-                    .map(|call| call.tool.as_str())
-                    .or(decision.next_tool.as_deref())
-                    .unwrap_or("none")
-            ),
+            format!("status={} next_tool={}", decision.status, next_tool_name),
             detail,
         )
         .with_judge(serde_json::to_value(&decision).unwrap_or_else(|_| serde_json::json!({})));
@@ -245,9 +248,8 @@ where
             (tool, args, false)
         } else if is_header_lookup(tool, &args) {
             let mut terminal_decision = decision.clone();
-            terminal_decision.status = "insufficient".to_string();
+            terminal_decision.status = FinalizeStatus::Insufficient;
             terminal_decision.needs_more_evidence = false;
-            terminal_decision.next_tool = None;
             terminal_decision.next_tool_call = None;
             terminal_decision.reason = format!(
                 "{} Header lookup already ran without producing header evidence; the document index likely needs to be rebuilt with header roles.",
@@ -268,10 +270,9 @@ where
                 true,
             )
         };
-        let call_event = AgentTraceEvent::new(
-            "tool_call",
+        let call_event = tool_call_event(
             tool,
-            "running",
+            args.clone(),
             format!("Calling {tool}"),
             decision
                 .next_tool_call
@@ -279,8 +280,7 @@ where
                 .map(|call| call.reason.as_str())
                 .unwrap_or("Need more evidence"),
             format!("tool={tool} args={args} fallback_query={fallback_query}"),
-        )
-        .with_tool(tool, args.clone());
+        );
         on_event(&call_event);
 
         let output = rag::execute_rag_tool_call_for_capabilities(
@@ -339,21 +339,19 @@ where
             &request.context_budget,
         );
         rag::apply_tool_execution(&mut retrieval_run, &output);
-        if let Some(page) = m3_table_page_fallback_page(&output, &accumulated_citations) {
+        if let Some(page) = table_fallback_page_for_m3(&output, &accumulated_citations) {
             let page_args = serde_json::json!({
                 "page": page,
                 "mode": "full",
                 "limit": 40
             });
-            let page_call_event = AgentTraceEvent::new(
-                "tool_call",
+            let page_call_event = tool_call_event(
                 "open_pages",
-                "running",
+                page_args.clone(),
                 "Calling open_pages",
                 "Opening the source page because structured table extraction looked sparse or noisy",
                 format!("tool=open_pages args={page_args} fallback_query={fallback_query}"),
-            )
-            .with_tool("open_pages", page_args.clone());
+            );
             on_event(&page_call_event);
 
             let page_output = rag::execute_rag_tool_call_for_capabilities(
@@ -367,30 +365,15 @@ where
                     max_quote_chars: request.context_budget.max_quote_chars,
                 },
             );
-            let page_tool_event = AgentTraceEvent::new(
-                "tool_result",
+            let page_tool_event = tool_result_event(
+                &page_output,
                 AgentStepKind::OpenPages.as_str(),
-                trace_status_from_tool_status(&page_output.tool_call.status),
-                format!("{} result", page_output.tool_call.tool),
-                format!(
-                    "{} returned {} results",
-                    page_output.tool_call.tool, page_output.tool_call.result_count
-                ),
                 format!(
                     "tool={} status={} results={} reason=structured table evidence was incomplete",
                     page_output.tool_call.tool,
                     page_output.tool_call.status,
                     page_output.tool_call.result_count
                 ),
-            )
-            .with_tool(
-                page_output.tool_call.tool.clone(),
-                page_output.tool_call.input.clone(),
-            )
-            .with_result(
-                page_output.tool_call.result_count,
-                trace_preview_from_output(&page_output),
-                page_output.tool_call.error.clone(),
             );
             on_event(&page_tool_event);
             loop_events.push(page_tool_event);
@@ -405,18 +388,11 @@ where
     }
 }
 
-fn m3_table_page_fallback_page(
+fn table_fallback_page_for_m3(
     output: &rag::RagToolExecutionOutput,
     accumulated_citations: &[Citation],
 ) -> Option<u32> {
-    if output.tool_call.tool != "open_table" {
-        return None;
-    }
-    let page = output
-        .citations
-        .iter()
-        .find(|citation| citation.source == "open_table")
-        .map(|citation| citation.page)?;
+    let page = super::table_fallback::sparse_open_table_page(output, None)?;
     if accumulated_citations.iter().any(|citation| {
         citation.source == "open_pages"
             && citation.page == page
@@ -427,18 +403,7 @@ fn m3_table_page_fallback_page(
     }) {
         return None;
     }
-    let combined = output
-        .citations
-        .iter()
-        .map(|citation| citation.quote.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .to_lowercase();
-    let sparse = output.citations.len() < 6 || combined.chars().count() < 700;
-    let placeholder_columns = ["column 1", "column 2", "column 3", "column 4"]
-        .iter()
-        .any(|needle| combined.contains(needle));
-    (sparse || placeholder_columns).then_some(page)
+    Some(page)
 }
 
 fn tool_signature(tool: &str, args: &serde_json::Value) -> String {
@@ -458,22 +423,8 @@ fn is_header_lookup(tool: &str, args: &serde_json::Value) -> bool {
 }
 
 fn next_tool_parts(decision: &FinalizeDecision) -> Option<(&str, serde_json::Value)> {
-    if let Some(call) = decision.next_tool_call.as_ref() {
-        return rag::is_registered_rag_tool(&call.tool)
-            .then_some((call.tool.as_str(), call.args.clone()));
-    }
-    match decision.next_tool.as_deref()? {
-        "open_document_start" => Some((
-            "open_pages",
-            serde_json::json!({ "page": 1, "mode": "overview" }),
-        )),
-        "search_broad_context" => Some((
-            "search_chunks",
-            serde_json::json!({ "query": "broad_context", "page": 1 }),
-        )),
-        tool if rag::is_registered_rag_tool(tool) => Some((tool, serde_json::json!({}))),
-        _ => None,
-    }
+    let call = decision.next_tool_call.as_ref()?;
+    rag::is_registered_rag_tool(&call.tool).then_some((call.tool.as_str(), call.args.clone()))
 }
 
 fn step_kind_for_tool(tool: &str) -> AgentStepKind {
@@ -486,27 +437,6 @@ fn step_kind_for_tool(tool: &str) -> AgentStepKind {
     }
 }
 
-fn trace_status_from_tool_status(status: &str) -> &'static str {
-    if status == "error" {
-        "error"
-    } else {
-        "completed"
-    }
-}
-
-fn trace_preview_from_output(output: &rag::RagToolExecutionOutput) -> Vec<AgentTracePreview> {
-    output
-        .trace_candidates
-        .iter()
-        .take(3)
-        .map(|candidate| AgentTracePreview {
-            page: candidate.page,
-            section_title: candidate.section_title.clone(),
-            quote: candidate.quote.clone(),
-            source: candidate.source.clone(),
-        })
-        .collect()
-}
 
 fn broad_context_query(intent: AgentIntent, attempt: u32) -> &'static str {
     let queries: &[&str] = match intent {
@@ -625,13 +555,13 @@ fn build_agent_events(
 }
 
 #[cfg(test)]
-fn trace_tool_result_count(retrieval_run: &RetrievalRun, tool: AgentToolName) -> Option<usize> {
+fn trace_tool_result_count(retrieval_run: &RetrievalRun, tool: &str) -> Option<usize> {
     let mut saw_tool = false;
     let count = retrieval_run
         .trace
         .tool_calls
         .iter()
-        .filter(|call| call.tool == tool.as_str())
+        .filter(|call| call.tool == tool)
         .map(|call| {
             saw_tool = true;
             call.result_count
@@ -681,18 +611,9 @@ mod tests {
             context_budget: crate::model_catalog::ModelContextBudget::default(),
         };
 
-        assert_eq!(
-            trace_tool_result_count(&run, AgentToolName::OpenSection),
-            Some(5)
-        );
-        assert_eq!(
-            trace_tool_result_count(&run, AgentToolName::SearchChunks),
-            Some(2)
-        );
-        assert_eq!(
-            trace_tool_result_count(&run, AgentToolName::OpenPages),
-            None
-        );
+        assert_eq!(trace_tool_result_count(&run, "open_section"), Some(5));
+        assert_eq!(trace_tool_result_count(&run, "search_chunks"), Some(2));
+        assert_eq!(trace_tool_result_count(&run, "open_pages"), None);
     }
 
     #[test]
@@ -714,21 +635,24 @@ mod tests {
     #[test]
     fn next_tool_parts_rejects_unregistered_tools() {
         let mut decision = FinalizeDecision {
-            status: "needs_more_evidence".to_string(),
+            status: FinalizeStatus::NeedsMoreEvidence,
             citation_count: 0,
             needs_more_evidence: true,
             reason: "test".to_string(),
             missing: Vec::new(),
-            next_tool: Some("not_a_tool".to_string()),
-            next_tool_call: None,
+            next_tool_call: Some(super::super::policy::NextToolCall {
+                tool: "not_a_tool".to_string(),
+                args: serde_json::json!({}),
+                reason: "unregistered".to_string(),
+            }),
             attempt: 0,
             max_attempts: 3,
             budget_exhausted: false,
-            runtime: "test".to_string(),
+            runtime: super::super::decision::FinalizeRuntime::M3RuleGuard,
         };
 
         assert!(next_tool_parts(&decision).is_none());
-        decision.next_tool_call = Some(super::super::finalize::NextToolCall {
+        decision.next_tool_call = Some(super::super::policy::NextToolCall {
             tool: "open_section".to_string(),
             args: serde_json::json!({ "query": "method" }),
             reason: "test".to_string(),

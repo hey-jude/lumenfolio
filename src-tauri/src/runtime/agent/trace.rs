@@ -2,7 +2,8 @@ use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::runtime::rag::{
-    Citation, RetrievalTrace, RetrievalTraceCandidate, RetrievalTraceTreeNode,
+    Citation, RagToolExecutionOutput, RetrievalTrace, RetrievalTraceCandidate,
+    RetrievalTraceTreeNode,
 };
 
 use super::compact::CompactResult;
@@ -19,6 +20,13 @@ pub struct AgentTraceEvent {
     pub title: String,
     pub summary: String,
     pub ts: i64,
+    /// Monotonic sequence number assigned by `AgentTrace::renumber_events` right
+    /// before the trace is handed to the frontend. UI code can rely on `seq`
+    /// being strictly increasing within a single trace, even when the wall-clock
+    /// timestamps from different runtimes (M3 rule loop, M4 LLM judge) end up
+    /// out of order.
+    #[serde(default)]
+    pub seq: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<AgentTraceTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,6 +76,7 @@ impl AgentTraceEvent {
             title: title.into(),
             summary: summary.into(),
             ts: unix_millis(),
+            seq: 0,
             tool: None,
             result: None,
             judge: None,
@@ -157,6 +166,16 @@ impl AgentTrace {
         self.candidates = retrieval_trace.candidates;
         self.finalize_gate = retrieval_trace.finalize_gate;
     }
+
+    /// Assign a strictly increasing `seq` (starting at 1) to every event in
+    /// insertion order. Call this once, right before the trace is serialized
+    /// for the frontend, so UI code can rely on a stable monotone ordering
+    /// regardless of which runtime stage produced the event.
+    pub fn renumber_events(&mut self) {
+        for (idx, event) in self.events.iter_mut().enumerate() {
+            event.seq = (idx as u64) + 1;
+        }
+    }
 }
 
 fn build_evidence_chain(
@@ -216,9 +235,139 @@ pub fn event_with_status(
     AgentTraceEvent::new(step, step, status, step, detail.clone(), detail)
 }
 
+/// Map RAG tool execution status (`ok` / `error` / `…`) to a trace event status.
+pub fn trace_status_from_tool_status(status: &str) -> &'static str {
+    if status == "error" {
+        "error"
+    } else {
+        "completed"
+    }
+}
+
+/// Build a short preview list (up to 3 entries) from a tool's trace candidates.
+pub fn trace_preview_from_output(output: &RagToolExecutionOutput) -> Vec<AgentTracePreview> {
+    output
+        .trace_candidates
+        .iter()
+        .take(3)
+        .map(|candidate| AgentTracePreview {
+            page: candidate.page,
+            section_title: candidate.section_title.clone(),
+            quote: candidate.quote.clone(),
+            source: candidate.source.clone(),
+        })
+        .collect()
+}
+
+/// Construct a uniform "tool_call" trace event.
+///
+/// Equivalent to:
+/// ```ignore
+/// AgentTraceEvent::new("tool_call", tool, "running", title, reason, detail)
+///     .with_tool(tool, args)
+/// ```
+pub fn tool_call_event(
+    tool: impl Into<String>,
+    args: serde_json::Value,
+    title: impl Into<String>,
+    reason: impl Into<String>,
+    detail: impl Into<String>,
+) -> AgentTraceEvent {
+    let tool = tool.into();
+    AgentTraceEvent::new(
+        "tool_call",
+        tool.clone(),
+        "running",
+        title,
+        reason,
+        detail,
+    )
+    .with_tool(tool, args)
+}
+
+/// Construct a uniform "tool_result" trace event populated from a RAG tool
+/// execution output. `step` is the agent step kind name (e.g.
+/// `AgentStepKind::OpenPages.as_str()` or `step_kind_for_tool(tool).as_str()`).
+pub fn tool_result_event(
+    output: &RagToolExecutionOutput,
+    step: impl Into<String>,
+    detail: impl Into<String>,
+) -> AgentTraceEvent {
+    let tool = output.tool_call.tool.clone();
+    let result_count = output.tool_call.result_count;
+    AgentTraceEvent::new(
+        "tool_result",
+        step,
+        trace_status_from_tool_status(&output.tool_call.status),
+        format!("{tool} result"),
+        format!("{tool} returned {result_count} results"),
+        detail,
+    )
+    .with_tool(tool, output.tool_call.input.clone())
+    .with_result(
+        result_count,
+        trace_preview_from_output(output),
+        output.tool_call.error.clone(),
+    )
+}
+
 fn unix_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_event(detail: &str) -> AgentTraceEvent {
+        AgentTraceEvent::new("e", "step", "completed", "title", detail, detail)
+    }
+
+    #[test]
+    fn renumber_events_assigns_monotonic_sequence() {
+        let mut trace = AgentTrace {
+            run_id: "run".into(),
+            intent: String::new(),
+            tree_nodes: Vec::new(),
+            candidates: Vec::new(),
+            finalize_gate: serde_json::Value::Null,
+            evidence_chain: Vec::new(),
+            events: vec![dummy_event("a"), dummy_event("b"), dummy_event("c")],
+            session_summary: None,
+            compact: None,
+        };
+        // Mimic the case where two stages set non-monotonic timestamps.
+        trace.events[0].ts = 100;
+        trace.events[1].ts = 50;
+        trace.events[2].ts = 200;
+        trace.renumber_events();
+        assert_eq!(trace.events[0].seq, 1);
+        assert_eq!(trace.events[1].seq, 2);
+        assert_eq!(trace.events[2].seq, 3);
+    }
+
+    #[test]
+    fn renumber_events_is_idempotent_for_subsequent_calls() {
+        let mut trace = AgentTrace {
+            run_id: "run".into(),
+            intent: String::new(),
+            tree_nodes: Vec::new(),
+            candidates: Vec::new(),
+            finalize_gate: serde_json::Value::Null,
+            evidence_chain: Vec::new(),
+            events: vec![dummy_event("a"), dummy_event("b")],
+            session_summary: None,
+            compact: None,
+        };
+        trace.renumber_events();
+        trace.events.push(dummy_event("c"));
+        trace.renumber_events();
+        assert_eq!(
+            trace.events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
 }

@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::runtime::agent::decision::{FinalizeRuntime, FinalizeStatus};
+use crate::runtime::agent::lexicon::requested_table_number;
 use crate::runtime::rag::Citation;
 
 #[derive(Clone, Debug, Serialize)]
@@ -13,17 +15,16 @@ pub struct NextToolCall {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinalizeDecision {
-    pub status: String,
+    pub status: FinalizeStatus,
     pub citation_count: usize,
     pub needs_more_evidence: bool,
     pub reason: String,
     pub missing: Vec<String>,
-    pub next_tool: Option<String>,
     pub next_tool_call: Option<NextToolCall>,
     pub attempt: u32,
     pub max_attempts: u32,
     pub budget_exhausted: bool,
-    pub runtime: String,
+    pub runtime: FinalizeRuntime,
 }
 
 pub fn finalize_citations(
@@ -70,19 +71,19 @@ impl RuleGuard {
         if facts.has_selection {
             return Some(answerable(
                 "User-selected text is direct evidence for the question.",
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.header && (facts.has_header || facts.has_author_evidence) {
             return Some(answerable(
                 "The retrieved document header contains the requested paper metadata.",
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.reference && facts.has_reference {
             return Some(answerable(
                 "The retrieved evidence contains reference or related-work context.",
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.reference {
@@ -98,7 +99,7 @@ impl RuleGuard {
                     reason: "Open references or related-work sections for source evidence."
                         .to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.overview
@@ -108,7 +109,7 @@ impl RuleGuard {
         {
             return Some(answerable(
                 "The retrieved page overview contains enough title/abstract context.",
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.overview && !facts.has_overview {
@@ -121,13 +122,13 @@ impl RuleGuard {
                     reason: "Open the first-page overview for title and abstract context."
                         .to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.location && has_location_evidence(citations, asks_section_location(question)) {
             return Some(answerable(
                 "The retrieved evidence identifies the requested page or section location.",
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.location {
@@ -143,7 +144,7 @@ impl RuleGuard {
                     reason: "Open likely sections so the answer can cite a concrete location."
                         .to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if let Some(table_number) = requested_table_number(question) {
@@ -152,7 +153,7 @@ impl RuleGuard {
             {
                 return Some(answerable(
                     "The requested numbered table is available in structured or current-view evidence; semantic sufficiency must be checked by the LLM evidence judge when available.",
-                    "m3-rule-guard",
+                    FinalizeRuntime::M3RuleGuard,
                 ));
             }
             return Some(needs_more(
@@ -167,7 +168,7 @@ impl RuleGuard {
                     }),
                     reason: "Open the requested numbered table before generic definition or broad context search.".to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.method && !facts.has_method {
@@ -183,7 +184,7 @@ impl RuleGuard {
                     reason: "Open the method-related section for grounded method evidence."
                         .to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.method && needs.experiment && !facts.has_experiment {
@@ -198,7 +199,7 @@ impl RuleGuard {
                     }),
                     reason: "Open the experiment/result section so the method answer can cite evaluation evidence.".to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.experiment && !facts.has_experiment {
@@ -224,7 +225,7 @@ impl RuleGuard {
                             .to_string()
                     },
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.table && !facts.has_table {
@@ -240,7 +241,7 @@ impl RuleGuard {
                     reason: "Search normalized table facts before relying on prose evidence."
                         .to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.table && facts.has_table && !facts.has_open_table {
@@ -255,13 +256,13 @@ impl RuleGuard {
                     }),
                     reason: "Open the candidate table so the evidence judge can verify target table, row, and metric coverage.".to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.table && facts.has_open_table {
             return Some(answerable(
                 "A structured table has been opened; semantic sufficiency must be checked by the LLM evidence judge when available.",
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.figure && !facts.has_figure {
@@ -276,19 +277,19 @@ impl RuleGuard {
                     }),
                     reason: "Inspect indexed visual assets and captions.".to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if facts.has_current_view && facts.evidence_chars >= 280 {
             return Some(answerable(
                 "Current-view page evidence is available; semantic sufficiency must be checked by the LLM evidence judge when available.",
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.definition && has_definition_evidence(question, citations) {
             return Some(answerable(
                 "The retrieved evidence contains a definition or introductory explanation.",
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.definition {
@@ -304,7 +305,7 @@ impl RuleGuard {
                     reason: "Search for definition-style passages and first explanations."
                         .to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if facts.citation_count == 0 {
@@ -316,7 +317,7 @@ impl RuleGuard {
                     args: serde_json::json!({ "page": 1, "mode": "overview" }),
                     reason: "Open the document start to obtain grounding evidence.".to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         if needs.header {
@@ -328,7 +329,7 @@ impl RuleGuard {
                     args: serde_json::json!({ "page": 1, "mode": "header" }),
                     reason: "Open the first-page header for paper metadata.".to_string(),
                 },
-                "m3-rule-guard",
+                FinalizeRuntime::M3RuleGuard,
             ));
         }
         None
@@ -343,7 +344,7 @@ impl HeuristicAnswerabilityJudge {
         if needs.overview && facts.has_overview && facts.evidence_chars >= 280 {
             answerable(
                 "The retrieved page overview contains enough title/abstract context.",
-                "m3-heuristic-judge",
+                FinalizeRuntime::M3HeuristicJudge,
             )
         } else if needs.overview && !facts.has_overview {
             needs_more(
@@ -355,7 +356,7 @@ impl HeuristicAnswerabilityJudge {
                     reason: "Open the first-page overview for title and abstract context."
                         .to_string(),
                 },
-                "m3-heuristic-judge",
+                FinalizeRuntime::M3HeuristicJudge,
             )
         } else if matches!(needs.intent, "explain" | "summarize") && facts.evidence_chars < 360 {
             needs_more(
@@ -366,12 +367,12 @@ impl HeuristicAnswerabilityJudge {
                     args: serde_json::json!({ "query": "broad_context", "page": 1 }),
                     reason: "Broaden retrieval to collect supporting passages.".to_string(),
                 },
-                "m3-heuristic-judge",
+                FinalizeRuntime::M3HeuristicJudge,
             )
         } else {
             answerable(
                 "Retrieved evidence is sufficient for a grounded answer.",
-                "m3-heuristic-judge",
+                FinalizeRuntime::M3HeuristicJudge,
             )
         }
     }
@@ -476,10 +477,9 @@ fn finish_decision(
     decision.attempt = attempt;
     decision.max_attempts = max_attempts;
     if decision.needs_more_evidence && attempt + 1 >= max_attempts {
-        decision.status = "insufficient".to_string();
+        decision.status = FinalizeStatus::Insufficient;
         decision.needs_more_evidence = false;
         decision.budget_exhausted = true;
-        decision.next_tool = None;
         decision.next_tool_call = None;
         decision.reason = format!(
             "{} Reached the retrieval step limit.",
@@ -488,19 +488,18 @@ fn finish_decision(
     }
 }
 
-fn answerable(reason: &str, runtime: &str) -> FinalizeDecision {
+fn answerable(reason: &str, runtime: FinalizeRuntime) -> FinalizeDecision {
     FinalizeDecision {
-        status: "answerable".to_string(),
+        status: FinalizeStatus::Answerable,
         citation_count: 0,
         needs_more_evidence: false,
         reason: reason.to_string(),
         missing: Vec::new(),
-        next_tool: None,
         next_tool_call: None,
         attempt: 0,
         max_attempts: 0,
         budget_exhausted: false,
-        runtime: runtime.to_string(),
+        runtime,
     }
 }
 
@@ -508,37 +507,19 @@ fn needs_more(
     reason: &str,
     missing: Vec<&str>,
     next_tool_call: NextToolCall,
-    runtime: &str,
+    runtime: FinalizeRuntime,
 ) -> FinalizeDecision {
     FinalizeDecision {
-        status: "needs_more_evidence".to_string(),
+        status: FinalizeStatus::NeedsMoreEvidence,
         citation_count: 0,
         needs_more_evidence: true,
         reason: reason.to_string(),
         missing: missing.into_iter().map(str::to_string).collect(),
-        next_tool: Some(legacy_next_tool_name(&next_tool_call)),
         next_tool_call: Some(next_tool_call),
         attempt: 0,
         max_attempts: 0,
         budget_exhausted: false,
-        runtime: runtime.to_string(),
-    }
-}
-
-fn legacy_next_tool_name(call: &NextToolCall) -> String {
-    if call.tool == "open_pages"
-        && call
-            .args
-            .get("page")
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0)
-            == 1
-    {
-        "open_document_start".to_string()
-    } else if call.tool == "search_chunks" {
-        "search_broad_context".to_string()
-    } else {
-        call.tool.clone()
+        runtime,
     }
 }
 
@@ -631,29 +612,55 @@ fn asks_experiment_or_result(question: &str) -> bool {
 fn asks_table_metrics(question: &str) -> bool {
     let normalized = question.to_lowercase();
     requested_table_number(&normalized).is_some()
-        || normalized.contains("table")
-        || normalized.contains("benchmark")
-        || normalized.contains("metric")
-        || normalized.contains("score")
-        || normalized.contains("sota")
-        || normalized.contains("performance")
+        || contains_ascii_word(&normalized, "table")
+        || contains_ascii_word(&normalized, "benchmark")
+        || contains_ascii_word(&normalized, "metric")
+        || contains_ascii_word(&normalized, "metrics")
+        || contains_ascii_word(&normalized, "score")
+        || contains_ascii_word(&normalized, "scores")
+        || contains_ascii_word(&normalized, "sota")
+        || contains_ascii_word(&normalized, "performance")
         || normalized.contains("表格")
         || normalized.contains("指标")
         || normalized.contains("分数")
         || normalized.contains("成绩")
-        || normalized.contains("突出")
-        || normalized.contains("领先")
 }
 
 fn asks_figure_or_table(question: &str) -> bool {
     let normalized = question.to_lowercase();
-    normalized.contains("figure")
-        || normalized.contains("table")
-        || normalized.contains("caption")
+    contains_ascii_word(&normalized, "figure")
+        || contains_ascii_word(&normalized, "figures")
+        || contains_ascii_word(&normalized, "table")
+        || contains_ascii_word(&normalized, "tables")
+        || contains_ascii_word(&normalized, "caption")
         || normalized.contains("图表")
         || normalized.contains("表格")
         || contains_numbered_cjk_marker(&normalized, '图')
         || contains_numbered_cjk_marker(&normalized, '表')
+}
+
+/// Match `needle` (lowercase ASCII word) inside `haystack` only when both
+/// neighboring characters are non-ASCII-alphanumeric. Prevents accidental hits
+/// like `score` inside `scoreboard` or `table` inside `comfortable`.
+fn contains_ascii_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    for (idx, _) in haystack.match_indices(needle) {
+        let before_ok = idx == 0
+            || haystack[..idx]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| !ch.is_ascii_alphanumeric());
+        let after_ok = haystack[idx + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
 }
 
 fn asks_definition(question: &str) -> bool {
@@ -764,127 +771,6 @@ fn contains_numbered_cjk_marker(value: &str, marker: char) -> bool {
                     })
                     .is_some())
     })
-}
-
-fn requested_table_number(value: &str) -> Option<String> {
-    let normalized = value.to_lowercase();
-    for marker in ["table", "表格", "表"] {
-        for (index, _) in normalized.match_indices(marker) {
-            let rest = &normalized[index + marker.len()..];
-            if let Some(number) = leading_reference_number(rest) {
-                return Some(number);
-            }
-        }
-    }
-    None
-}
-
-fn leading_reference_number(value: &str) -> Option<String> {
-    let trimmed = value.trim_start_matches(|ch: char| {
-        ch.is_whitespace() || matches!(ch, ':' | '#' | '-' | '_' | '.' | '：')
-    });
-    let digits = trimmed
-        .chars()
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    if !digits.is_empty() {
-        return digits
-            .parse::<u32>()
-            .ok()
-            .filter(|number| *number > 0)
-            .map(|number| number.to_string());
-    }
-    let cjk = trimmed
-        .chars()
-        .take_while(|ch| is_cjk_number_char(*ch))
-        .collect::<String>();
-    if let Some(number) = parse_cjk_number(&cjk) {
-        return Some(number.to_string());
-    }
-    let roman = trimmed
-        .chars()
-        .take_while(|ch| matches!(ch, 'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'))
-        .collect::<String>();
-    if roman.is_empty()
-        || trimmed[roman.len()..]
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_alphabetic())
-    {
-        None
-    } else {
-        roman_to_number(&roman).map(|number| number.to_string())
-    }
-}
-
-fn is_cjk_number_char(ch: char) -> bool {
-    matches!(
-        ch,
-        '零' | '〇' | '一' | '二' | '两' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
-    )
-}
-
-fn parse_cjk_number(value: &str) -> Option<u32> {
-    if value.is_empty() {
-        return None;
-    }
-    let chars = value.chars().collect::<Vec<_>>();
-    if let Some(ten_index) = chars.iter().position(|ch| *ch == '十') {
-        let tens = if ten_index == 0 {
-            1
-        } else {
-            cjk_digit(chars[ten_index - 1])?
-        };
-        let ones = match chars.get(ten_index + 1).copied() {
-            Some(ch) => cjk_digit(ch)?,
-            None => 0,
-        };
-        return Some(tens * 10 + ones);
-    }
-    if chars.len() == 1 {
-        return cjk_digit(chars[0]);
-    }
-    None
-}
-
-fn cjk_digit(ch: char) -> Option<u32> {
-    match ch {
-        '零' | '〇' => Some(0),
-        '一' => Some(1),
-        '二' | '两' => Some(2),
-        '三' => Some(3),
-        '四' => Some(4),
-        '五' => Some(5),
-        '六' => Some(6),
-        '七' => Some(7),
-        '八' => Some(8),
-        '九' => Some(9),
-        _ => None,
-    }
-}
-
-fn roman_to_number(value: &str) -> Option<u32> {
-    let mut total = 0_i32;
-    let mut previous = 0_i32;
-    for ch in value.chars().rev() {
-        let current = match ch {
-            'i' => 1,
-            'v' => 5,
-            'x' => 10,
-            'l' => 50,
-            'c' => 100,
-            'd' => 500,
-            'm' => 1000,
-            _ => return None,
-        };
-        if current < previous {
-            total -= current;
-        } else {
-            total += current;
-            previous = current;
-        }
-    }
-    (total > 0).then_some(total as u32)
 }
 
 fn has_method_evidence(citations: &[Citation]) -> bool {
@@ -1179,607 +1065,6 @@ fn asks_document_overview(question: &str, intent: &str) -> bool {
                 || normalized.contains("核心结论")))
 }
 
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn citation(source: &str, section_title: Option<&str>, quote: &str) -> Citation {
-        Citation {
-            id: "c1".to_string(),
-            label: "[1]".to_string(),
-            page: 1,
-            block_id: "b1".to_string(),
-            section_title: section_title.map(str::to_string),
-            quote: quote.to_string(),
-            bbox_list: serde_json::json!([]),
-            document_id: "doc".to_string(),
-            source: source.to_string(),
-        }
-    }
-
-    #[test]
-    fn empty_evidence_does_not_exit_as_answerable() {
-        let decision = finalize_citations("这篇文章讲的什么？", "explain", &[], 2, 3);
-        assert_eq!(decision.status, "insufficient");
-        assert!(!decision.needs_more_evidence);
-        assert_eq!(decision.next_tool, None);
-    }
-
-    #[test]
-    fn document_overview_exits_when_page_evidence_is_sufficient() {
-        let quote = "MemGPT: Towards LLMs as Operating Systems\n\nAbstract. Large language models are limited by fixed context windows. This paper proposes virtual context management and a memory hierarchy that allows agents to page information between context and external storage while preserving long-running interactions.";
-        let decision = finalize_citations(
-            "这篇文章讲的什么？",
-            "explain",
-            &[citation("open_pages", Some("Page 1 overview"), quote)],
-            1,
-            3,
-        );
-        assert_eq!(decision.status, "answerable");
-        assert!(!decision.needs_more_evidence);
-    }
-
-    #[test]
-    fn english_document_overview_does_not_route_as_definition() {
-        let decision = finalize_citations("What is this paper about?", "explain", &[], 0, 3);
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("overview tool");
-        assert_eq!(next_tool.tool, "open_pages");
-        assert_eq!(next_tool.args["mode"], serde_json::json!("overview"));
-    }
-
-    #[test]
-    fn chinese_overview_plus_principle_uses_overview_not_definition() {
-        let decision = finalize_citations("这篇文章讲了什么？原理是什么？", "explain", &[], 0, 3);
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        assert!(!decision.reason.contains("definition"));
-        let next_tool = decision.next_tool_call.expect("overview tool");
-        assert_eq!(next_tool.tool, "open_pages");
-        assert_eq!(next_tool.args["mode"], serde_json::json!("overview"));
-    }
-
-    #[test]
-    fn chinese_overview_plus_principle_accepts_abstract_overview() {
-        let quote = "GLM-5: from Vibe Coding to Agentic Engineering\n\nAbstract. We present GLM-5, a next-generation foundation model designed to transition the paradigm of vibe coding to agentic engineering. Building upon agentic reasoning and coding capabilities, GLM-5 adopts DSA to reduce training and inference costs while maintaining long-context fidelity, and uses asynchronous reinforcement learning infrastructure to improve post-training efficiency.";
-        let decision = finalize_citations(
-            "这篇文章讲了什么？原理是什么？",
-            "explain",
-            &[citation("open_pages", Some("Page 1 overview"), quote)],
-            1,
-            20,
-        );
-
-        assert_eq!(decision.status, "answerable", "decision: {decision:?}");
-        assert!(!decision.needs_more_evidence);
-        assert_eq!(decision.runtime, "m3-rule-guard");
-    }
-
-    #[test]
-    fn overview_plus_experiment_does_not_accept_abstract_only() {
-        let quote = "GLM-5: from Vibe Coding to Agentic Engineering\n\nAbstract. We present GLM-5, a next-generation foundation model designed to transition the paradigm of vibe coding to agentic engineering. It adopts DSA for long-context fidelity and asynchronous reinforcement learning infrastructure for post-training efficiency.";
-        let decision = finalize_citations(
-            "这篇文章讲了什么？实验结果怎么样？",
-            "explain",
-            &[citation("open_pages", Some("Page 1 overview"), quote)],
-            1,
-            20,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("experiment section tool");
-        assert_eq!(next_tool.tool, "open_section");
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!("experiments evaluation results benchmark metric score SOTA table")
-        );
-    }
-
-    #[test]
-    fn author_question_requests_header_tool_when_missing_metadata() {
-        let decision = finalize_citations(
-            "这篇论文的作者有哪些？",
-            "explain",
-            &[citation(
-                "fts",
-                None,
-                "This paper proposes an adaptive context pruning method for coding agents.",
-            )],
-            0,
-            3,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        assert_eq!(
-            decision.missing,
-            vec![
-                "title".to_string(),
-                "authors".to_string(),
-                "affiliations".to_string()
-            ]
-        );
-        let next_tool = decision.next_tool_call.expect("header tool should be set");
-        assert_eq!(next_tool.tool, "open_pages");
-        assert_eq!(next_tool.args["page"], serde_json::json!(1));
-        assert_eq!(next_tool.args["mode"], serde_json::json!("header"));
-    }
-
-    #[test]
-    fn author_question_accepts_header_evidence() {
-        let decision = finalize_citations(
-            "这篇论文的作者有哪些？",
-            "explain",
-            &[citation(
-                "open_pages",
-                Some("Page 1 header"),
-                "SWE-Pruner\nYuhang Wang, Yuling Shi\nShanghai Jiao Tong University",
-            )],
-            1,
-            3,
-        );
-
-        assert_eq!(decision.status, "answerable");
-        assert!(decision.next_tool_call.is_none());
-    }
-
-    #[test]
-    fn method_question_requests_open_section() {
-        let decision = finalize_citations(
-            "这篇论文的方法框架是什么？",
-            "explain",
-            &[citation(
-                "fts",
-                None,
-                "This paper studies context pruning for coding agents.",
-            )],
-            0,
-            3,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("method section tool");
-        assert_eq!(next_tool.tool, "open_section");
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!("method approach methodology algorithm framework")
-        );
-    }
-
-    #[test]
-    fn method_and_experiment_question_rejects_page_overview_only() {
-        let decision = finalize_citations(
-            "这篇文章的方法具体是怎么设计的？请结合方法章节、算法流程和实验结果说明。",
-            "explain",
-            &[citation(
-                "open_pages",
-                Some("Page 21 overview"),
-                "CASE STUDY ON SWE BENCH. The Pruner-augmented agent applies context pruning to file observations and reports token reduction.",
-            )],
-            0,
-            20,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("method section tool");
-        assert_eq!(next_tool.tool, "open_section");
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!("method approach methodology algorithm framework")
-        );
-    }
-
-    #[test]
-    fn experiment_question_requests_open_section() {
-        let decision = finalize_citations(
-            "实验结果怎么样？",
-            "explain",
-            &[citation(
-                "fts",
-                None,
-                "This paper studies context pruning for coding agents.",
-            )],
-            0,
-            3,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("experiment section tool");
-        assert_eq!(next_tool.tool, "open_section");
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!("experiments evaluation results benchmark metric score SOTA table")
-        );
-    }
-
-    #[test]
-    fn table_metric_question_opens_full_table_after_structured_fact_hit() {
-        let decision = finalize_citations(
-            "请列出 Table 7 中 GLM-5 在 SWE-bench Verified 上的分数。",
-            "explain",
-            &[citation(
-                "table_fact",
-                Some("Table 7"),
-                "Table 7: Comparison between GLM-5 and open-source/proprietary models. Coding / SWE-bench Verified | GLM-5 = 77.8",
-            )],
-            1,
-            20,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("open table tool");
-        assert_eq!(next_tool.tool, "open_table");
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!("请列出 Table 7 中 GLM-5 在 SWE-bench Verified 上的分数。")
-        );
-    }
-
-    #[test]
-    fn table_explanation_question_opens_requested_table_before_definition_search() {
-        let decision = finalize_citations("表 6 是什么，我看不懂，解读一下", "explain", &[], 0, 20);
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("open table tool");
-        assert_eq!(next_tool.tool, "open_table");
-        assert_eq!(next_tool.args["tableNumber"], serde_json::json!("6"));
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!("表 6 是什么，我看不懂，解读一下")
-        );
-        assert!(!decision.reason.contains("definition"));
-    }
-
-    #[test]
-    fn table_explanation_question_still_opens_table_after_fact_hit() {
-        let decision = finalize_citations(
-            "表 6 是什么，我看不懂，解读一下",
-            "explain",
-            &[citation(
-                "table_fact",
-                Some("Table 6"),
-                "Table 6 | Column 1 | Input Length = 64",
-            )],
-            1,
-            20,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("open table tool");
-        assert_eq!(next_tool.tool, "open_table");
-        assert_eq!(next_tool.args["tableNumber"], serde_json::json!("6"));
-    }
-
-    #[test]
-    fn table_explanation_question_accepts_exact_open_table() {
-        let decision = finalize_citations(
-            "表 6 是什么，我看不懂，解读一下",
-            "explain",
-            &[citation(
-                "open_table",
-                Some("Table 6"),
-                "Table 6: Average TTFT (ms) for different models and input lengths.",
-            )],
-            1,
-            20,
-        );
-
-        assert_eq!(decision.status, "answerable", "decision: {decision:?}");
-        assert!(!decision.needs_more_evidence);
-    }
-
-    #[test]
-    fn table_metric_question_can_finish_after_open_table_evidence() {
-        let decision = finalize_citations(
-            "请列出 Table 7 中 GLM-5 在 SWE-bench Verified 上的分数。",
-            "explain",
-            &[citation(
-                "open_table",
-                Some("Table 7"),
-                "Table 7: Comparison between GLM-5 and open-source/proprietary models. Coding / SWE-bench Verified | GLM-5 = 77.8",
-            )],
-            1,
-            20,
-        );
-
-        assert_eq!(decision.status, "answerable", "decision: {decision:?}");
-        assert!(!decision.needs_more_evidence);
-        assert!(decision.reason.contains("LLM evidence judge"));
-    }
-
-    #[test]
-    fn table_metric_phrase_is_not_treated_as_definition_request() {
-        let decision = finalize_citations(
-            "Table 3 里面提到的 SWE-Pruner 是什么指标？结果是怎么样的？",
-            "explain",
-            &[citation(
-                "open_table",
-                Some("Table 3"),
-                "Table 3 | SWE-Pruner | Rounds = 41.1\nTable 3 | SWE-Pruner | Success (%) = 64.0\nTable 3 | SWE-Pruner | Tokens (M) = 0.670",
-            )],
-            1,
-            20,
-        );
-
-        assert_eq!(decision.status, "answerable", "decision: {decision:?}");
-        assert!(!decision
-            .missing
-            .iter()
-            .any(|missing| missing.contains("definition")));
-    }
-
-    #[test]
-    fn figure_question_requests_caption_search() {
-        let decision = finalize_citations(
-            "图 1 说明了什么？",
-            "explain",
-            &[citation(
-                "fts",
-                None,
-                "This paper studies context pruning for coding agents.",
-            )],
-            0,
-            3,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("figure search tool");
-        assert_eq!(next_tool.tool, "inspect_visuals");
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!("figure table chart caption")
-        );
-    }
-
-    #[test]
-    fn figure_question_does_not_accept_visual_anchor_only() {
-        let decision = finalize_citations(
-            "Figure 3 说明了什么？",
-            "explain",
-            &[citation(
-                "visual_anchor",
-                Some("Figure 3"),
-                "Resolved visual anchor: Figure 3 on page 4\nassetId=fig-3",
-            )],
-            0,
-            3,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("visual content tool");
-        assert_eq!(next_tool.tool, "inspect_visuals");
-    }
-
-    #[test]
-    fn definition_question_requests_definition_search() {
-        let decision = finalize_citations(
-            "SWE-Pruner 是什么？",
-            "explain",
-            &[citation(
-                "fts",
-                None,
-                "The paper evaluates several coding agents on benchmark tasks.",
-            )],
-            0,
-            3,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("definition search tool");
-        assert_eq!(next_tool.tool, "search_chunks");
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!("definition defined means refers to called proposed introduced")
-        );
-    }
-
-    #[test]
-    fn current_view_evidence_defers_definition_semantics_to_llm() {
-        let decision = finalize_citations(
-            "这些 Task Type 是什么意思？解读一下",
-            "explain",
-            &[citation(
-                "current_view",
-                Some("Current view page evidence: Page 17 lines 2-37"),
-                "Table 5 Agentic Tasks Taxonomy used for Query Synthesis\nTask Type Instruction for Query Generation\ncode-summarize Summarize the main purpose or functionality of the code, but do not explain every line.\ncode-refactor Suggest a refactoring or improvement for the code.\nfind-relevant-part Ask to locate or identify the part of the code that implements a specific feature or logic.\ncode-optimize Request an optimization for the code.\ncode-locate Ask to pinpoint the location of a bug, feature, or important logic within the code.\ncode-explain Request an explanation for a particular logic, algorithm, or design choice in the code.",
-            )],
-            0,
-            20,
-        );
-
-        assert_eq!(decision.status, "answerable");
-        assert!(decision.next_tool_call.is_none());
-        assert_eq!(decision.runtime, "m3-rule-guard");
-    }
-
-    #[test]
-    fn current_view_requested_table_does_not_force_open_table_in_m3() {
-        let decision = finalize_citations(
-            "Table 3 里面 SWE-Pruner 的数值是什么结果？",
-            "explain",
-            &[citation(
-                "current_view",
-                Some("Current view page evidence: Page 8 lines 1-12"),
-                "Table 3\nMethod Rounds Success (%) Tokens (M)\nSWE-Pruner 41.1 64.0 0.670",
-            )],
-            0,
-            20,
-        );
-
-        assert_eq!(decision.status, "answerable");
-        assert!(decision.next_tool_call.is_none());
-        assert_eq!(decision.runtime, "m3-rule-guard");
-    }
-
-    #[test]
-    fn definition_question_accepts_definitional_evidence() {
-        let decision = finalize_citations(
-            "SWE-Pruner 是什么？",
-            "explain",
-            &[citation(
-                "fts",
-                Some("Abstract"),
-                "In this paper, we propose SWE-Pruner, a self-adaptive context pruning framework for coding agents.",
-            )],
-            1,
-            3,
-        );
-
-        assert_eq!(decision.status, "answerable");
-        assert!(decision.next_tool_call.is_none());
-    }
-
-    #[test]
-    fn definition_question_rejects_irrelevant_chinese_copula_evidence() {
-        let decision = finalize_citations(
-            "SWE-Pruner 是什么？",
-            "explain",
-            &[citation(
-                "fts",
-                Some("Experiments"),
-                "这是实验结果，展示模型在多个基准上的性能。",
-            )],
-            0,
-            3,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("definition search tool");
-        assert_eq!(next_tool.tool, "search_chunks");
-    }
-
-    #[test]
-    fn definition_question_accepts_targeted_chinese_definition() {
-        let decision = finalize_citations(
-            "SWE-Pruner 是什么？",
-            "explain",
-            &[citation(
-                "fts",
-                Some("Abstract"),
-                "SWE-Pruner 是一种面向 coding agents 的自适应上下文剪枝框架。",
-            )],
-            1,
-            3,
-        );
-
-        assert_eq!(decision.status, "answerable");
-    }
-
-    #[test]
-    fn location_question_requests_section_when_only_plain_chunk_exists() {
-        let decision = finalize_citations(
-            "这个方法在哪一节介绍？",
-            "locate",
-            &[citation(
-                "fts",
-                None,
-                "The method uses an adaptive pruning framework.",
-            )],
-            0,
-            3,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("location section tool");
-        assert_eq!(next_tool.tool, "open_section");
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!(
-                "section page location introduced described definition method reference"
-            )
-        );
-    }
-
-    #[test]
-    fn location_question_accepts_section_evidence() {
-        let decision = finalize_citations(
-            "这个方法在哪一节介绍？",
-            "locate",
-            &[citation(
-                "open_section",
-                Some("3 Method"),
-                "Section: 3 Method\nThe method uses an adaptive pruning framework.",
-            )],
-            1,
-            3,
-        );
-
-        assert_eq!(decision.status, "answerable");
-    }
-
-    #[test]
-    fn reference_question_requests_related_work_or_references_section() {
-        let decision = finalize_citations(
-            "这句话的引用来源是什么？",
-            "explain",
-            &[citation(
-                "fts",
-                None,
-                "The method uses an adaptive pruning framework.",
-            )],
-            0,
-            3,
-        );
-
-        assert_eq!(decision.status, "needs_more_evidence");
-        let next_tool = decision.next_tool_call.expect("reference section tool");
-        assert_eq!(next_tool.tool, "open_section");
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!("references related work citation bibliography source prior work")
-        );
-    }
-
-    #[test]
-    fn reference_question_accepts_reference_evidence() {
-        let decision = finalize_citations(
-            "相关工作引用了哪些方法？",
-            "explain",
-            &[citation(
-                "open_section",
-                Some("2 Related Work"),
-                "Section: 2 Related Work\nPrior work on context compression includes LongLLMLingua and LLMLingua.",
-            )],
-            1,
-            3,
-        );
-
-        assert_eq!(decision.status, "answerable");
-    }
-
-    #[test]
-    fn cjk_figure_detection_does_not_match_common_words() {
-        let decision = finalize_citations(
-            "这个方法的表现如何？",
-            "explain",
-            &[citation(
-                "fts",
-                None,
-                "This paper studies context pruning for coding agents.",
-            )],
-            0,
-            3,
-        );
-
-        let next_tool = decision.next_tool_call.expect("method tool should be set");
-        assert_eq!(next_tool.tool, "open_section");
-        assert_eq!(
-            next_tool.args["query"],
-            serde_json::json!("method approach methodology algorithm framework")
-        );
-    }
-
-    #[test]
-    fn table_number_parser_handles_cjk_table_markers() {
-        assert_eq!(requested_table_number("表 6 是什么"), Some("6".to_string()));
-        assert_eq!(
-            requested_table_number("表六解读一下"),
-            Some("6".to_string())
-        );
-        assert_eq!(
-            requested_table_number("Table VI latency"),
-            Some("6".to_string())
-        );
-        assert_eq!(requested_table_number("这个方法的表现如何？"), None);
-    }
-}
+mod tests;

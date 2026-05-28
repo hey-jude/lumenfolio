@@ -177,7 +177,7 @@ pub(crate) async fn judge_answerability_with_openai_compatible(
         .map(|choice| extract_chat_response_text(&choice.message.content))
         .filter(|text| !text.trim().is_empty())
         .ok_or_else(|| "Answerability judge returned an empty response".to_string())?;
-    parse_answerability_decision(&text)
+    parse_answerability_decision_for_vision(&text, vision_enabled)
 }
 
 pub(crate) async fn judge_current_view_relevance_with_openai_compatible(
@@ -286,7 +286,15 @@ fn build_answerability_judge_prompt(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn parse_answerability_decision(text: &str) -> Result<LlmAnswerabilityDecision, String> {
+    parse_answerability_decision_for_vision(text, false)
+}
+
+pub(crate) fn parse_answerability_decision_for_vision(
+    text: &str,
+    vision_enabled: bool,
+) -> Result<LlmAnswerabilityDecision, String> {
     let json_text = extract_json_object(text)
         .ok_or_else(|| "Answerability judge did not return a JSON object".to_string())?;
     let value = serde_json::from_str::<serde_json::Value>(json_text)
@@ -311,17 +319,44 @@ pub(crate) fn parse_answerability_decision(text: &str) -> Result<LlmAnswerabilit
         .trim()
         .to_string();
     let missing = normalize_missing_list(value.get("missing"));
-    let next_tool_call = normalize_next_tool_call(value.get("nextToolCall"))?;
-    let decision = LlmAnswerabilityDecision {
+    let mut next_tool_call = normalize_next_tool_call(value.get("nextToolCall"))?;
+
+    // P4-2 schema validation: the tool name must be in the registered RAG tool
+    // catalogue (vision-gated when applicable), and `args` must be an object.
+    if let Some(call) = next_tool_call.as_ref() {
+        let capabilities = runtime::rag::RagToolCapabilities {
+            vision_enabled,
+            ..runtime::rag::RagToolCapabilities::default()
+        };
+        if !runtime::rag::is_registered_rag_tool_for_capabilities(&call.tool, capabilities) {
+            return Err(format!(
+                "Answerability judge requested an unknown tool: {}",
+                call.tool
+            ));
+        }
+        if !call.args.is_object() {
+            return Err(format!(
+                "Answerability judge nextToolCall.args must be a JSON object, got: {}",
+                call.args
+            ));
+        }
+    }
+
+    if status == "needs_more_evidence" && next_tool_call.is_none() {
+        return Err("Answerability judge requested more evidence without a tool call".to_string());
+    }
+    // Defensive: if status is not needs_more_evidence but a tool was suggested,
+    // clear it so downstream loops do not silently keep retrieving.
+    if status != "needs_more_evidence" {
+        next_tool_call = None;
+    }
+
+    Ok(LlmAnswerabilityDecision {
         status,
         reason,
         missing,
         next_tool_call,
-    };
-    if decision.status == "needs_more_evidence" && decision.next_tool_call.is_none() {
-        return Err("Answerability judge requested more evidence without a tool call".to_string());
-    }
-    Ok(decision)
+    })
 }
 
 pub(crate) fn parse_current_view_decision(text: &str) -> Result<LlmCurrentViewDecision, String> {
@@ -668,6 +703,55 @@ mod tests {
         let call = decision.next_tool_call.expect("tool call");
         assert_eq!(call.tool, "inspect_tree");
         assert_eq!(call.args, serde_json::json!({}));
+    }
+
+    #[test]
+    fn rejects_unknown_tool_in_next_tool_call() {
+        let err = parse_answerability_decision(
+            r#"{"status":"needs_more_evidence","reason":"r","nextToolCall":{"tool":"hallucinated_tool","args":{}}}"#,
+        )
+        .expect_err("unknown tool should fail");
+        assert!(err.contains("unknown tool"), "{err}");
+    }
+
+    #[test]
+    fn rejects_non_object_args_in_next_tool_call() {
+        let err = parse_answerability_decision(
+            r#"{"status":"needs_more_evidence","reason":"r","nextToolCall":{"tool":"inspect_tree","args":"oops"}}"#,
+        )
+        .expect_err("non-object args should fail");
+        assert!(err.contains("args"), "{err}");
+    }
+
+    #[test]
+    fn rejects_vision_tool_when_vision_disabled() {
+        let err = parse_answerability_decision_for_vision(
+            r#"{"status":"needs_more_evidence","reason":"r","nextToolCall":{"tool":"analyze_visual","args":{}}}"#,
+            false,
+        )
+        .expect_err("vision tool should be rejected when capability is off");
+        assert!(err.contains("unknown tool"), "{err}");
+    }
+
+    #[test]
+    fn accepts_vision_tool_when_vision_enabled() {
+        let decision = parse_answerability_decision_for_vision(
+            r#"{"status":"needs_more_evidence","reason":"r","nextToolCall":{"tool":"analyze_visual","args":{"page":3}}}"#,
+            true,
+        )
+        .expect("vision tool should be allowed when capability is on");
+        let call = decision.next_tool_call.expect("tool call");
+        assert_eq!(call.tool, "analyze_visual");
+    }
+
+    #[test]
+    fn clears_tool_call_when_status_not_needs_more_evidence() {
+        let decision = parse_answerability_decision(
+            r#"{"status":"answerable","reason":"r","nextToolCall":{"tool":"inspect_tree","args":{}}}"#,
+        )
+        .expect("answerable decision");
+        assert_eq!(decision.status, "answerable");
+        assert!(decision.next_tool_call.is_none());
     }
 
     #[test]

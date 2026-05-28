@@ -8,6 +8,10 @@ use std::{
 };
 use tauri::Emitter;
 
+use crate::runtime::agent::{
+    lexicon, tool_call_event, tool_result_event,
+    trace_preview_from_output as trace_preview_from_rag_output,
+};
 use crate::{
     llm, normalize_base_url, runtime, truncate_for_error, vision, AgentActivityEventOutput,
     AppDatabase, AskDocumentInput, OpenAiChatRequest, OpenAiChatResponse, OpenAiCompatibleProvider,
@@ -363,18 +367,16 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                 );
                 fallback_query_owned.as_str()
             };
-        let tool_start = runtime::agent::AgentTraceEvent::new(
-            "tool_call",
+        let tool_start = tool_call_event(
             call.tool.clone(),
-            "running",
+            call.args.clone(),
             format!("Calling {}", call.tool),
             call.reason.clone(),
             format!(
                 "llm_judge tool={} args={} fallback_query={}",
                 call.tool, call.args, fallback_query
             ),
-        )
-        .with_tool(call.tool.clone(), call.args.clone());
+        );
         emit_agent_activity_optional(ctx.app, ctx.activity_event_id, tool_start.clone());
 
         let output = if call.tool == "analyze_visual" {
@@ -396,28 +398,13 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                 rag_capabilities,
             ))
         }?;
-        let event = runtime::agent::AgentTraceEvent::new(
-            "tool_result",
+        let event = tool_result_event(
+            &output,
             output.tool_call.tool.clone(),
-            trace_event_status_from_tool_status(&output.tool_call.status),
-            format!("{} result", output.tool_call.tool),
-            format!(
-                "{} returned {} results",
-                output.tool_call.tool, output.tool_call.result_count
-            ),
             format!(
                 "llm_judge tool={} results={} reason={}",
                 output.tool_call.tool, output.tool_call.result_count, call.reason
             ),
-        )
-        .with_tool(
-            output.tool_call.tool.clone(),
-            output.tool_call.input.clone(),
-        )
-        .with_result(
-            output.tool_call.result_count,
-            trace_preview_from_rag_output(&output),
-            output.tool_call.error.clone(),
         );
         emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
         agent_run.trace.events.push(event);
@@ -445,18 +432,16 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                     "query": fallback_query,
                     "lineLimit": 12
                 });
-                let line_start = runtime::agent::AgentTraceEvent::new(
-                    "tool_call",
+                let line_start = tool_call_event(
                     "read_tree_node_lines",
-                    "running",
+                    line_args.clone(),
                     "Calling read_tree_node_lines",
                     "Inspecting line-level content inside matched sections",
                     format!(
                         "llm_judge follow-up tool=read_tree_node_lines args={} fallback_query={}",
                         line_args, fallback_query
                     ),
-                )
-                .with_tool("read_tree_node_lines", line_args.clone());
+                );
                 emit_agent_activity_optional(ctx.app, ctx.activity_event_id, line_start.clone());
                 let line_output = {
                     let conn = ctx
@@ -473,28 +458,13 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                         rag_capabilities,
                     )
                 };
-                let event = runtime::agent::AgentTraceEvent::new(
-                    "tool_result",
+                let event = tool_result_event(
+                    &line_output,
                     line_output.tool_call.tool.clone(),
-                    trace_event_status_from_tool_status(&line_output.tool_call.status),
-                    format!("{} result", line_output.tool_call.tool),
-                    format!(
-                        "{} returned {} results",
-                        line_output.tool_call.tool, line_output.tool_call.result_count
-                    ),
                     format!(
                         "llm_judge follow-up tool={} results={} reason=inspect_tree returned section nodes",
                         line_output.tool_call.tool, line_output.tool_call.result_count
                     ),
-                )
-                .with_tool(
-                    line_output.tool_call.tool.clone(),
-                    line_output.tool_call.input.clone(),
-                )
-                .with_result(
-                    line_output.tool_call.result_count,
-                    trace_preview_from_rag_output(&line_output),
-                    line_output.tool_call.error.clone(),
                 );
                 emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
                 agent_run.trace.events.push(event);
@@ -508,18 +478,16 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                     "query": fallback_query,
                     "perSectionLimit": 10
                 });
-                let section_start = runtime::agent::AgentTraceEvent::new(
-                    "tool_call",
+                let section_start = tool_call_event(
                     "open_section",
-                    "running",
+                    open_args.clone(),
                     "Calling open_section",
                     "Opening full section evidence after line lookup found nothing new",
                     format!(
                         "llm_judge follow-up tool=open_section args={} fallback_query={}",
                         open_args, fallback_query
                     ),
-                )
-                .with_tool("open_section", open_args.clone());
+                );
                 emit_agent_activity_optional(ctx.app, ctx.activity_event_id, section_start.clone());
                 let section_output = {
                     let conn = ctx
@@ -536,28 +504,13 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                         rag_capabilities,
                     )
                 };
-                let event = runtime::agent::AgentTraceEvent::new(
-                    "tool_result",
+                let event = tool_result_event(
+                    &section_output,
                     section_output.tool_call.tool.clone(),
-                    trace_event_status_from_tool_status(&section_output.tool_call.status),
-                    format!("{} result", section_output.tool_call.tool),
-                    format!(
-                        "{} returned {} results",
-                        section_output.tool_call.tool, section_output.tool_call.result_count
-                    ),
                     format!(
                         "llm_judge follow-up tool={} results={} reason=line evidence unavailable",
                         section_output.tool_call.tool, section_output.tool_call.result_count
                     ),
-                )
-                .with_tool(
-                    section_output.tool_call.tool.clone(),
-                    section_output.tool_call.input.clone(),
-                )
-                .with_result(
-                    section_output.tool_call.result_count,
-                    trace_preview_from_rag_output(&section_output),
-                    section_output.tool_call.error.clone(),
                 );
                 emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
                 agent_run.trace.events.push(event);
@@ -1242,126 +1195,9 @@ pub(super) fn question_needs_table_evidence(question: &str) -> bool {
 }
 
 pub(super) fn requested_table_number(question: &str) -> Option<String> {
-    let normalized = question.to_lowercase();
-    for (index, _) in normalized.match_indices("table") {
-        let rest = &normalized[index + "table".len()..];
-        let rest_chars = rest
-            .chars()
-            .skip_while(|ch| ch.is_ascii_whitespace() || matches!(ch, ':' | '#' | '-'))
-            .collect::<Vec<_>>();
-        if let Some((number, _)) = table_number_prefix(&rest_chars) {
-            return Some(number);
-        }
-    }
-    let chars = normalized.chars().collect::<Vec<_>>();
-    for (index, ch) in chars.iter().enumerate() {
-        if *ch == '表' {
-            let rest = chars
-                .iter()
-                .skip(index + 1)
-                .skip_while(|ch| ch.is_ascii_whitespace() || matches!(ch, ':' | '#' | '-' | '：'))
-                .copied()
-                .collect::<Vec<_>>();
-            if let Some((number, _)) = table_number_prefix(&rest) {
-                return Some(number);
-            }
-        }
-        if *ch == '第' {
-            if let Some((number, len)) = table_number_prefix(&chars[index + 1..]) {
-                if chars.get(index + 1 + len).is_some_and(|next| *next == '表') {
-                    return Some(number);
-                }
-            }
-        }
-    }
-    None
+    lexicon::requested_table_number(question)
 }
 
-fn table_number_prefix(chars: &[char]) -> Option<(String, usize)> {
-    let digits = chars
-        .iter()
-        .take_while(|ch| ch.is_ascii_digit())
-        .collect::<String>();
-    if !digits.is_empty() {
-        return Some((digits.clone(), digits.chars().count()));
-    }
-    let cjk = chars
-        .iter()
-        .take_while(|ch| is_cjk_number_char(**ch))
-        .collect::<String>();
-    let number = parse_cjk_number(&cjk)?;
-    Some((number.to_string(), cjk.chars().count()))
-}
-
-fn is_cjk_number_char(ch: char) -> bool {
-    matches!(
-        ch,
-        '零' | '〇' | '一' | '二' | '两' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十'
-    )
-}
-
-fn parse_cjk_number(value: &str) -> Option<u32> {
-    if value.is_empty() {
-        return None;
-    }
-    let chars = value.chars().collect::<Vec<_>>();
-    if let Some(ten_index) = chars.iter().position(|ch| *ch == '十') {
-        let tens = if ten_index == 0 {
-            1
-        } else {
-            cjk_digit(chars[ten_index - 1])?
-        };
-        let ones = match chars.get(ten_index + 1).copied() {
-            Some(ch) => cjk_digit(ch)?,
-            None => 0,
-        };
-        return Some(tens * 10 + ones);
-    }
-    if chars.len() == 1 {
-        return cjk_digit(chars[0]);
-    }
-    None
-}
-
-fn cjk_digit(ch: char) -> Option<u32> {
-    match ch {
-        '零' | '〇' => Some(0),
-        '一' => Some(1),
-        '二' | '两' => Some(2),
-        '三' => Some(3),
-        '四' => Some(4),
-        '五' => Some(5),
-        '六' => Some(6),
-        '七' => Some(7),
-        '八' => Some(8),
-        '九' => Some(9),
-        _ => None,
-    }
-}
-
-fn trace_event_status_from_tool_status(status: &str) -> &'static str {
-    if status == "error" {
-        "error"
-    } else {
-        "completed"
-    }
-}
-
-fn trace_preview_from_rag_output(
-    output: &runtime::rag::RagToolExecutionOutput,
-) -> Vec<runtime::agent::AgentTracePreview> {
-    output
-        .trace_candidates
-        .iter()
-        .take(3)
-        .map(|candidate| runtime::agent::AgentTracePreview {
-            page: candidate.page,
-            section_title: candidate.section_title.clone(),
-            quote: candidate.quote.clone(),
-            source: candidate.source.clone(),
-        })
-        .collect()
-}
 
 fn no_gain_tool_feedback(
     call: &llm::chat::LlmRagToolCall,
@@ -1416,18 +1252,16 @@ fn maybe_open_table_page_fallback(
         "mode": "full",
         "limit": 40
     });
-    let page_start = runtime::agent::AgentTraceEvent::new(
-        "tool_call",
+    let page_start = tool_call_event(
         "open_pages",
-        "running",
+        page_args.clone(),
         "Calling open_pages",
         "Opening the source page because structured table extraction looked sparse or noisy",
         format!(
             "llm_judge follow-up tool=open_pages args={} fallback_query={}",
             page_args, fallback_query
         ),
-    )
-    .with_tool("open_pages", page_args.clone());
+    );
     emit_agent_activity_optional(ctx.app, ctx.activity_event_id, page_start.clone());
 
     let page_output = {
@@ -1452,28 +1286,13 @@ fn maybe_open_table_page_fallback(
             },
         )
     };
-    let event = runtime::agent::AgentTraceEvent::new(
-        "tool_result",
+    let event = tool_result_event(
+        &page_output,
         page_output.tool_call.tool.clone(),
-        trace_event_status_from_tool_status(&page_output.tool_call.status),
-        format!("{} result", page_output.tool_call.tool),
-        format!(
-            "{} returned {} results",
-            page_output.tool_call.tool, page_output.tool_call.result_count
-        ),
         format!(
             "llm_judge follow-up tool={} results={} reason=structured table evidence was incomplete",
             page_output.tool_call.tool, page_output.tool_call.result_count
         ),
-    )
-    .with_tool(
-        page_output.tool_call.tool.clone(),
-        page_output.tool_call.input.clone(),
-    )
-    .with_result(
-        page_output.tool_call.result_count,
-        trace_preview_from_rag_output(&page_output),
-        page_output.tool_call.error.clone(),
     );
     emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
     agent_run.trace.events.push(event);
@@ -1490,38 +1309,7 @@ fn table_page_fallback_page(
         return None;
     }
     let requested = requested_table_number(question)?;
-    let requested_page = output
-        .citations
-        .iter()
-        .find(|citation| {
-            citation.source == "open_table"
-                && citation
-                    .section_title
-                    .as_deref()
-                    .and_then(requested_table_number)
-                    .as_deref()
-                    .is_some_and(|number| number == requested)
-        })
-        .map(|citation| citation.page)
-        .or_else(|| output.citations.first().map(|citation| citation.page))?;
-
-    let combined = output
-        .citations
-        .iter()
-        .map(|citation| citation.quote.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .to_lowercase();
-    let table_evidence_is_sparse = output.citations.len() < 6 || combined.chars().count() < 700;
-    let table_evidence_has_placeholder_columns = combined.contains("column 1")
-        || combined.contains("column 2")
-        || combined.contains("column 3")
-        || combined.contains("column 4");
-    if table_evidence_is_sparse || table_evidence_has_placeholder_columns {
-        Some(requested_page)
-    } else {
-        None
-    }
+    runtime::agent::table_fallback::sparse_open_table_page(output, Some(requested.as_str()))
 }
 
 fn format_json_string_list(value: &serde_json::Value) -> String {
@@ -1574,15 +1362,16 @@ pub(super) fn has_image_context(input: &AskDocumentInput) -> bool {
 }
 
 pub(crate) fn retrieval_is_answerable(agent_run: &runtime::agent::AgentRunResult) -> bool {
+    use runtime::agent::{FinalizeRuntime, FinalizeStatus};
     let gate = &agent_run.retrieval_run.trace.finalize_gate;
     let status_is_answerable = gate
         .get("status")
         .and_then(|value| value.as_str())
-        .is_some_and(|status| status == "answerable");
+        .is_some_and(|status| status == FinalizeStatus::Answerable.as_str());
     let runtime_is_llm_judge = gate
         .get("runtime")
         .and_then(|value| value.as_str())
-        .is_some_and(|runtime| runtime == "m4-llm-judge");
+        .is_some_and(|runtime| runtime == FinalizeRuntime::M4LlmJudge.as_str());
     status_is_answerable && runtime_is_llm_judge
 }
 
@@ -1621,6 +1410,13 @@ pub(super) fn retrieval_budget_exhausted(agent_run: &runtime::agent::AgentRunRes
 }
 
 pub(super) fn retrieval_attempt_count(agent_run: &runtime::agent::AgentRunResult) -> u32 {
+    let from_attempts = agent_run.attempts.used;
+    if from_attempts > 0 {
+        return from_attempts;
+    }
+    // Backward-compatible fallback: older `AgentRunResult` instances built
+    // outside `run_turn_with_activity` (e.g. legacy test fixtures) may lack
+    // populated `attempts`, so we still derive from the trace JSON gate.
     agent_run
         .retrieval_run
         .trace

@@ -2172,17 +2172,20 @@ fn restore_agent_session_from_turns(
 }
 
 fn attach_context_budget_to_agent_run(agent_run: &mut runtime::agent::AgentRunResult) {
-    let Ok(context_budget) = serde_json::to_value(&agent_run.retrieval_run.context_budget) else {
-        return;
-    };
-    for gate in [
-        &mut agent_run.retrieval_run.trace.finalize_gate,
-        &mut agent_run.trace.finalize_gate,
-    ] {
-        if let Some(object) = gate.as_object_mut() {
-            object.insert("contextBudget".to_string(), context_budget.clone());
+    if let Ok(context_budget) = serde_json::to_value(&agent_run.retrieval_run.context_budget) {
+        for gate in [
+            &mut agent_run.retrieval_run.trace.finalize_gate,
+            &mut agent_run.trace.finalize_gate,
+        ] {
+            if let Some(object) = gate.as_object_mut() {
+                object.insert("contextBudget".to_string(), context_budget.clone());
+            }
         }
     }
+    // P4-4: assign a monotonic seq right before the trace is serialized so
+    // the frontend has a stable ordering even after M4 LLM-judge events are
+    // appended (and out-of-order ts values from different runtimes can occur).
+    agent_run.trace.renumber_events();
 }
 
 fn insufficient_evidence_answer(
@@ -3494,6 +3497,7 @@ mod tests {
             },
             trace,
             session_context: String::new(),
+            attempts: runtime::agent::RetrievalAttempts::default(),
         }
     }
 }
