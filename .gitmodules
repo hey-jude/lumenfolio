@@ -1,0 +1,4 @@
+[submodule "external/PDFMathTranslate/pdf2zh/kernel/PDFMathTranslate-next.git"]
+	path = external/PDFMathTranslate/pdf2zh/kernel/PDFMathTranslate-next.git
+	url = https://github.com/PDFMathTranslate/PDFMathTranslate-next.git
+	branch = main
