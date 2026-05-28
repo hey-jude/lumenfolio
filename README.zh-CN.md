@@ -101,6 +101,10 @@ Question
 - API Key 当前仍是本地存储（后续再迁移到系统 keychain）。
 - 若配置云端模型/翻译 Provider，选中文本与问题可能会发送到对应服务商。
 
+## 致谢
+
+- 感谢 [`PDFMathTranslate`](https://github.com/PDFMathTranslate/PDFMathTranslate) 在翻译能力上的支持与相关工程启发。
+
 ## License
 
 本项目采用 PolyForm Noncommercial License 1.0.0。

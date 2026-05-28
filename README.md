@@ -101,6 +101,10 @@ Question
 - API keys are currently stored locally (keychain migration is planned later).
 - If cloud model/translation providers are configured, selected text/questions may be sent to those providers.
 
+## Acknowledgements
+
+- Thanks to [`PDFMathTranslate`](https://github.com/PDFMathTranslate/PDFMathTranslate) for its translation capabilities and related engineering inspiration.
+
 ## License
 
 This project is licensed under the PolyForm Noncommercial License 1.0.0.
