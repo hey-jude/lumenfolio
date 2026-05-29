@@ -5,6 +5,7 @@ use crate::runtime::rag::{self, Citation, RetrievalRequest, RetrievalRun};
 use super::compact::{compact_session, CompactResult};
 use super::context::build_chat_context;
 use super::decision::{FinalizeStatus, RetrievalAttempts};
+use super::ledger::RetrievalLedger;
 use super::policy::{finalize_citations, FinalizeDecision};
 use super::memory::{preview_text, summarize_citations, RecentTurnSummary};
 use super::protocol::{AgentIntent, AgentStepKind};
@@ -39,6 +40,11 @@ pub struct AgentRunResult {
     /// Single source of truth for how many retrieval steps the agent run used.
     /// Read this instead of recomputing from `retrieval_run.trace.finalize_gate`.
     pub attempts: RetrievalAttempts,
+    /// Unified "what have I already looked at" record for this turn (tool-call
+    /// dedupe + coverage + judge feedback). Populated by the M3 loop and handed
+    /// to the M4 LLM-judge loop so it inherits the M3 coverage instead of
+    /// re-deriving its own dedupe state.
+    pub ledger: RetrievalLedger,
 }
 
 pub fn run_turn_with_activity<F>(
@@ -60,7 +66,7 @@ where
         .unwrap_or(DEFAULT_MAX_RETRIEVAL_STEPS)
         .clamp(1, MAX_RETRIEVAL_STEPS);
     let mut loop_events = Vec::new();
-    let (mut retrieval_run, finalize) = run_answerability_loop(
+    let (mut retrieval_run, finalize, ledger) = run_answerability_loop(
         conn,
         &request,
         intent,
@@ -111,6 +117,7 @@ where
         trace,
         session_context,
         attempts,
+        ledger,
     })
 }
 
@@ -122,14 +129,14 @@ fn run_answerability_loop<F>(
     attempt_offset: u32,
     loop_events: &mut Vec<super::trace::AgentTraceEvent>,
     on_event: &mut F,
-) -> Result<(RetrievalRun, FinalizeDecision), String>
+) -> Result<(RetrievalRun, FinalizeDecision, RetrievalLedger), String>
 where
     F: FnMut(&AgentTraceEvent),
 {
     let mut attempt = attempt_offset;
     let max_attempts = attempt_offset.saturating_add(max_attempts);
     let mut accumulated_citations = Vec::new();
-    let mut attempted_tool_signatures = std::collections::HashSet::new();
+    let mut ledger = RetrievalLedger::new();
     let start_event = AgentTraceEvent::new(
         "retrieval_round",
         AgentStepKind::SearchChunks.as_str(),
@@ -201,6 +208,7 @@ where
         &retrieval_run.citations,
         &request.context_budget,
     );
+    ledger.record_coverage(&retrieval_run.citations);
 
     loop {
         rag::apply_retrieval_citations(&mut retrieval_run, accumulated_citations.clone());
@@ -236,15 +244,14 @@ where
         loop_events.push(finalize_event);
 
         if !decision.needs_more_evidence {
-            return Ok((retrieval_run, decision));
+            return Ok((retrieval_run, decision, ledger));
         }
 
         let fallback_query = broad_context_query(intent, attempt);
         let Some((tool, args)) = next_tool_parts(&decision) else {
-            return Ok((retrieval_run, decision));
+            return Ok((retrieval_run, decision, ledger));
         };
-        let signature = tool_signature(tool, &args);
-        let (tool, args, repeated_tool) = if attempted_tool_signatures.insert(signature) {
+        let (tool, args, repeated_tool) = if ledger.record_tool_call(tool, &args) {
             (tool, args, false)
         } else if is_header_lookup(tool, &args) {
             let mut terminal_decision = decision.clone();
@@ -262,7 +269,7 @@ where
             );
             on_event(&skipped);
             loop_events.push(skipped);
-            return Ok((retrieval_run, terminal_decision));
+            return Ok((retrieval_run, terminal_decision, ledger));
         } else {
             (
                 "search_chunks",
@@ -338,6 +345,7 @@ where
             &output.citations,
             &request.context_budget,
         );
+        ledger.record_coverage(&output.citations);
         rag::apply_tool_execution(&mut retrieval_run, &output);
         if let Some(page) = table_fallback_page_for_m3(&output, &accumulated_citations) {
             let page_args = serde_json::json!({
@@ -382,6 +390,7 @@ where
                 &page_output.citations,
                 &request.context_budget,
             );
+            ledger.record_coverage(&page_output.citations);
             rag::apply_tool_execution(&mut retrieval_run, &page_output);
         }
         attempt += 1;
@@ -404,10 +413,6 @@ fn table_fallback_page_for_m3(
         return None;
     }
     Some(page)
-}
-
-fn tool_signature(tool: &str, args: &serde_json::Value) -> String {
-    format!("{tool}:{}", args)
 }
 
 fn is_header_lookup(tool: &str, args: &serde_json::Value) -> bool {
