@@ -166,41 +166,70 @@ where
             page_source: request.page_source,
             context_budget: request.context_budget.clone(),
             force_document_start: false,
+            thin_seed: crate::agentic_loop_v2_enabled(),
         },
     )?;
-    for call in retrieval_run.trace.tool_calls.iter().cloned() {
-        let result_event = AgentTraceEvent::new(
-            "tool_result",
-            call.tool.clone(),
-            trace_status_from_tool_status(&call.status),
-            format!("{} result", call.tool),
-            format!("{} returned {} results", call.tool, call.result_count),
+    // Loop V2 collapses the per-tool seed replay into a single `retrieval_seed`
+    // event so the trace does not open with 6~7 `tool_result` rows. The legacy
+    // path keeps emitting one `tool_result` per seed tool for trace parity.
+    if !crate::agentic_loop_v2_enabled() {
+        for call in retrieval_run.trace.tool_calls.iter().cloned() {
+            let result_event = AgentTraceEvent::new(
+                "tool_result",
+                call.tool.clone(),
+                trace_status_from_tool_status(&call.status),
+                format!("{} result", call.tool),
+                format!("{} returned {} results", call.tool, call.result_count),
+                format!(
+                    "initial retrieval tool={} status={} results={}",
+                    call.tool, call.status, call.result_count
+                ),
+            )
+            .with_tool(call.tool.clone(), call.input.clone())
+            .with_result(call.result_count, Vec::new(), call.error.clone());
+            on_event(&result_event);
+            loop_events.push(result_event);
+        }
+    }
+    let seed_tool_summary = retrieval_run
+        .trace
+        .tool_calls
+        .iter()
+        .map(|call| format!("{}={}", call.tool, call.result_count))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let round_event = if crate::agentic_loop_v2_enabled() {
+        AgentTraceEvent::new(
+            "retrieval_round",
+            AgentStepKind::SearchChunks.as_str(),
+            "completed",
+            "Seed evidence gathered",
             format!(
-                "initial retrieval tool={} status={} results={}",
-                call.tool, call.status, call.result_count
+                "Seeded {} citations from a thin base retrieval",
+                retrieval_run.citations.len()
+            ),
+            format!("retrieval_seed citations={} tools=[{seed_tool_summary}]",
+                retrieval_run.citations.len()
             ),
         )
-        .with_tool(call.tool.clone(), call.input.clone())
-        .with_result(call.result_count, Vec::new(), call.error.clone());
-        on_event(&result_event);
-        loop_events.push(result_event);
-    }
-    let round_event = AgentTraceEvent::new(
-        "retrieval_round",
-        AgentStepKind::SearchChunks.as_str(),
-        "completed",
-        "Initial evidence gathered",
-        format!(
-            "Prepared {} citations from {} candidates",
-            retrieval_run.citations.len(),
-            retrieval_run.trace.candidates.len()
-        ),
-        format!(
-            "initial retrieval citations={} candidates={}",
-            retrieval_run.citations.len(),
-            retrieval_run.trace.candidates.len()
-        ),
-    );
+    } else {
+        AgentTraceEvent::new(
+            "retrieval_round",
+            AgentStepKind::SearchChunks.as_str(),
+            "completed",
+            "Initial evidence gathered",
+            format!(
+                "Prepared {} citations from {} candidates",
+                retrieval_run.citations.len(),
+                retrieval_run.trace.candidates.len()
+            ),
+            format!(
+                "initial retrieval citations={} candidates={}",
+                retrieval_run.citations.len(),
+                retrieval_run.trace.candidates.len()
+            ),
+        )
+    };
     on_event(&round_event);
     loop_events.push(round_event);
     rag::merge_retrieval_citations_with_budget(

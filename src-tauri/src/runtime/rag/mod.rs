@@ -125,6 +125,13 @@ pub struct RetrievalRequest<'a> {
     pub page_source: Option<&'a str>,
     pub context_budget: crate::model_catalog::ModelContextBudget,
     pub force_document_start: bool,
+    /// Loop V2: when true, the initial retrieval only runs the cheap base chain
+    /// (inspect_tree → open_section → search_chunks → open_pages) and skips the
+    /// conditional table/visual fan-out. Those tools are instead requested on
+    /// demand by the answerability loop (recall-neutral: the rule/LLM judge asks
+    /// for `search_table_facts` / `inspect_visuals` exactly when needed).
+    /// Default false preserves the legacy full fan-out.
+    pub thin_seed: bool,
 }
 
 pub struct RetrievalRun {
@@ -2325,7 +2332,7 @@ pub fn build_retrieval_run(
             return Err(err);
         }
     };
-    let mut table_context = if should_read_table_evidence(request.question) {
+    let mut table_context = if !request.thin_seed && should_read_table_evidence(request.question) {
         match tools.search_table_facts(retrieval_query, initial_limits.table_facts) {
             Ok(results) => {
                 push_tool_success(
@@ -2427,7 +2434,7 @@ pub fn build_retrieval_run(
     } else {
         Vec::new()
     };
-    let mut visual_context = if should_read_visual_evidence(request.question) {
+    let mut visual_context = if !request.thin_seed && should_read_visual_evidence(request.question) {
         match tools.open_visuals(None, retrieval_query, initial_limits.visuals) {
             Ok(results) => {
                 push_tool_success(
@@ -5941,6 +5948,7 @@ mod tests {
                 page_source: None,
                 context_budget: crate::model_catalog::ModelContextBudget::default(),
                 force_document_start: false,
+                thin_seed: false,
             },
         )
         .expect("retrieval run");
