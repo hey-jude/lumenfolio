@@ -409,9 +409,10 @@ function traceActivityEvents(message) {
   return message.activityEvents?.length ? message.activityEvents : (message.retrievalTrace?.events || [])
 }
 
+// Actual retrieval tools only. `session_compact` / `intent_classify` are
+// pipeline meta-steps (not tool calls); they get their own row kind so they are
+// not mislabeled as "Tool call · 0 results".
 const AGENT_TOOL_NAMES = new Set([
-  'session_compact',
-  'intent_classify',
   'inspect_tree',
   'read_tree_node_lines',
   'open_section',
@@ -430,6 +431,20 @@ const AGENT_TOOL_NAMES = new Set([
   'expand_related_documents',
 ])
 
+// Pipeline meta-steps: real work, but not retrieval tool calls.
+const AGENT_META_STEPS = new Set(['session_compact', 'intent_classify'])
+
+// Distinguish the M3 rule gate from the M4 LLM judge so both stay visible.
+// M3 emits `judge_result` titled "M3 …"; the M4 loop emits `judge_start` /
+// `judge_stop` (M4-only) and `judge_result` titled "M4 …".
+function judgeRowKey(event) {
+  const type = eventType(event)
+  const title = String(event?.title || '')
+  if (type === 'judge_start' || type === 'judge_stop' || title.includes('M4')) return 'judge:m4'
+  if (title.includes('M3')) return 'judge:m3'
+  return 'judge'
+}
+
 function agentEventRowKey(event) {
   const type = eventType(event)
   const tool = eventToolName(event)
@@ -437,7 +452,10 @@ function agentEventRowKey(event) {
   if (type === 'start') return 'start'
   if (tool === 'current_view') return 'current_view'
   if (AGENT_TOOL_NAMES.has(tool)) return `tool:${tool}`
-  if (step === 'finalize_answer' || ['judge_start', 'judge_result', 'judge_stop'].includes(type)) return 'judge'
+  if (AGENT_META_STEPS.has(step)) return `meta:${step}`
+  if (step === 'finalize_answer' || ['judge_start', 'judge_result', 'judge_stop'].includes(type)) {
+    return judgeRowKey(event)
+  }
   if (type === 'answer_start' || step === 'generate_answer') return 'answer'
   if (type === 'error') return 'error'
   return ''
@@ -445,9 +463,11 @@ function agentEventRowKey(event) {
 
 function createAgentRow(key, event, index) {
   const tool = eventToolName(event)
+  const step = String(event?.step || '')
   const isTool = key.startsWith('tool:')
-  const isJudge = key === 'judge'
-  const title = isTool ? formatTraceStep(tool) : eventTitle(event)
+  const isJudge = key.startsWith('judge')
+  const isMeta = key.startsWith('meta:')
+  const title = isTool ? formatTraceStep(tool) : (isMeta ? formatTraceStep(step) : eventTitle(event))
   return {
     id: key,
     index,
@@ -461,6 +481,7 @@ function createAgentRow(key, event, index) {
     latestEvent: event,
     isTool,
     isJudge,
+    isMeta,
   }
 }
 
@@ -474,7 +495,11 @@ function normalizeAgentRowStatus(status) {
 function agentRowSubtitle(key, event) {
   if (key === 'start') return props.locale === 'zh' ? '准备本地检索和证据判断' : 'Prepare retrieval and evidence checks'
   if (key === 'current_view') return props.locale === 'zh' ? '当前页相关性判断' : 'Current page relevance'
-  if (key === 'judge') return props.locale === 'zh' ? '判断证据是否足够' : 'Decide evidence sufficiency'
+  if (key === 'judge:m3') return props.locale === 'zh' ? '规则判断证据是否足够' : 'Rule check: is evidence sufficient'
+  if (key === 'judge:m4') return props.locale === 'zh' ? 'LLM 判断证据是否足够' : 'LLM check: is evidence sufficient'
+  if (key.startsWith('judge')) return props.locale === 'zh' ? '判断证据是否足够' : 'Decide evidence sufficiency'
+  if (key === 'meta:session_compact') return props.locale === 'zh' ? '整理会话上下文' : 'Compact session context'
+  if (key === 'meta:intent_classify') return props.locale === 'zh' ? '识别问题意图' : 'Classify question intent'
   if (key === 'answer') return props.locale === 'zh' ? '基于证据生成回答' : 'Generate answer from evidence'
   if (key === 'error') return props.locale === 'zh' ? '执行失败' : 'Execution failed'
   if (key.startsWith('tool:')) return props.locale === 'zh' ? '工具调用' : 'Tool call'
@@ -499,13 +524,24 @@ function finalizeAgentRow(row, message) {
     chips.push(`${row.results} ${props.locale === 'zh' ? '结果' : 'results'}`)
   }
   if (row.isJudge) {
-    const gateStatus = traceGateStatus(message)
-    if (gateStatus) chips.push(formatJudgeStatus(gateStatus))
-    const evidenceCount = evidenceItems(message).length
-    if (evidenceCount) chips.push(`${evidenceCount} citations`)
-    const judge = traceJudgeDetails(message)
-    if (judge?.reason && !row.details.includes(judge.reason)) row.details.push(judge.reason)
-    if (judge?.missing?.length) row.details.push(`${props.locale === 'zh' ? '缺少' : 'Missing'}: ${judge.missing.join(', ')}`)
+    // Use this row's OWN latest verdict (each judge event carries its decision
+    // payload) so the M3 row shows the M3 verdict and the M4 row shows the M4
+    // verdict — instead of stamping every judge row with the final gate status.
+    const ownJudge = row.latestEvent?.judge && typeof row.latestEvent.judge === 'object'
+      ? row.latestEvent.judge
+      : null
+    const status = String(ownJudge?.status || traceGateStatus(message) || '')
+    if (status) chips.push(formatJudgeStatus(status))
+    const citationCount = Number(ownJudge?.citationCount)
+    if (Number.isFinite(citationCount) && citationCount > 0) {
+      chips.push(`${citationCount} citations`)
+    }
+    const reason = String(ownJudge?.reason || '')
+    if (reason && !row.details.includes(reason)) row.details.push(reason)
+    const missing = Array.isArray(ownJudge?.missing)
+      ? ownJudge.missing.map((item) => String(item)).filter(Boolean)
+      : []
+    if (missing.length) row.details.push(`${props.locale === 'zh' ? '缺少' : 'Missing'}: ${missing.join(', ')}`)
   }
   if (row.id === 'current_view') {
     const count = toolResultCount(row.latestEvent)
@@ -686,18 +722,15 @@ function eventSummary(event) {
   return String(event?.summary || event?.detail || '').trim()
 }
 
-function processEvents(message) {
-  return traceActivityEvents(message).filter((event) => {
-    const type = eventType(event)
-    return type !== 'generate_answer' || message.status === 'running'
-  })
-}
-
 function agentProcessStats(message) {
-  const events = processEvents(message)
-  const completed = events.filter((event) => event?.status && event.status !== 'running').length
+  // Count the rows the user actually sees (one per logical stage), not the raw
+  // backend event stream — a single retrieval/judge stage can emit many events
+  // (tool_call + tool_result + judge_start/result/stop per round), which made
+  // the badge show inflated numbers like "44 steps" for a 7-row timeline.
+  const rows = agentTimelineStages(message)
+  const completed = rows.filter((row) => row.status && row.status !== 'running').length
   return {
-    steps: events.length,
+    steps: rows.length,
     completed,
   }
 }

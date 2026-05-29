@@ -148,10 +148,8 @@ struct InitialRetrievalLimits {
     tree: usize,
     per_section: u32,
     fts: u32,
-    table_facts: u32,
     table_anchors: u32,
     open_table: u32,
-    visuals: u32,
     page_blocks: u32,
 }
 
@@ -2325,43 +2323,6 @@ pub fn build_retrieval_run(
             return Err(err);
         }
     };
-    let mut table_context = if should_read_table_evidence(request.question) {
-        match tools.search_table_facts(retrieval_query, initial_limits.table_facts) {
-            Ok(results) => {
-                push_tool_success(
-                    &mut tool_calls,
-                    RagToolName::SearchTableFacts,
-                    serde_json::json!({ "query": retrieval_query, "limit": initial_limits.table_facts }),
-                    results.len(),
-                );
-                results
-            }
-            Err(err) if is_recoverable_fts_error(&err) => {
-                log::warn!(
-                    "Table fact retrieval skipped for question {:?}: {err}",
-                    retrieval_query
-                );
-                push_tool_error(
-                    &mut tool_calls,
-                    RagToolName::SearchTableFacts,
-                    serde_json::json!({ "query": retrieval_query, "limit": initial_limits.table_facts }),
-                    &err,
-                );
-                Vec::new()
-            }
-            Err(err) => {
-                push_tool_error(
-                    &mut tool_calls,
-                    RagToolName::SearchTableFacts,
-                    serde_json::json!({ "query": retrieval_query, "limit": initial_limits.table_facts }),
-                    &err,
-                );
-                Vec::new()
-            }
-        }
-    } else {
-        Vec::new()
-    };
     let mut current_view_table_context = if matches!(request.page_source, Some("current_view"))
         && should_read_table_evidence(request.question)
     {
@@ -2427,30 +2388,6 @@ pub fn build_retrieval_run(
     } else {
         Vec::new()
     };
-    let mut visual_context = if should_read_visual_evidence(request.question) {
-        match tools.open_visuals(None, retrieval_query, initial_limits.visuals) {
-            Ok(results) => {
-                push_tool_success(
-                    &mut tool_calls,
-                    RagToolName::OpenVisual,
-                    serde_json::json!({ "query": retrieval_query, "limit": initial_limits.visuals }),
-                    results.len(),
-                );
-                results
-            }
-            Err(err) => {
-                push_tool_error(
-                    &mut tool_calls,
-                    RagToolName::OpenVisual,
-                    serde_json::json!({ "query": retrieval_query, "limit": initial_limits.visuals }),
-                    &err,
-                );
-                Vec::new()
-            }
-        }
-    } else {
-        Vec::new()
-    };
     let should_open_document_start =
         request.force_document_start || should_read_document_start(request.question, &intent);
     let page_seed = request
@@ -2489,19 +2426,13 @@ pub fn build_retrieval_run(
     if matches!(request.page_source, Some("current_view")) {
         candidates.append(&mut page_context);
         candidates.append(&mut current_view_table_context);
-        candidates.append(&mut table_context);
-        candidates.append(&mut visual_context);
         candidates.append(&mut section_context);
         candidates.append(&mut fts);
     } else if should_open_document_start {
         candidates.append(&mut page_context);
         candidates.append(&mut section_context);
-        candidates.append(&mut table_context);
-        candidates.append(&mut visual_context);
         candidates.append(&mut fts);
     } else {
-        candidates.append(&mut table_context);
-        candidates.append(&mut visual_context);
         candidates.append(&mut section_context);
         candidates.append(&mut fts);
         candidates.append(&mut page_context);
@@ -2579,10 +2510,8 @@ fn initial_retrieval_limits(
             tree: 12,
             per_section: 16,
             fts: 12,
-            table_facts: 24,
             table_anchors: 6,
             open_table: 32,
-            visuals: 8,
             page_blocks: 16,
         };
     }
@@ -2591,10 +2520,8 @@ fn initial_retrieval_limits(
             tree: 10,
             per_section: 12,
             fts: 8,
-            table_facts: 20,
             table_anchors: 4,
             open_table: 24,
-            visuals: 6,
             page_blocks: 12,
         };
     }
@@ -2602,10 +2529,8 @@ fn initial_retrieval_limits(
         tree: 8,
         per_section: 10,
         fts: 6,
-        table_facts: 16,
         table_anchors: 4,
         open_table: 24,
-        visuals: 4,
         page_blocks: 8,
     }
 }
@@ -2710,27 +2635,6 @@ fn should_read_table_evidence(question: &str) -> bool {
             "领先",
         ],
     ) || contains_numbered_marker(&normalized, "表")
-}
-
-fn should_read_visual_evidence(question: &str) -> bool {
-    let normalized = question.to_lowercase();
-    contains_any(
-        &normalized,
-        &[
-            "figure",
-            "fig.",
-            "chart",
-            "image",
-            "visual",
-            "plot",
-            "graph",
-            "图",
-            "图片",
-            "图表",
-            "柱状图",
-            "曲线",
-        ],
-    ) || contains_numbered_marker(&normalized, "图")
 }
 
 fn contains_numbered_marker(value: &str, marker: &str) -> bool {

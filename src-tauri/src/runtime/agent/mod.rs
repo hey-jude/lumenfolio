@@ -1,6 +1,7 @@
 mod compact;
 mod context;
 pub(crate) mod decision;
+pub(crate) mod ledger;
 pub(crate) mod lexicon;
 mod memory;
 mod policy;
@@ -12,6 +13,8 @@ mod turn_runner;
 
 #[allow(unused_imports)]
 pub use decision::{FinalizeRuntime, FinalizeStatus, RetrievalAttempts};
+#[allow(unused_imports)]
+pub use ledger::RetrievalLedger;
 pub use session::AgentSessionStore;
 pub use trace::{
     tool_call_event, tool_result_event, trace_preview_from_output, AgentTrace, AgentTraceEvent,
