@@ -6,6 +6,7 @@ import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url'
 import 'pdfjs-dist/legacy/web/pdf_viewer.css'
 import { buildLinkedBlocksByPage, canUseLinkedHover } from '../translationLinking'
 import { testAttrs } from '../testAttrs'
+import { computePageColumns, buildSelection } from './pdf/selection/index.js'
 
 installPdfRuntimePolyfills()
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
@@ -110,6 +111,8 @@ const selectionText = ref('')
 const selectionBboxList = ref([])
 const selectionPage = ref(0)
 const selectionSourceVersion = ref('')
+// Page-local px rects for the active selection (custom geometry selection).
+const selectionRects = ref([])
 const toolbarPosition = ref({ left: 0, top: 0 })
 const copyStatus = ref('idle')
 const translationPreviewOpen = ref(false)
@@ -119,6 +122,9 @@ const pageViewports = ref([])
 const defaultPageSize = ref({ ...DEFAULT_PAGE_SIZE })
 const assistBlocksByPage = ref(new Map())
 const pageTextItemsByPage = ref(new Map())
+// Per-page column layout (body bands + full-width regions), computed once per
+// render from the page's glyphs. Drives column-aware text selection.
+const pageColumnsByPage = ref(new Map())
 const hoveredAssistBlock = ref(null)
 const hoveredLinkedBlock = ref(null)
 const assistRailHovered = ref(false)
@@ -134,6 +140,8 @@ let pendingAssistPointer = null
 let linkedPointerFrame = 0
 let pendingLinkedPointer = null
 let selectionStartPoint = null
+let selectionDragPage = 0
+let selectionDragFrame = 0
 let scrollbarFadeTimer = null
 let copyStatusTimer = null
 let pageSyncSuppressTimer = null
@@ -383,6 +391,8 @@ onMounted(() => {
   window.addEventListener('pointerdown', handleGlobalPointerDown, true)
   document.addEventListener('pointerdown', handleGlobalPointerDown, true)
   window.addEventListener('keydown', handleGlobalKeyDown)
+  window.addEventListener('pointerup', handlePdfPointerUpCapture, true)
+  document.addEventListener('copy', handleSelectionCopy)
 })
 
 onBeforeUnmount(() => {
@@ -392,6 +402,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('pointerdown', handleGlobalPointerDown, true)
   document.removeEventListener('pointerdown', handleGlobalPointerDown, true)
   window.removeEventListener('keydown', handleGlobalKeyDown)
+  window.removeEventListener('pointerup', handlePdfPointerUpCapture, true)
+  document.removeEventListener('copy', handleSelectionCopy)
   clearAssistHideTimer()
   clearScrollbarFadeTimer()
   clearCopyStatusTimer()
@@ -417,6 +429,7 @@ async function loadPdf() {
   defaultPageSize.value = { ...DEFAULT_PAGE_SIZE }
   assistBlocksByPage.value = new Map()
   pageTextItemsByPage.value = new Map()
+  pageColumnsByPage.value = new Map()
   pdfDocument.value?.destroy?.()
   pdfDocument.value = null
 
@@ -478,6 +491,7 @@ async function prepareInitialPageViewport(preferredPage = 1) {
   resetRenderedState()
   assistBlocksByPage.value = new Map()
   pageTextItemsByPage.value = new Map()
+  pageColumnsByPage.value = new Map()
   pageViewports.value = Array.from({ length: pdf.numPages })
   await ensurePageViewport(preferredPage)
 }
@@ -490,6 +504,7 @@ async function resetPageViewportsForScale() {
   resetRenderedState()
   assistBlocksByPage.value = new Map()
   pageTextItemsByPage.value = new Map()
+  pageColumnsByPage.value = new Map()
   pageViewports.value = Array.from({ length: pdf.numPages })
   await ensurePageViewport(currentPage.value || 1)
 }
@@ -549,6 +564,11 @@ async function renderPage(pageNumber) {
     textLayerEl.innerHTML = ''
     textLayerEl.style.width = `${viewport.width}px`
     textLayerEl.style.height = `${viewport.height}px`
+    // Disable native text selection on the (runtime-generated) text spans.
+    // Inline style on the container is inherited by all child spans regardless
+    // of scoped-CSS attribute matching — see the .pdf-text-layer note in <style>.
+    textLayerEl.style.userSelect = 'none'
+    textLayerEl.style.webkitUserSelect = 'none'
 
     const renderTask = page.render({
       canvasContext: context,
@@ -564,7 +584,14 @@ async function renderPage(pageNumber) {
     if (run !== renderRun) return
     const textContent = await page.getTextContent()
     const textItems = buildTextItems(textContent, viewport)
-    mergePageTextItems(clampedPage, textItems)
+    // Selection/column detection use CHARACTER-level glyphs: pdf.js item widths
+    // are coarse/inflated, so splitting each item's string evenly across its
+    // width yields per-char rects whose positions faithfully reflect where text
+    // actually sits (the column gutter has no chars). The assist page index
+    // keeps the coarse items.
+    const charGlyphs = splitItemsIntoCharGlyphs(textItems)
+    mergePageTextItems(clampedPage, charGlyphs)
+    mergePageColumns(clampedPage, charGlyphs, viewport)
     mergeAssistPageIndex(buildPageIndex(clampedPage, viewport, textItems))
     const textLayer = new pdfjsLib.TextLayer({
       textContentSource: textContent,
@@ -847,53 +874,130 @@ function emitViewerState() {
   })
 }
 
-function handleSelection(pageNumber) {
-  window.setTimeout(() => {
-    const selection = window.getSelection()
-    const text = selection?.toString().trim() || ''
-    const pageEl = findSelectionPageElement(selection) || getPageElement(pageNumber)
-    isSelectingText.value = false
-    if (!props.selectionActionsEnabled) {
-      selectionStartPoint = null
-      return
-    }
-    if (!text || !pageEl) {
-      clearSelection()
-      return
-    }
-
-    const page = getPageNumberForElement(pageEl)
-    const pageRect = pageEl.getBoundingClientRect()
-    const anchorRect = getSelectionAnchorRect(selection, pageRect)
-    if (!anchorRect || !page) {
-      clearSelection()
-      return
-    }
-
-    const citation = normalizeManualSelection(selection, text, page, pageRect, selectionStartPoint)
-    if (!citation?.bboxList?.length || !citation.text) {
-      clearSelection()
-      return
-    }
-    clearAssistHover({ immediate: true })
-    setManualSelection(citation, page, anchorRect, pageEl)
-    emit('selection', {
-      text: citation.text,
-      page,
-      bboxList: citation.bboxList,
-      sourceType: 'selection',
-      sourceVersion: citation.sourceVersion,
-    })
-  }, 0)
-}
+// --- Custom geometry-driven selection (column-aware) ------------------------
+// We do NOT use the browser's native selection: on two-column pages the native
+// Selection follows DOM order and leaks across columns. Instead we compute the
+// selected glyphs from page coordinates (start/end point + precomputed column
+// bands) and draw the highlight ourselves. See src/components/pdf/selection/.
 
 function handleSelectionStart(event) {
   if (event.button !== 0) return
   if (props.activeTranslation) emit('close-translation')
   clearSelection()
-  selectionStartPoint = getPointerPagePoint(event)
+  if (!props.selectionActionsEnabled) return
+  const point = getPointerPagePoint(event)
+  if (!point?.page) return
+  selectionStartPoint = point
+  selectionDragPage = point.page
   isSelectingText.value = true
   clearAssistHover({ immediate: true })
+  // Prevent the browser from starting its own text/image drag-select.
+  event.preventDefault()
+}
+
+function handlePagePointerMove(event, pageNumber) {
+  if (isSelectingText.value && selectionStartPoint) {
+    handleSelectionMove(event, pageNumber)
+    return
+  }
+  handleAssistPointerMove(event, pageNumber)
+}
+
+function handleSelectionMove(event, pageNumber) {
+  if (!isSelectingText.value || !selectionStartPoint) return
+  if (selectionDragPage && pageNumber !== selectionDragPage) return
+  const point = getPointerPagePoint(event)
+  if (!point) return
+  if (selectionDragFrame) cancelAnimationFrame(selectionDragFrame)
+  selectionDragFrame = requestAnimationFrame(() => {
+    selectionDragFrame = 0
+    updateGeometrySelection(selectionDragPage, selectionStartPoint, point)
+  })
+}
+
+function handleSelection(pageNumber) {
+  if (selectionDragFrame) {
+    cancelAnimationFrame(selectionDragFrame)
+    selectionDragFrame = 0
+  }
+  isSelectingText.value = false
+  const page = selectionDragPage || pageNumber
+  selectionDragPage = 0
+  if (!props.selectionActionsEnabled) {
+    selectionStartPoint = null
+    return
+  }
+  if (!selectionStartPoint) return
+  if (!selectionText.value || !selectionRects.value.length) {
+    clearSelection()
+    return
+  }
+  const pageEl = getPageElement(page)
+  if (!pageEl) {
+    clearSelection()
+    return
+  }
+  clearAssistHover({ immediate: true })
+  positionSelectionToolbar(page, pageEl)
+  emit('selection', {
+    text: selectionText.value,
+    page,
+    bboxList: selectionBboxList.value,
+    sourceType: 'selection',
+    sourceVersion: selectionSourceVersion.value,
+  })
+}
+
+/** Compute and store the geometry selection for an in-progress drag. */
+function updateGeometrySelection(page, start, end) {
+  const glyphs = pageTextItemsByPage.value.get(page) || []
+  const columns = pageColumnsByPage.value.get(page)
+  if (!glyphs.length || !columns) return
+  const pageSize = getPagePixelSize(page)
+  const result = buildSelection({ glyphs, columns, start, end, pageSize })
+  if (result.isEmpty) {
+    selectionText.value = ''
+    selectionRects.value = []
+    selectionBboxList.value = []
+    selectionPage.value = page
+    return
+  }
+  selectionText.value = result.text
+  selectionRects.value = result.rects
+  selectionBboxList.value = result.bboxList
+  selectionPage.value = page
+  selectionSourceVersion.value = 'custom-geom-v1'
+}
+
+function getPagePixelSize(page) {
+  const viewport = pageViewports.value?.[page - 1]
+  if (viewport?.width && viewport?.height) {
+    return { width: viewport.width, height: viewport.height }
+  }
+  const pageEl = getPageElement(page)
+  if (pageEl) {
+    const rect = pageEl.getBoundingClientRect()
+    return { width: rect.width, height: rect.height }
+  }
+  return { ...defaultPageSize.value }
+}
+
+function handlePdfPointerUpCapture() {
+  if (selectionDragFrame) {
+    cancelAnimationFrame(selectionDragFrame)
+    selectionDragFrame = 0
+  }
+}
+
+/**
+ * Since native selection is disabled, Cmd/Ctrl+C produces no clipboard text on
+ * its own. When our geometry selection is active, write its reading-order text.
+ */
+function handleSelectionCopy(event) {
+  const text = selectionText.value
+  if (!text) return
+  event.clipboardData?.setData('text/plain', text)
+  event.preventDefault()
 }
 
 function handlePdfPointerDownCapture(event) {
@@ -917,15 +1021,6 @@ function getPointerPagePoint(event) {
     x: clamp(event.clientX - rect.left, 0, rect.width),
     y: clamp(event.clientY - rect.top, 0, rect.height),
   }
-}
-
-function findSelectionPageElement(selection) {
-  const anchor = selection?.anchorNode
-  let element = anchor instanceof Element ? anchor : anchor?.parentElement
-  while (element && !element.classList?.contains('pdf-page-host')) {
-    element = element.parentElement
-  }
-  return element || null
 }
 
 function getPageNumberForElement(element) {
@@ -953,14 +1048,13 @@ function handleGlobalKeyDown(event) {
   }
 }
 
-function setManualSelection(citation, page, anchorRect, pageEl) {
+function positionSelectionToolbar(page, pageEl) {
   const visibleBounds = getVisibleBoundsInPages()
-  const selectionBounds = getBlockBounds(citation.selectionRects || [])
-  const selectionLeft = selectionBounds.width ? selectionBounds.x : anchorRect.x
-  const selectionTop = selectionBounds.height ? selectionBounds.y : anchorRect.y
-  const selectionBottom = selectionBounds.height
-    ? selectionBounds.y + selectionBounds.height
-    : anchorRect.y
+  const selectionBounds = getBlockBounds(selectionRects.value || [])
+  if (!selectionBounds.width && !selectionBounds.height) return
+  const selectionLeft = selectionBounds.x
+  const selectionTop = selectionBounds.y
+  const selectionBottom = selectionBounds.y + selectionBounds.height
   const centerLeft = pageEl.offsetLeft + selectionLeft + selectionBounds.width / 2 - SELECTION_TOOLBAR_WIDTH / 2
   const aboveTop = pageEl.offsetTop + selectionTop - SELECTION_TOOLBAR_HEIGHT - SELECTION_TOOLBAR_GAP
   const belowTop = pageEl.offsetTop + selectionBottom + SELECTION_TOOLBAR_GAP
@@ -970,15 +1064,11 @@ function setManualSelection(citation, page, anchorRect, pageEl) {
   const maxLeft = Math.max(visibleBounds.left, visibleBounds.right - SELECTION_TOOLBAR_WIDTH)
   const maxTop = Math.max(visibleBounds.top, visibleBounds.bottom - SELECTION_TOOLBAR_HEIGHT)
 
-  selectionText.value = citation.text
   selectionPage.value = page
-  selectionBboxList.value = citation.bboxList
-  selectionSourceVersion.value = citation.sourceVersion || ''
   toolbarPosition.value = {
     left: clamp(centerLeft, visibleBounds.left, maxLeft),
     top: clamp(preferredTop, visibleBounds.top, maxTop),
   }
-  window.getSelection()?.removeAllRanges()
 }
 
 function emitManualSelectionAction(eventName) {
@@ -1021,316 +1111,15 @@ function clearCopyStatusTimer() {
   copyStatusTimer = null
 }
 
-function getSelectionAnchorRect(selection, pageRect) {
-  if (!selection.rangeCount) return null
-  const firstRange = selection.getRangeAt(0)
-  const rect = Array.from(firstRange.getClientRects()).find((item) => item.width > 2 && item.height > 2)
-  if (!rect) return null
-
-  const clippedLeft = Math.max(rect.left, pageRect.left)
-  const clippedTop = Math.max(rect.top, pageRect.top)
-  if (clippedLeft >= pageRect.right || clippedTop >= pageRect.bottom) return null
-
-  return {
-    x: clippedLeft - pageRect.left,
-    y: clippedTop - pageRect.top,
-  }
-}
-
-function normalizeManualSelection(selection, rawText, pageNumber, pageRect, startPoint = null) {
-  const selectionRects = getSelectionPageRects(selection, pageRect)
-  if (!selectionRects.length) return null
-  const visualSelection = extractVisualSelection(pageNumber, selectionRects, startPoint, pageRect)
-  const visualText = visualSelection.text
-  const text = chooseManualSelectionText(rawText, visualText, selectionRects, visualSelection.columnFiltered)
-  const normalizedVisualText = normalizeExtractedText(visualText)
-  const selectionSourceRects = normalizedVisualText && text === normalizedVisualText
-    ? visualSelection.rects
-    : selectionRects
-  const bboxList = rectsToBboxList(selectionSourceRects, pageRect)
-  if (!bboxList.length) return null
-
-  return {
-    text,
-    bboxList,
-    selectionRects: selectionSourceRects,
-    sourceType: 'selection',
-    sourceVersion: visualSelection.columnFiltered && normalizedVisualText && text === normalizedVisualText
-      ? 'manual-column-v1'
-      : normalizedVisualText && text === normalizedVisualText
-        ? 'manual-visual-v2'
-        : 'manual-dom-v1',
-  }
-}
-
-function chooseManualSelectionText(rawText, visualText, selectionRects, preferVisual = false) {
-  const normalizedRaw = normalizeExtractedText(rawText)
-  const normalizedVisual = normalizeExtractedText(visualText)
-  if (!normalizedVisual) return normalizedRaw
-  if (preferVisual) return normalizedVisual
-  if (selectionRects.length <= 1 && normalizedRaw) return normalizedRaw
-  if (normalizedRaw && visualExtractionLooksIncomplete(normalizedRaw, normalizedVisual)) {
-    return normalizedRaw
-  }
-  return normalizedVisual
-}
-
-function visualExtractionLooksIncomplete(rawText, visualText) {
-  const rawLength = compactComparableText(rawText).length
-  const visualLength = compactComparableText(visualText).length
-  if (rawLength < 24) return false
-  return visualLength > 0 && visualLength < rawLength * 0.62
-}
-
-function compactComparableText(text) {
-  return String(text || '').replace(/\s+/g, '')
-}
-
-function extractVisualSelection(pageNumber, selectionRects, startPoint = null, pageRect = null) {
-  const textItems = pageTextItemsByPage.value.get(pageNumber) || []
-  if (!textItems.length || !selectionRects.length) {
-    return { text: '', rects: [], columnFiltered: false }
-  }
-
-  const selectedItems = textItems
-    .filter((item) => selectionRects.some((rect) => shouldIncludeTextItem(item, rect)))
-  const filteredItems = filterItemsToStartColumn(selectedItems, startPoint, pageNumber, pageRect)
-  const columnFiltered = filteredItems.length > 0 && filteredItems.length < selectedItems.length
-  const selectedRects = filteredItems.map(textItemToPageRect)
-  const text = joinVisualTextItems(
-    filteredItems
-    .sort((left, right) => Math.abs(left.y - right.y) < Math.max(3, Math.min(left.height, right.height) * 0.55)
-      ? left.x - right.x
-      : left.y - right.y),
-  )
-
-  return { text, rects: selectedRects, columnFiltered }
-}
-
-function filterItemsToStartColumn(items, startPoint, pageNumber, pageRect) {
-  if (!items.length || !startPoint || !pageRect) return items
-  if (!startPoint.page || startPoint.page !== pageNumber) return items
-  const bounds = getBlockBounds(items)
-  if (bounds.width < pageRect.width * 0.55) return items
-  if (!selectionLooksLikeMultipleColumns(items, pageRect)) return items
-
-  const clusters = clusterItemsByColumn(items, pageRect)
-  if (clusters.length <= 1) return items
-
-  const chosen = clusters
-    .map((cluster) => ({
-      ...cluster,
-      distance: distanceToRange(startPoint.x, cluster.left, cluster.right),
-    }))
-    .sort((left, right) => left.distance - right.distance)[0]
-  return chosen?.items?.length ? chosen.items : items
-}
-
-function selectionLooksLikeMultipleColumns(items, pageRect) {
-  const lines = buildSelectionLines(items)
-  if (lines.length < 2) return false
-  const pageCenter = pageRect.width / 2
-  let leftLines = 0
-  let rightLines = 0
-  let crossingLines = 0
-
-  for (const line of lines) {
-    const width = line.x2 - line.x1
-    if (line.x1 < pageCenter && line.x2 > pageCenter) crossingLines += 1
-    if (line.x2 <= pageCenter || (line.x1 < pageCenter && width < pageRect.width * 0.46)) leftLines += 1
-    if (line.x1 >= pageCenter || (line.x2 > pageCenter && width < pageRect.width * 0.46)) rightLines += 1
-  }
-
-  if (crossingLines > 0) return false
-  return leftLines >= 2 && rightLines >= 2
-}
-
-function buildSelectionLines(items) {
-  const medianHeight = medianNumber(items.map((item) => item.height).filter(Number.isFinite)) || 10
-  const sorted = [...items].sort((left, right) => Math.abs(left.y - right.y) < Math.max(3, medianHeight * 0.55)
-    ? left.x - right.x
-    : left.y - right.y)
-  const lines = []
-  for (const item of sorted) {
-    const last = lines.at(-1)
-    const sameLine = last && Math.abs(last.y - item.y) <= Math.max(3, medianHeight * 0.55)
-    if (!sameLine) {
-      lines.push({
-        y: item.y,
-        x1: item.x,
-        x2: item.x + item.width,
-      })
-      continue
-    }
-    last.x1 = Math.min(last.x1, item.x)
-    last.x2 = Math.max(last.x2, item.x + item.width)
-  }
-  return lines
-}
-
-function clusterItemsByColumn(items, pageRect) {
-  const medianHeight = medianNumber(items.map((item) => item.height).filter(Number.isFinite)) || 10
-  const gapThreshold = Math.max(36, medianHeight * 3.2, pageRect.width * 0.06)
-  const sorted = [...items].sort((left, right) => (left.x + left.width / 2) - (right.x + right.width / 2))
-  const clusters = []
-
-  for (const item of sorted) {
-    const last = clusters.at(-1)
-    if (!last) {
-      clusters.push(createColumnCluster(item))
-      continue
-    }
-
-    const gap = item.x - last.right
-    if (gap > gapThreshold) {
-      clusters.push(createColumnCluster(item))
-      continue
-    }
-
-    last.items.push(item)
-    last.left = Math.min(last.left, item.x)
-    last.right = Math.max(last.right, item.x + item.width)
-  }
-
-  return clusters.filter((cluster) => cluster.items.length > 0)
-}
-
-function createColumnCluster(item) {
-  return {
-    left: item.x,
-    right: item.x + item.width,
-    items: [item],
-  }
-}
-
-function distanceToRange(value, left, right) {
-  if (value < left) return left - value
-  if (value > right) return value - right
-  return 0
-}
-
-function textItemToPageRect(item) {
-  return {
-    x: item.x,
-    y: item.y,
-    width: item.width,
-    height: item.height,
-  }
-}
-
-function shouldIncludeTextItem(item, selectionRect) {
-  const overlap = rectIntersectionArea(item, selectionRect)
-  if (overlap <= 0) return false
-  const itemArea = Math.max(1, item.width * item.height)
-  const selectionArea = Math.max(1, selectionRect.width * selectionRect.height)
-  const itemOverlapRatio = overlap / itemArea
-  const selectionOverlapRatio = overlap / selectionArea
-  return itemOverlapRatio >= 0.08 || selectionOverlapRatio >= 0.04
-}
-
-function joinVisualTextItems(items) {
-  if (!items.length) return ''
-  const medianHeight = medianNumber(items.map((item) => item.height).filter(Number.isFinite)) || 10
-  const lines = []
-
-  for (const item of items) {
-    const last = lines.at(-1)
-    const sameLine = last && Math.abs(last.y - item.y) <= Math.max(3, medianHeight * 0.55)
-    if (!sameLine) {
-      lines.push({
-        y: item.y,
-        text: item.text,
-        x2: item.x + item.width,
-      })
-      continue
-    }
-
-    const gap = item.x - last.x2
-    const separator = shouldJoinHyphenated(last.text, item.text) ? '' : gap > medianHeight * 0.18 ? ' ' : ''
-    last.text = `${last.text}${separator}${item.text}`.replace(/\s+/g, ' ').trim()
-    last.x2 = Math.max(last.x2, item.x + item.width)
-  }
-
-  return normalizeExtractedText(lines.map((line) => line.text).join('\n'))
-}
-
-function shouldJoinHyphenated(leftText, rightText) {
-  return /[A-Za-z]-$/.test(leftText) && /^[a-z]/.test(rightText)
-}
-
-function normalizeExtractedText(text) {
-  return String(text || '')
-    .replace(/\u00a0/g, ' ')
-    .replace(/[ \t]+\n/g, '\n')
-    .replace(/\n[ \t]+/g, '\n')
-    .replace(/[ \t]{2,}/g, ' ')
-    .trim()
-}
-
-function getSelectionPageRects(selection, pageRect) {
-  if (!selection?.rangeCount) return []
-  const rects = []
-
-  for (let index = 0; index < selection.rangeCount; index += 1) {
-    const range = selection.getRangeAt(index)
-    rects.push(...Array.from(range.getClientRects()))
-  }
-
-  return normalizeSelectionRects(
-    rects
-    .map((rect) => clientRectToPageRect(rect, pageRect))
-      .filter(Boolean),
-  )
-}
-
-function normalizeSelectionRects(rects) {
-  const usefulRects = rects
-    .filter((rect) => rect.width > 1 && rect.height > 1)
-    .sort((left, right) => Math.abs(left.y - right.y) < Math.max(2, Math.min(left.height, right.height) * 0.5)
-      ? left.x - right.x
-      : left.y - right.y)
-
-  const lines = []
-  for (const rect of usefulRects) {
-    const last = lines.at(-1)
-    const sameLine = last && Math.abs(last.y - rect.y) <= Math.max(2, Math.min(last.height, rect.height) * 0.65)
-    if (!sameLine) {
-      lines.push({ ...rect })
-      continue
-    }
-
-    const nextRight = Math.max(last.x + last.width, rect.x + rect.width)
-    const nextBottom = Math.max(last.y + last.height, rect.y + rect.height)
-    last.x = Math.min(last.x, rect.x)
-    last.y = Math.min(last.y, rect.y)
-    last.width = nextRight - last.x
-    last.height = nextBottom - last.y
-  }
-
-  return lines
-}
-
-function rectsToBboxList(rects, pageRect) {
-  return rects
-    .map((rect) => normalizeBbox(
-      rect.x,
-      rect.y,
-      rect.x + rect.width,
-      rect.y + rect.height,
-      pageRect.width || 1,
-      pageRect.height || 1,
-    ))
-    .filter(Boolean)
-}
-
 function clearSelection() {
   selectionText.value = ''
   selectionPage.value = 0
   selectionBboxList.value = []
+  selectionRects.value = []
   selectionSourceVersion.value = ''
   selectionStartPoint = null
+  selectionDragPage = 0
   translationPreviewOpen.value = false
-  window.getSelection()?.removeAllRanges()
 }
 
 function handleAssistPointerMove(event, pageNumber) {
@@ -1707,6 +1496,49 @@ function mergePageTextItems(pageNumber, textItems) {
   pageTextItemsByPage.value = next
 }
 
+function mergePageColumns(pageNumber, textItems, viewport) {
+  const pageSize = { width: viewport?.width || 0, height: viewport?.height || 0 }
+  const columns = computePageColumns(textItems, pageSize)
+  const next = new Map(pageColumnsByPage.value)
+  next.set(pageNumber, columns)
+  pageColumnsByPage.value = next
+}
+
+/**
+ * Split coarse pdf.js text rects into per-character glyphs.
+ *
+ * pdf.js returns one rect per text run with a single (often inflated) width, so
+ * a whole title line can be one 360px span. For column detection and selection
+ * we need positions that reflect where characters actually sit. We distribute
+ * the run's characters evenly across its width: char i spans
+ * [x + i*charW, x + (i+1)*charW]. This is exact for monospaced text and a good
+ * approximation otherwise — crucially, the column gutter ends up with NO chars,
+ * so it becomes detectable again. Spaces are kept (they carry width) but yield
+ * no selectable glyph.
+ */
+function splitItemsIntoCharGlyphs(items) {
+  const glyphs = []
+  for (const item of items) {
+    const text = item.text || ''
+    const n = text.length
+    if (n === 0) continue
+    if (n === 1) { glyphs.push({ ...item }); continue }
+    const charW = item.width / n
+    for (let i = 0; i < n; i += 1) {
+      const ch = text[i]
+      if (ch === ' ') continue // spaces占位但不产生可选 glyph
+      glyphs.push({
+        text: ch,
+        x: item.x + i * charW,
+        y: item.y,
+        width: charW,
+        height: item.height,
+      })
+    }
+  }
+  return glyphs
+}
+
 function buildTextItems(textContent, viewport) {
   return textContent.items
     .filter((item) => item.str?.trim())
@@ -1981,30 +1813,6 @@ function bboxToRect(bbox, pageWidth, pageHeight) {
   }
 }
 
-function rectIntersectionArea(left, right) {
-  const x1 = Math.max(left.x, right.x)
-  const y1 = Math.max(left.y, right.y)
-  const x2 = Math.min(left.x + left.width, right.x + right.width)
-  const y2 = Math.min(left.y + left.height, right.y + right.height)
-  return Math.max(0, x2 - x1) * Math.max(0, y2 - y1)
-}
-
-function clientRectToPageRect(rect, pageRect) {
-  const left = clamp(rect.left - pageRect.left, 0, pageRect.width)
-  const top = clamp(rect.top - pageRect.top, 0, pageRect.height)
-  const right = clamp(rect.right - pageRect.left, 0, pageRect.width)
-  const bottom = clamp(rect.bottom - pageRect.top, 0, pageRect.height)
-
-  if (right - left <= 1 || bottom - top <= 1) return null
-
-  return {
-    x: left,
-    y: top,
-    width: right - left,
-    height: bottom - top,
-  }
-}
-
 function getPageElement(pageNumber) {
   return pageRefs.value[Number(pageNumber) - 1] || null
 }
@@ -2028,7 +1836,7 @@ function highlightRectsForPage(pageNumber) {
 
 function selectionRectsForPage(pageNumber) {
   if (!selectionText.value || selectionPage.value !== pageNumber) return []
-  return bboxListToRects(pageNumber, selectionBboxList.value || [])
+  return selectionRects.value || []
 }
 
 function assistRectsForPage(pageNumber) {
@@ -2086,7 +1894,7 @@ defineExpose({
           :style="getPageStyle(pageNumber)"
           @mousedown="handleSelectionStart"
           @mouseup="handleSelection(pageNumber)"
-          @mousemove="handleAssistPointerMove($event, pageNumber)"
+          @mousemove="handlePagePointerMove($event, pageNumber)"
           @mouseleave="handleAssistPointerLeave"
         >
           <canvas class="pdf-canvas"></canvas>
@@ -2353,16 +2161,18 @@ defineExpose({
 
 .pdf-text-layer {
   z-index: 3;
+  cursor: text;
 }
 
-:deep(.pdf-text-layer *)::selection {
-  background: rgba(82, 144, 255, 0.14);
-  color: transparent;
-}
-
-:deep(.pdf-text-layer *)::-moz-selection {
-  background: rgba(82, 144, 255, 0.14);
-  color: transparent;
+/* Selection is custom (geometry-driven), not native: disable the browser's own
+   text selection so a two-column drag cannot follow DOM order across columns.
+   The text spans are created at runtime by pdf.js and do NOT carry this
+   component's scoped attribute, so we must reach them with :deep — a plain
+   `.pdf-text-layer { user-select:none }` only matches the (scoped) container,
+   not the actual text spans, and the native selection would still fire. */
+.pdf-text-layer :deep(*) {
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .reader-highlight {
