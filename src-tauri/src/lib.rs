@@ -38,6 +38,25 @@ const MAX_RUST_VISUAL_CROPS: usize = 48;
 const MIN_RUST_TSR_CONFIDENCE: f64 = 0.15;
 const TEXT_INDEX_JOB_TYPE: &str = "text_pdf";
 
+/// Feature flag for the Loop V2 agentic retrieval semantics (shared retrieval
+/// ledger across the M3/M4 loops, cheap early-exit, thin seed).
+///
+/// Off by default: the legacy retrieval path is preserved verbatim. Enable with
+/// `LUMENFOLIO_AGENTIC_LOOP_V2=1` (or `true`/`on`/`yes`).
+/// See `docs/lumenfolio_agentic_loop_v2_plan.md`.
+pub(crate) fn agentic_loop_v2_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("LUMENFOLIO_AGENTIC_LOOP_V2")
+            .map(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                matches!(value.as_str(), "1" | "true" | "on" | "yes")
+            })
+            .unwrap_or(false)
+    })
+}
+
 #[derive(Default)]
 struct PdfRegistry {
     paths: Mutex<HashMap<String, PathBuf>>,
@@ -2217,22 +2236,34 @@ fn insufficient_evidence_answer(
         .get("maxAttempts")
         .and_then(|value| value.as_u64())
         .unwrap_or(20);
-    if llm::chat::answer_language_for_question(question, locale) == "Chinese" {
+    let is_chinese = llm::chat::answer_language_for_question(question, locale) == "Chinese";
+    let mut message = if is_chinese {
         if budget_exhausted {
-            return format!("我已经完成本轮 {max_attempts} 次检索，但还没有拿到足够可靠的证据来回答这个问题。\n\n原因：{reason}\n\n这类情况继续重复同一轮检索通常不会带来新证据。建议把问题改得更具体，或先选中文档中的相关段落再提问。");
-        }
-        if let Some(missing) = missing {
+            format!("我已经完成本轮 {max_attempts} 次检索，但还没有拿到足够可靠的证据来回答这个问题。\n\n原因：{reason}\n\n这类情况继续重复同一轮检索通常不会带来新证据。建议把问题改得更具体，或先选中文档中的相关段落再提问。")
+        } else if let Some(missing) = &missing {
             format!("我还没有拿到足够可靠的证据来回答这个问题。\n\n原因：{reason}\n缺少：{missing}\n\n你可以换一个更具体的问题，或者先选中文档中的相关段落再提问。")
         } else {
             format!("我还没有拿到足够可靠的证据来回答这个问题。\n\n原因：{reason}\n\n你可以换一个更具体的问题，或者先选中文档中的相关段落再提问。")
         }
     } else if budget_exhausted {
         format!("I completed this retrieval budget of {max_attempts} steps, but I still do not have enough reliable evidence to answer.\n\nReason: {reason}\n\nRepeating the same retrieval loop is unlikely to add new evidence. Try asking a more specific question, or select a relevant passage in the PDF before asking.")
-    } else if let Some(missing) = missing {
+    } else if let Some(missing) = &missing {
         format!("I do not have enough reliable evidence to answer yet.\n\nReason: {reason}\nMissing: {missing}\n\nTry asking a more specific question, or select a relevant passage in the PDF before asking.")
     } else {
         format!("I do not have enough reliable evidence to answer yet.\n\nReason: {reason}\n\nTry asking a more specific question, or select a relevant passage in the PDF before asking.")
+    };
+    // Loop V2: be transparent about what was already examined so the user knows
+    // the answer is "not found after looking", not "didn't bother to look".
+    if agentic_loop_v2_enabled() {
+        if let Some(coverage) = agent_run.ledger.coverage_summary() {
+            if is_chinese {
+                message.push_str(&format!("\n\n（已检索过：{coverage}）"));
+            } else {
+                message.push_str(&format!("\n\n(Already reviewed: {coverage})"));
+            }
+        }
     }
+    message
 }
 
 fn read_translation_cache(
@@ -3498,6 +3529,7 @@ mod tests {
             trace,
             session_context: String::new(),
             attempts: runtime::agent::RetrievalAttempts::default(),
+            ledger: runtime::agent::RetrievalLedger::new(),
         }
     }
 }

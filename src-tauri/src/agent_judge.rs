@@ -53,7 +53,29 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
     let (mut remaining_llm_tool_steps, mut remaining_llm_judge_rounds) =
         llm_judge_budget(max_steps, attempt);
     let mut attempted_tools = HashSet::new();
+    // Loop V2: inherit the M3 loop's "already attempted" set so the LLM judge
+    // never re-requests a tool the rule loop already ran this turn. Off by
+    // default (legacy M4 starts with an empty dedupe set).
+    if crate::agentic_loop_v2_enabled() {
+        for signature in agent_run.ledger.attempted_signatures() {
+            attempted_tools.insert(signature.clone());
+        }
+    }
     let mut tool_feedback = Vec::new();
+    // Loop V2: tell the judge up front which regions the M3 loop already
+    // examined, so it can reason about coverage instead of re-requesting them.
+    if crate::agentic_loop_v2_enabled() {
+        if let Some(coverage) = agent_run.ledger.coverage_summary() {
+            tool_feedback.push(
+                serde_json::json!({
+                    "observation": format!(
+                        "Already examined this turn (no need to re-open): {coverage}"
+                    )
+                })
+                .to_string(),
+            );
+        }
+    }
 
     while remaining_llm_judge_rounds > 0 {
         remaining_llm_judge_rounds = remaining_llm_judge_rounds.saturating_sub(1);
@@ -298,6 +320,9 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
             return Ok(());
         }
         let signature = format!("{}:{}", call.tool, call.args);
+        // Mirror the attempt into the shared ledger so it is the single source
+        // of "what have I already looked at" across the M3 and M4 loops.
+        agent_run.ledger.record_tool_call(&call.tool, &call.args);
         if !attempted_tools.insert(signature) {
             if remaining_llm_judge_rounds > 0 {
                 let feedback = serde_json::json!({
@@ -1057,6 +1082,9 @@ pub(super) fn apply_judge_tool_output(
         .tree_nodes
         .len()
         .saturating_sub(before_tree_node_count);
+    // Record the regions this tool surfaced so the shared ledger can report an
+    // honest "already looked at" summary spanning both the M3 and M4 loops.
+    agent_run.ledger.record_coverage(&output.citations);
     (gained_citations, gained_tree_nodes)
 }
 

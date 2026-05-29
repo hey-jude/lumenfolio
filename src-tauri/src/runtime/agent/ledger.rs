@@ -8,8 +8,7 @@
 //!
 //! `RetrievalLedger` unifies that state:
 //! - tool-call de-duplication (signature set),
-//! - coverage tracking (which pages / sections / tables / visuals were read),
-//! - judge feedback accumulation.
+//! - coverage tracking (which pages / sections / tables / visuals were read).
 //!
 //! Used per-loop it is behavior-preserving (same signature format, same dedupe
 //! semantics as the old `HashSet`s). When Loop V2 is enabled the *same* ledger is
@@ -28,7 +27,6 @@ pub struct RetrievalLedger {
     sections: BTreeSet<String>,
     tables: BTreeSet<String>,
     visuals: BTreeSet<String>,
-    feedback: Vec<String>,
 }
 
 impl RetrievalLedger {
@@ -48,19 +46,10 @@ impl RetrievalLedger {
         self.tool_signatures.insert(Self::signature(tool, args))
     }
 
-    /// Whether this exact tool call was already attempted this turn.
-    pub fn has_attempted(&self, tool: &str, args: &serde_json::Value) -> bool {
-        self.tool_signatures.contains(&Self::signature(tool, args))
-    }
-
-    /// Append a judge-feedback line (e.g. "tool X returned nothing new").
-    pub fn push_feedback(&mut self, feedback: String) {
-        self.feedback.push(feedback);
-    }
-
-    /// Accumulated judge feedback, oldest first.
-    pub fn feedback(&self) -> &[String] {
-        &self.feedback
+    /// All tool-call signatures attempted so far, for seeding another loop's
+    /// dedupe state (e.g. handing M3 coverage to the M4 LLM-judge loop).
+    pub fn attempted_signatures(&self) -> impl Iterator<Item = &String> {
+        self.tool_signatures.iter()
     }
 
     /// Record the regions covered by a batch of citations so the ledger can later
@@ -149,15 +138,15 @@ mod tests {
 
     fn citation(source: &str, page: u32, section: Option<&str>) -> Citation {
         Citation {
-            document_id: "doc".to_string(),
+            id: String::new(),
+            label: String::new(),
             page,
             block_id: String::new(),
-            bbox_list: serde_json::json!([]),
-            quote: "q".to_string(),
-            label: String::new(),
-            source: source.to_string(),
             section_title: section.map(str::to_string),
-            tree_node_id: None,
+            quote: "q".to_string(),
+            bbox_list: serde_json::json!([]),
+            document_id: "doc".to_string(),
+            source: source.to_string(),
         }
     }
 
@@ -182,11 +171,16 @@ mod tests {
     }
 
     #[test]
-    fn feedback_is_accumulated_in_order() {
+    fn attempted_signatures_lists_recorded_calls() {
         let mut ledger = RetrievalLedger::new();
-        ledger.push_feedback("a".to_string());
-        ledger.push_feedback("b".to_string());
-        assert_eq!(ledger.feedback(), &["a".to_string(), "b".to_string()]);
+        ledger.record_tool_call("open_section", &serde_json::json!({ "query": "a" }));
+        ledger.record_tool_call("search_chunks", &serde_json::json!({ "query": "b" }));
+        let signatures = ledger.attempted_signatures().cloned().collect::<Vec<_>>();
+        assert_eq!(signatures.len(), 2);
+        assert!(signatures.contains(&RetrievalLedger::signature(
+            "open_section",
+            &serde_json::json!({ "query": "a" })
+        )));
     }
 
     #[test]
