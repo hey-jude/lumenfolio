@@ -564,6 +564,11 @@ async function renderPage(pageNumber) {
     textLayerEl.innerHTML = ''
     textLayerEl.style.width = `${viewport.width}px`
     textLayerEl.style.height = `${viewport.height}px`
+    // Disable native text selection on the (runtime-generated) text spans.
+    // Inline style on the container is inherited by all child spans regardless
+    // of scoped-CSS attribute matching — see the .pdf-text-layer note in <style>.
+    textLayerEl.style.userSelect = 'none'
+    textLayerEl.style.webkitUserSelect = 'none'
 
     const renderTask = page.render({
       canvasContext: context,
@@ -2115,12 +2120,18 @@ defineExpose({
 
 .pdf-text-layer {
   z-index: 3;
-  /* Selection is custom (geometry-driven), not native: disable the browser's
-     own text selection so a two-column drag cannot follow DOM order across
-     columns. The text layer DOM is kept for accessibility / screen readers. */
+  cursor: text;
+}
+
+/* Selection is custom (geometry-driven), not native: disable the browser's own
+   text selection so a two-column drag cannot follow DOM order across columns.
+   The text spans are created at runtime by pdf.js and do NOT carry this
+   component's scoped attribute, so we must reach them with :deep — a plain
+   `.pdf-text-layer { user-select:none }` only matches the (scoped) container,
+   not the actual text spans, and the native selection would still fire. */
+.pdf-text-layer :deep(*) {
   user-select: none;
   -webkit-user-select: none;
-  cursor: text;
 }
 
 .reader-highlight {
