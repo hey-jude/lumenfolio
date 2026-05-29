@@ -46,6 +46,15 @@ impl RetrievalLedger {
         self.tool_signatures.insert(Self::signature(tool, args))
     }
 
+    /// Whether this exact tool call was already attempted this turn.
+    /// The hot loops use `record_tool_call`'s return value for the dedup
+    /// decision; this read-only accessor exists for callers that need to peek
+    /// without recording (and documents the dedup contract under test).
+    #[allow(dead_code)]
+    pub fn has_attempted(&self, tool: &str, args: &serde_json::Value) -> bool {
+        self.tool_signatures.contains(&Self::signature(tool, args))
+    }
+
     /// All tool-call signatures attempted so far, for seeding another loop's
     /// dedupe state (e.g. handing M3 coverage to the M4 LLM-judge loop).
     pub fn attempted_signatures(&self) -> impl Iterator<Item = &String> {
@@ -63,11 +72,16 @@ impl RetrievalLedger {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
             {
+                // Classify by the actual Citation `source` strings the RAG
+                // tools emit (see `source:` assignments in runtime/rag/mod.rs
+                // and agent_judge.rs), not by tool names.
                 match citation.source.as_str() {
-                    "open_table" | "current_view_table" => {
+                    "open_table" | "open_table_context" | "table_fact" | "inspect_tables"
+                    | "table_anchor" => {
                         self.tables.insert(section.to_string());
                     }
-                    "open_visual" | "inspect_visuals" => {
+                    "open_visual" | "visual_asset" | "visual_anchor" | "inspect_objects"
+                    | "caption" | "analyze_visual" | "analyze_page" => {
                         self.visuals.insert(section.to_string());
                     }
                     _ => {
@@ -198,5 +212,32 @@ mod tests {
         assert!(summary.contains("sections: Introduction"), "summary={summary}");
         assert!(summary.contains("tables: Table 3"), "summary={summary}");
         assert!(summary.contains("visuals: Figure 1"), "summary={summary}");
+    }
+
+    #[test]
+    fn coverage_classifies_all_real_table_and_visual_sources() {
+        // These are the actual Citation `source` strings the RAG tools emit;
+        // they must land under tables/visuals, not be misfiled as sections.
+        let mut ledger = RetrievalLedger::new();
+        for source in ["table_fact", "open_table_context", "inspect_tables", "table_anchor"] {
+            ledger.record_coverage(&[citation(source, 5, Some("Table 2"))]);
+        }
+        for source in [
+            "visual_asset",
+            "visual_anchor",
+            "inspect_objects",
+            "caption",
+            "analyze_visual",
+            "analyze_page",
+        ] {
+            ledger.record_coverage(&[citation(source, 6, Some("Figure 4"))]);
+        }
+        let summary = ledger.coverage_summary().expect("non-empty coverage");
+        assert!(summary.contains("tables: Table 2"), "summary={summary}");
+        assert!(summary.contains("visuals: Figure 4"), "summary={summary}");
+        assert!(
+            !summary.contains("sections:"),
+            "table/visual sources must not be misfiled as sections; summary={summary}"
+        );
     }
 }

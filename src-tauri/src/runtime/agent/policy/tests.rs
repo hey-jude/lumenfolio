@@ -642,3 +642,55 @@ fn ascii_word_table_routes_only_with_real_word() {
         "this method is portable on small devices"
     ));
 }
+
+/// Loop V2 recall-neutrality: the thin seed deliberately skips the table
+/// fan-out. This proves the answerability loop re-requests table evidence when a
+/// metric question lands with only seed-level prose, so skipping it in the seed
+/// loses no recall — the loop fills the gap.
+#[test]
+fn thin_seed_table_gap_is_recovered_by_loop() {
+    let decision = finalize_citations(
+        "Report the benchmark score for SWE-Pruner",
+        "compare",
+        &[citation(
+            "open_pages",
+            Some("Method"),
+            "method overview prose without any benchmark table",
+        )],
+        0,
+        8,
+    );
+    assert!(
+        decision.needs_more_evidence,
+        "loop must ask for more evidence, got {decision:?}"
+    );
+    let next_tool = decision
+        .next_tool_call
+        .as_ref()
+        .map(|call| call.tool.as_str())
+        .unwrap_or("");
+    assert!(
+        matches!(
+            next_tool,
+            "search_table_facts" | "open_table" | "open_section"
+        ),
+        "expected a table/evidence tool, got {next_tool}"
+    );
+}
+
+/// Loop V2 recall-neutrality for visuals: a figure question with only prose seed
+/// evidence must drive the loop to request more evidence rather than answering.
+#[test]
+fn thin_seed_figure_gap_is_recovered_by_loop() {
+    let decision = finalize_citations(
+        "What does Figure 2 show?",
+        "explain",
+        &[citation("open_pages", Some("Introduction"), "unrelated prose")],
+        0,
+        8,
+    );
+    assert!(
+        decision.needs_more_evidence,
+        "loop must ask for more evidence, got {decision:?}"
+    );
+}
