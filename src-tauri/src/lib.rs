@@ -38,25 +38,6 @@ const MAX_RUST_VISUAL_CROPS: usize = 48;
 const MIN_RUST_TSR_CONFIDENCE: f64 = 0.15;
 const TEXT_INDEX_JOB_TYPE: &str = "text_pdf";
 
-/// Feature flag for the Loop V2 agentic retrieval semantics (shared retrieval
-/// ledger across the M3/M4 loops, cheap early-exit, thin seed).
-///
-/// Off by default: the legacy retrieval path is preserved verbatim. Enable with
-/// `LUMENFOLIO_AGENTIC_LOOP_V2=1` (or `true`/`on`/`yes`).
-/// See `docs/lumenfolio_agentic_loop_v2_plan.md`.
-pub(crate) fn agentic_loop_v2_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("LUMENFOLIO_AGENTIC_LOOP_V2")
-            .map(|value| {
-                let value = value.trim().to_ascii_lowercase();
-                matches!(value.as_str(), "1" | "true" | "on" | "yes")
-            })
-            .unwrap_or(false)
-    })
-}
-
 #[derive(Default)]
 struct PdfRegistry {
     paths: Mutex<HashMap<String, PathBuf>>,
@@ -2252,15 +2233,13 @@ fn insufficient_evidence_answer(
     } else {
         format!("I do not have enough reliable evidence to answer yet.\n\nReason: {reason}\n\nTry asking a more specific question, or select a relevant passage in the PDF before asking.")
     };
-    // Loop V2: be transparent about what was already examined so the user knows
-    // the answer is "not found after looking", not "didn't bother to look".
-    if agentic_loop_v2_enabled() {
-        if let Some(coverage) = agent_run.ledger.coverage_summary() {
-            if is_chinese {
-                message.push_str(&format!("\n\n（已检索过：{coverage}）"));
-            } else {
-                message.push_str(&format!("\n\n(Already reviewed: {coverage})"));
-            }
+    // Be transparent about what was already examined so the user knows the
+    // answer is "not found after looking", not "didn't bother to look".
+    if let Some(coverage) = agent_run.ledger.coverage_summary() {
+        if is_chinese {
+            message.push_str(&format!("\n\n（已检索过：{coverage}）"));
+        } else {
+            message.push_str(&format!("\n\n(Already reviewed: {coverage})"));
         }
     }
     message

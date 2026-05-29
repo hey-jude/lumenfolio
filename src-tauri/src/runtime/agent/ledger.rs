@@ -1,19 +1,15 @@
 //! Shared retrieval ledger — the single "what have I already looked at" record
 //! for one agent turn.
 //!
-//! Before Loop V2 the M3 rule loop (`turn_runner`) and the M4 LLM-judge loop
-//! (`agent_judge`) each kept their own ad-hoc dedupe state (a `HashSet` of tool
-//! signatures, plus a `Vec<String>` of judge feedback). That duplicated the same
-//! concept twice and meant neither loop knew what the other had already read.
-//!
-//! `RetrievalLedger` unifies that state:
+//! The M3 rule loop (`turn_runner`) and the M4 LLM-judge loop (`agent_judge`)
+//! share one ledger. It records:
 //! - tool-call de-duplication (signature set),
 //! - coverage tracking (which pages / sections / tables / visuals were read).
 //!
-//! Used per-loop it is behavior-preserving (same signature format, same dedupe
-//! semantics as the old `HashSet`s). When Loop V2 is enabled the *same* ledger is
-//! threaded from the M3 loop into the M4 loop so the judge inherits the M3
-//! coverage and never re-requests an already-seen tool.
+//! The M3 loop creates the ledger and stores it on `AgentRunResult`; the M4 loop
+//! then inherits the M3 attempt set and coverage, so the judge never re-requests
+//! a tool the rule loop already ran and can report an honest "already examined"
+//! summary spanning both loops.
 
 use std::collections::BTreeSet;
 

@@ -52,29 +52,25 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
     let mut attempt = retrieval_attempt_count(agent_run);
     let (mut remaining_llm_tool_steps, mut remaining_llm_judge_rounds) =
         llm_judge_budget(max_steps, attempt);
-    let mut attempted_tools = HashSet::new();
-    // Loop V2: inherit the M3 loop's "already attempted" set so the LLM judge
-    // never re-requests a tool the rule loop already ran this turn. Off by
-    // default (legacy M4 starts with an empty dedupe set).
-    if crate::agentic_loop_v2_enabled() {
-        for signature in agent_run.ledger.attempted_signatures() {
-            attempted_tools.insert(signature.clone());
-        }
-    }
+    // Inherit the M3 loop's "already attempted" set so the LLM judge never
+    // re-requests a tool the rule loop already ran this turn.
+    let mut attempted_tools: HashSet<String> = agent_run
+        .ledger
+        .attempted_signatures()
+        .cloned()
+        .collect();
     let mut tool_feedback = Vec::new();
-    // Loop V2: tell the judge up front which regions the M3 loop already
-    // examined, so it can reason about coverage instead of re-requesting them.
-    if crate::agentic_loop_v2_enabled() {
-        if let Some(coverage) = agent_run.ledger.coverage_summary() {
-            tool_feedback.push(
-                serde_json::json!({
-                    "observation": format!(
-                        "Already examined this turn (no need to re-open): {coverage}"
-                    )
-                })
-                .to_string(),
-            );
-        }
+    // Tell the judge up front which regions the M3 loop already examined, so it
+    // can reason about coverage instead of re-requesting them.
+    if let Some(coverage) = agent_run.ledger.coverage_summary() {
+        tool_feedback.push(
+            serde_json::json!({
+                "observation": format!(
+                    "Already examined this turn (no need to re-open): {coverage}"
+                )
+            })
+            .to_string(),
+        );
     }
 
     while remaining_llm_judge_rounds > 0 {
