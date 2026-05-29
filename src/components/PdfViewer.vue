@@ -6,6 +6,7 @@ import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url'
 import 'pdfjs-dist/legacy/web/pdf_viewer.css'
 import { buildLinkedBlocksByPage, canUseLinkedHover } from '../translationLinking'
 import { testAttrs } from '../testAttrs'
+import { computePageColumns } from './pdf/selection/index.js'
 
 installPdfRuntimePolyfills()
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
@@ -119,6 +120,9 @@ const pageViewports = ref([])
 const defaultPageSize = ref({ ...DEFAULT_PAGE_SIZE })
 const assistBlocksByPage = ref(new Map())
 const pageTextItemsByPage = ref(new Map())
+// Per-page column layout (body bands + full-width regions), computed once per
+// render from the page's glyphs. Drives column-aware text selection.
+const pageColumnsByPage = ref(new Map())
 const hoveredAssistBlock = ref(null)
 const hoveredLinkedBlock = ref(null)
 const assistRailHovered = ref(false)
@@ -417,6 +421,7 @@ async function loadPdf() {
   defaultPageSize.value = { ...DEFAULT_PAGE_SIZE }
   assistBlocksByPage.value = new Map()
   pageTextItemsByPage.value = new Map()
+  pageColumnsByPage.value = new Map()
   pdfDocument.value?.destroy?.()
   pdfDocument.value = null
 
@@ -478,6 +483,7 @@ async function prepareInitialPageViewport(preferredPage = 1) {
   resetRenderedState()
   assistBlocksByPage.value = new Map()
   pageTextItemsByPage.value = new Map()
+  pageColumnsByPage.value = new Map()
   pageViewports.value = Array.from({ length: pdf.numPages })
   await ensurePageViewport(preferredPage)
 }
@@ -490,6 +496,7 @@ async function resetPageViewportsForScale() {
   resetRenderedState()
   assistBlocksByPage.value = new Map()
   pageTextItemsByPage.value = new Map()
+  pageColumnsByPage.value = new Map()
   pageViewports.value = Array.from({ length: pdf.numPages })
   await ensurePageViewport(currentPage.value || 1)
 }
@@ -565,6 +572,7 @@ async function renderPage(pageNumber) {
     const textContent = await page.getTextContent()
     const textItems = buildTextItems(textContent, viewport)
     mergePageTextItems(clampedPage, textItems)
+    mergePageColumns(clampedPage, textItems, viewport)
     mergeAssistPageIndex(buildPageIndex(clampedPage, viewport, textItems))
     const textLayer = new pdfjsLib.TextLayer({
       textContentSource: textContent,
@@ -1705,6 +1713,14 @@ function mergePageTextItems(pageNumber, textItems) {
   const next = new Map(pageTextItemsByPage.value)
   next.set(pageNumber, textItems)
   pageTextItemsByPage.value = next
+}
+
+function mergePageColumns(pageNumber, textItems, viewport) {
+  const pageSize = { width: viewport?.width || 0, height: viewport?.height || 0 }
+  const columns = computePageColumns(textItems, pageSize)
+  const next = new Map(pageColumnsByPage.value)
+  next.set(pageNumber, columns)
+  pageColumnsByPage.value = next
 }
 
 function buildTextItems(textContent, viewport) {
