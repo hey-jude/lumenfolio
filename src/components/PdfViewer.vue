@@ -584,8 +584,14 @@ async function renderPage(pageNumber) {
     if (run !== renderRun) return
     const textContent = await page.getTextContent()
     const textItems = buildTextItems(textContent, viewport)
-    mergePageTextItems(clampedPage, textItems)
-    mergePageColumns(clampedPage, textItems, viewport)
+    // Selection/column detection use CHARACTER-level glyphs: pdf.js item widths
+    // are coarse/inflated, so splitting each item's string evenly across its
+    // width yields per-char rects whose positions faithfully reflect where text
+    // actually sits (the column gutter has no chars). The assist page index
+    // keeps the coarse items.
+    const charGlyphs = splitItemsIntoCharGlyphs(textItems)
+    mergePageTextItems(clampedPage, charGlyphs)
+    mergePageColumns(clampedPage, charGlyphs, viewport)
     mergeAssistPageIndex(buildPageIndex(clampedPage, viewport, textItems))
     const textLayer = new pdfjsLib.TextLayer({
       textContentSource: textContent,
@@ -1496,6 +1502,41 @@ function mergePageColumns(pageNumber, textItems, viewport) {
   const next = new Map(pageColumnsByPage.value)
   next.set(pageNumber, columns)
   pageColumnsByPage.value = next
+}
+
+/**
+ * Split coarse pdf.js text rects into per-character glyphs.
+ *
+ * pdf.js returns one rect per text run with a single (often inflated) width, so
+ * a whole title line can be one 360px span. For column detection and selection
+ * we need positions that reflect where characters actually sit. We distribute
+ * the run's characters evenly across its width: char i spans
+ * [x + i*charW, x + (i+1)*charW]. This is exact for monospaced text and a good
+ * approximation otherwise — crucially, the column gutter ends up with NO chars,
+ * so it becomes detectable again. Spaces are kept (they carry width) but yield
+ * no selectable glyph.
+ */
+function splitItemsIntoCharGlyphs(items) {
+  const glyphs = []
+  for (const item of items) {
+    const text = item.text || ''
+    const n = text.length
+    if (n === 0) continue
+    if (n === 1) { glyphs.push({ ...item }); continue }
+    const charW = item.width / n
+    for (let i = 0; i < n; i += 1) {
+      const ch = text[i]
+      if (ch === ' ') continue // spaces占位但不产生可选 glyph
+      glyphs.push({
+        text: ch,
+        x: item.x + i * charW,
+        y: item.y,
+        width: charW,
+        height: item.height,
+      })
+    }
+  }
+  return glyphs
 }
 
 function buildTextItems(textContent, viewport) {

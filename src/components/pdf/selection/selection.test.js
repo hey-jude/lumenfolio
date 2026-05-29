@@ -44,22 +44,18 @@ function line(words, x, y) {
 // is the column gutter — never an inter-word space. The earlier sparse fixtures
 // (4-5 short words per line) created word-center gaps as wide as a real gutter,
 // which is unrealistic; this mirrors actual text density.
+// Emit CHARACTER-level glyphs filling x=left..right at row y — matching the
+// real pipeline (splitItemsIntoCharGlyphs), where each glyph is one character.
+// Characters tile the row contiguously; the only wide horizontal gap on a page
+// is the column gutter.
 function denseRow(left, right, y, tag) {
   const glyphs = []
-  // Model a real text line: words tile the row with only a thin (~1px) space
-  // between them, so the row's x-coverage is effectively continuous from left
-  // to right. The only wide horizontal gap on a page is therefore the column
-  // gutter — never an inter-word space.
-  const seed = Math.round(y)
   let cx = left
-  let n = 0
-  while (cx < right - 2) {
-    const len = 3 + ((seed + n * 7) % 5) // word lengths 3..7, varies per row
-    let w = len * GLYPH_W
-    if (cx + w > right) w = right - cx
-    glyphs.push({ text: `${tag}${n}`.slice(0, Math.max(1, len)), x: cx, y, width: w, height: LINE_H })
-    cx += w + 1 // 1px space between words -> continuous coverage
-    n += 1
+  let i = 0
+  while (cx + GLYPH_W <= right) {
+    glyphs.push({ text: tag[i % tag.length] || 'x', x: cx, y, width: GLYPH_W, height: LINE_H })
+    cx += GLYPH_W
+    i += 1
   }
   return glyphs
 }

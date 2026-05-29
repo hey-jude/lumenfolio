@@ -19,7 +19,7 @@
 // Pure / DOM-free for `node --test`.
 
 import { columnIndexAt, intersectsFullWidth } from './columns.js'
-import { groupGlyphsIntoLines, rectCenterX, rectCenterY, rectRight } from './geometry.js'
+import { groupGlyphsIntoLines, rectCenterY, rectRight } from './geometry.js'
 
 /**
  * @param {Array} glyphs - all glyphs on the page (content-stream order ok)
@@ -56,7 +56,9 @@ export function clipGlyphsToSelection(glyphs, columns, start, end) {
       continue
     }
 
-    const col = bands ? columnIndexAt(rectCenterX(g), bands) : 0
+    // Assign by LEFT EDGE, not center: pdf.js widths are unreliable, so a
+    // center can land in the wrong column. The left edge (text start) is sound.
+    const col = bands ? columnIndexAt(g.x, bands) : 0
 
     if (fromCol === toCol) {
       if (col !== fromCol) continue
@@ -107,7 +109,7 @@ function orderPoints(a, b, bands) {
  */
 function trimEdgeLines(glyphs, from, to, fromCol, toCol, bands) {
   if (!glyphs.length) return glyphs
-  const colOf = (g) => (bands ? columnIndexAt(rectCenterX(g), bands) : 0)
+  const colOf = (g) => (bands ? columnIndexAt(g.x, bands) : 0)
 
   // Identify the topmost line in the start column and bottommost in end column.
   const startColGlyphs = glyphs.filter((g) => colOf(g) === fromCol)
@@ -154,7 +156,7 @@ function bottomLine(glyphs) {
  * (reads first), which matches "abstract above columns".
  */
 export function sortReadingOrder(glyphs, bands) {
-  const colOf = (g) => (bands ? columnIndexAt(rectCenterX(g), bands) : 0)
+  const colOf = (g) => (bands ? columnIndexAt(g.x, bands) : 0)
   return [...glyphs].sort((a, b) => {
     const ca = colOf(a)
     const cb = colOf(b)
