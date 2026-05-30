@@ -1303,6 +1303,189 @@ fn clear_chat_turns(
     Ok(())
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteOutput {
+    id: String,
+    document_id: String,
+    page: u32,
+    bbox_list: Vec<Vec<f64>>,
+    quote_text: String,
+    content: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+fn read_note_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NoteOutput> {
+    let bbox_list_json: String = row.get(3)?;
+    let bbox_list = serde_json::from_str::<Vec<Vec<f64>>>(&bbox_list_json).unwrap_or_default();
+    Ok(NoteOutput {
+        id: row.get(0)?,
+        document_id: row.get(1)?,
+        page: row.get(2)?,
+        bbox_list,
+        quote_text: row.get(4)?,
+        content: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn load_note_by_id(conn: &Connection, id: &str) -> Result<Option<NoteOutput>, String> {
+    use rusqlite::OptionalExtension;
+    conn.query_row(
+        "SELECT id, document_id, page, bbox_list_json, quote_text, content, created_at, updated_at
+         FROM notes WHERE id = ?1",
+        params![id],
+        read_note_row,
+    )
+    .optional()
+    .map_err(|err| format!("Failed to load note: {err}"))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoadNotesInput {
+    document_id: String,
+}
+
+#[tauri::command]
+fn load_notes(
+    input: LoadNotesInput,
+    database: State<'_, AppDatabase>,
+) -> Result<Vec<NoteOutput>, String> {
+    let document_id = input.document_id.trim();
+    if document_id.is_empty() {
+        return Err("No document selected".to_string());
+    }
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, document_id, page, bbox_list_json, quote_text, content, created_at, updated_at
+             FROM notes
+             WHERE document_id = ?1
+             ORDER BY created_at DESC, rowid DESC",
+        )
+        .map_err(|err| format!("Failed to prepare notes query: {err}"))?;
+    let notes = stmt
+        .query_map(params![document_id], read_note_row)
+        .map_err(|err| format!("Failed to load notes: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to read notes: {err}"))?;
+    Ok(notes)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateNoteInput {
+    document_id: String,
+    page: u32,
+    #[serde(default)]
+    bbox_list: Vec<Vec<f64>>,
+    #[serde(default)]
+    quote_text: String,
+    #[serde(default)]
+    content: String,
+}
+
+#[tauri::command]
+fn create_note(
+    input: CreateNoteInput,
+    database: State<'_, AppDatabase>,
+) -> Result<NoteOutput, String> {
+    let document_id = input.document_id.trim();
+    if document_id.is_empty() {
+        return Err("No document selected".to_string());
+    }
+    let note_id = stable_text_hash(&format!(
+        "note:{}:{}:{}",
+        document_id,
+        input.page,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    ));
+    let bbox_list_json = serde_json::to_string(&input.bbox_list)
+        .map_err(|err| format!("Failed to encode note bbox list: {err}"))?;
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    conn.execute(
+        "INSERT INTO notes
+            (id, document_id, page, bbox_list_json, quote_text, content,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch(), unixepoch())",
+        params![
+            note_id,
+            document_id,
+            input.page,
+            bbox_list_json,
+            input.quote_text,
+            input.content,
+        ],
+    )
+    .map_err(|err| format!("Failed to create note: {err}"))?;
+    load_note_by_id(&conn, &note_id)?.ok_or_else(|| "Note not found after creation".to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateNoteInput {
+    id: String,
+    content: String,
+}
+
+#[tauri::command]
+fn update_note(
+    input: UpdateNoteInput,
+    database: State<'_, AppDatabase>,
+) -> Result<NoteOutput, String> {
+    let note_id = input.id.trim();
+    if note_id.is_empty() {
+        return Err("No note specified".to_string());
+    }
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let affected = conn
+        .execute(
+            "UPDATE notes SET content = ?2, updated_at = unixepoch() WHERE id = ?1",
+            params![note_id, input.content],
+        )
+        .map_err(|err| format!("Failed to update note: {err}"))?;
+    if affected == 0 {
+        return Err("Note not found".to_string());
+    }
+    load_note_by_id(&conn, note_id)?.ok_or_else(|| "Note not found".to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteNoteInput {
+    id: String,
+}
+
+#[tauri::command]
+fn delete_note(input: DeleteNoteInput, database: State<'_, AppDatabase>) -> Result<(), String> {
+    let note_id = input.id.trim();
+    if note_id.is_empty() {
+        return Err("No note specified".to_string());
+    }
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    conn.execute("DELETE FROM notes WHERE id = ?1", params![note_id])
+        .map_err(|err| format!("Failed to delete note: {err}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn ask_document(
     input: AskDocumentInput,
@@ -3547,6 +3730,10 @@ pub fn run() {
             document_translation::cancel_translation_job,
             load_chat_turns,
             clear_chat_turns,
+            load_notes,
+            create_note,
+            update_note,
+            delete_note,
             ask_document,
             ask_document_stream,
             load_translation_settings,

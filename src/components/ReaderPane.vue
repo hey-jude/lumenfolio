@@ -61,6 +61,10 @@ const props = defineProps({
     type: Object,
     default: null,
   },
+  noteHighlights: {
+    type: Array,
+    default: () => [],
+  },
   hoveredLinkedBlock: {
     type: Object,
     default: null,
@@ -1052,6 +1056,7 @@ watch(translationArtifactActivePage, async () => {
               :document="document"
               :active-page="activePage"
               :active-highlight="activeHighlight"
+              :note-highlights="noteHighlights"
               :active-translation="activeTranslation"
               :linked-blocks="linkedTranslationBlocks"
               :linked-hover-enabled="viewMode === 'dual' && canOpenTranslationView"
@@ -1293,6 +1298,7 @@ watch(translationArtifactActivePage, async () => {
             :document="document"
             :active-page="activePage"
             :active-highlight="activeHighlight"
+            :note-highlights="noteHighlights"
             :active-translation="activeTranslation"
             :selection-locked="selectionLocked"
             :ui="ui"

@@ -460,6 +460,21 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
 
         CREATE INDEX IF NOT EXISTS idx_chat_turns_document_created
           ON chat_turns(document_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS notes (
+          id TEXT PRIMARY KEY,
+          document_id TEXT NOT NULL,
+          page INTEGER NOT NULL,
+          bbox_list_json TEXT NOT NULL DEFAULT '[]',
+          quote_text TEXT NOT NULL DEFAULT '',
+          content TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_notes_document_created
+          ON notes(document_id, created_at DESC);
         ",
     )
     .map_err(|err| format!("Failed to migrate SQLite database: {err}"))?;

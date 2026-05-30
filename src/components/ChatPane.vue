@@ -61,6 +61,7 @@ const emit = defineEmits([
   'update:model-id',
   'clear-selection',
   'clear-history',
+  'set-tab',
 ])
 
 const chatInputEnabled = computed(() => props.document.chatReady && props.modelConfigured)
@@ -970,10 +971,6 @@ function evidenceSourceLabel(source) {
           <div class="chat-subtitle">{{ ui.currentDoc }}: {{ document.shortTitle }}</div>
         </div>
         <div class="chat-header-actions">
-          <div class="chat-tabs">
-            <span class="active">{{ ui.chat }}</span>
-            <span>{{ ui.notes }}</span>
-          </div>
           <button
             type="button"
             class="chat-clear-btn"
@@ -982,8 +979,21 @@ function evidenceSourceLabel(source) {
             :aria-label="ui.clearChatHistory"
             @click="emit('clear-history')"
           >
-            {{ ui.clearChatHistoryShort }}
+            <svg class="clear-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M4 7h16M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1Zm-3 3 1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M10 11v6M14 11v6"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
           </button>
+          <div class="pane-tabs">
+            <button type="button" class="active">{{ ui.chat }}</button>
+            <button type="button" @click="emit('set-tab', 'notes')">{{ ui.notes }}</button>
+          </div>
         </div>
       </div>
 
@@ -1359,33 +1369,36 @@ function evidenceSourceLabel(source) {
 
 .collapse-btn {
   position: absolute;
-  left: 0;
-  top: 16px;
-  transform: translateX(-50%);
+  top: 12px;
+  left: -12px;
   width: 24px;
-  height: 34px;
+  height: 24px;
   border-radius: 999px;
   border: 1px solid var(--line-soft);
   background: var(--bg-elevated);
   color: var(--text-secondary);
   cursor: pointer;
   z-index: 3;
+  font-size: 11px;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.collapse-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .collapsed-rail {
-  width: 100%;
   flex: 1;
-  border: 0;
+  width: 100%;
+  border: none;
   background: transparent;
-  display: flex;
-  justify-content: center;
-  align-items: center;
   color: var(--text-secondary);
-  font-size: 12px;
-  letter-spacing: 0.12em;
-  writing-mode: vertical-rl;
-  transform: rotate(180deg);
   cursor: pointer;
+  writing-mode: vertical-rl;
+  padding: 16px 0;
+  font-size: 12px;
+  letter-spacing: 2px;
 }
 
 .collapsed-rail:hover {
@@ -1419,17 +1432,34 @@ function evidenceSourceLabel(source) {
   font-size: 12px;
 }
 
-.chat-tabs {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  color: var(--text-muted);
-  font-size: 12px;
-  text-transform: uppercase;
+.pane-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  flex-shrink: 0;
 }
 
-.chat-tabs .active {
+.pane-tabs button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+}
+
+.pane-tabs button:hover {
+  color: var(--text-secondary);
+}
+
+.pane-tabs button.active {
+  background: rgba(106, 169, 255, 0.14);
   color: var(--text-primary);
+  cursor: default;
 }
 
 .chat-header-actions {
@@ -1440,19 +1470,29 @@ function evidenceSourceLabel(source) {
 }
 
 .chat-clear-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
   border: 1px solid var(--line-soft);
   border-radius: 999px;
-  padding: 5px 9px;
+  padding: 0;
   background: rgba(255, 255, 255, 0.03);
   color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1;
   cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.chat-clear-btn .clear-icon {
+  width: 15px;
+  height: 15px;
 }
 
 .chat-clear-btn:hover:not(:disabled) {
   border-color: rgba(255, 179, 179, 0.34);
   color: #ffd2d2;
+  background: rgba(255, 99, 99, 0.08);
 }
 
 .chat-clear-btn:disabled {

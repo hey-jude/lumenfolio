@@ -53,6 +53,10 @@ const props = defineProps({
     type: Object,
     default: null,
   },
+  noteHighlights: {
+    type: Array,
+    default: () => [],
+  },
   activeTranslation: {
     type: Object,
     default: null,
@@ -1834,6 +1838,19 @@ function highlightRectsForPage(pageNumber) {
   return bboxListToRects(pageNumber, props.activeHighlight.bboxList || [])
 }
 
+function noteRectsForPage(pageNumber) {
+  const notes = props.noteHighlights || []
+  if (!notes.length) return []
+  const rects = []
+  for (const note of notes) {
+    if (!note || note.page !== pageNumber) continue
+    for (const rect of bboxListToRects(pageNumber, note.bboxList || [])) {
+      rects.push({ ...rect, noteId: note.id })
+    }
+  }
+  return rects
+}
+
 function selectionRectsForPage(pageNumber) {
   if (!selectionText.value || selectionPage.value !== pageNumber) return []
   return selectionRects.value || []
@@ -1900,6 +1917,17 @@ defineExpose({
           <canvas class="pdf-canvas"></canvas>
           <div class="textLayer pdf-text-layer"></div>
           <div class="highlight-layer" aria-hidden="true">
+            <span
+              v-for="(rect, index) in noteRectsForPage(pageNumber)"
+              :key="`note-${pageNumber}-${rect.noteId}-${index}`"
+              class="reader-highlight note"
+              :style="{
+                left: `${rect.x}px`,
+                top: `${rect.y}px`,
+                width: `${rect.width}px`,
+                height: `${rect.height}px`,
+              }"
+            ></span>
             <span
               v-for="(rect, index) in highlightRectsForPage(pageNumber)"
               :key="`active-${pageNumber}-${index}`"
@@ -1972,6 +2000,7 @@ defineExpose({
           <div class="assist-actions">
             <button type="button" :title="ui.translate" @click="emitAssistAction('translate-selection')">A文</button>
             <button type="button" :title="ui.ask" @click="emitAssistAction('ask-selection')">{{ ui.ask }}</button>
+            <button type="button" :title="ui.takeNote" @click="emitAssistAction('note-selection')">{{ ui.takeNote }}</button>
           </div>
         </div>
 
@@ -1985,6 +2014,7 @@ defineExpose({
         >
           <button type="button" :title="ui.translate" @click="emitManualSelectionAction('translate-selection')">A文</button>
           <button type="button" :title="ui.ask" @click="emitManualSelectionAction('ask-selection')">{{ ui.ask }}</button>
+          <button type="button" :title="ui.takeNote" @click="emitManualSelectionAction('note-selection')">{{ ui.takeNote }}</button>
         </div>
 
         <aside
@@ -2178,6 +2208,11 @@ defineExpose({
 .reader-highlight {
   position: absolute;
   border-radius: 2px;
+}
+
+.reader-highlight.note {
+  background: rgba(250, 204, 21, 0.16);
+  outline: 1px solid rgba(250, 204, 21, 0.3);
 }
 
 .reader-highlight.active {

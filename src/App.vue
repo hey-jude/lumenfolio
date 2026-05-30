@@ -48,6 +48,15 @@ const ChatPane = defineAsyncComponent({
   delay: 80,
   timeout: ASYNC_COMPONENT_TIMEOUT_MS,
 })
+const NotesPane = defineAsyncComponent({
+  loader: () => import('./components/NotesPane.vue'),
+  loadingComponent: AsyncPanelLoading,
+  delay: 80,
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
+const NoteComposer = defineAsyncComponent({
+  loader: () => import('./components/NoteComposer.vue'),
+})
 const MODEL_PROVIDER_PRESETS = {
   'openai-compatible': {
     name: 'OpenAI Compatible',
@@ -97,6 +106,12 @@ const inlineTranslateOpen = ref(false)
 const leftCollapsed = usePersistedRef('leftCollapsed', false)
 const rightCollapsed = usePersistedRef('rightCollapsed', false)
 const rightWidth = usePersistedRef('rightWidth', 500, { debounceMs: 300 })
+// Right pane shows either chat or notes; remembered across restarts.
+const rightPaneTab = usePersistedRef('rightPaneTab', 'chat')
+const activeNoteId = ref('')
+// Note composer state for create/edit.
+const noteComposer = ref({ open: false, mode: 'create', quoteText: '', content: '', noteId: '', selection: null })
+const noteComposerSaving = ref(false)
 const chatFocusRequest = ref(0)
 const viewerReloadKey = ref(0)
 const selectedChatModelId = ref(UNCONFIGURED_CHAT_MODEL_ID)
@@ -259,6 +274,9 @@ const emptyDocument = computed(() => ({
   },
   pages: [],
   messages: [],
+  notes: [],
+  notesLoaded: false,
+  notesLoading: null,
 }))
 const selectedDocument = computed(() => (
   allDocs.value.find((doc) => doc.id === selectedDocId.value)
@@ -335,7 +353,10 @@ watch(selectedDocument, (doc) => {
   lastSelection.value = null
   activeTranslation.value = null
   inlineTranslateOpen.value = false
+  activeNoteId.value = ''
+  noteComposer.value = { ...noteComposer.value, open: false }
   applySelectedChatModel(doc.chatModelId, doc)
+  loadNotesForDocument(doc.id)
   scheduleIdleTask(() => scheduleDocumentVisualIndex(doc), 1800)
 }, { immediate: true })
 
@@ -1004,6 +1025,7 @@ async function testChatModelProvider() {
 function selectDoc(docId) {
   selectedDocId.value = docId
   loadChatHistoryForDocument(docId)
+  loadNotesForDocument(docId)
 }
 
 function handleCitationClick(citation) {
@@ -1340,6 +1362,122 @@ async function loadChatHistoryForDocument(docId) {
     }
   })()
   return doc.chatHistoryLoading
+}
+
+async function loadNotesForDocument(docId) {
+  const doc = allDocs.value.find((item) => item.id === docId)
+  if (!doc || doc.id === 'empty' || doc.notesLoaded) return
+  if (doc.notesLoading) return doc.notesLoading
+  doc.notesLoading = (async () => {
+    try {
+      const notes = await invoke('load_notes', { input: { documentId: doc.id } })
+      doc.notes = Array.isArray(notes) ? notes : []
+      doc.notesLoaded = true
+    } catch (err) {
+      doc.notesLoaded = false
+      console.warn('Failed to load notes', err)
+    } finally {
+      doc.notesLoading = null
+    }
+  })()
+  return doc.notesLoading
+}
+
+function setRightPaneTab(tab) {
+  rightPaneTab.value = tab === 'notes' ? 'notes' : 'chat'
+  if (rightCollapsed.value) rightCollapsed.value = false
+}
+
+function openNoteComposer(selection) {
+  const selected = selection || lastSelection.value
+  if (!selected) return
+  handleSelection(selected)
+  noteComposer.value = {
+    open: true,
+    mode: 'create',
+    quoteText: selected.text || '',
+    content: '',
+    noteId: '',
+    selection: selected,
+  }
+}
+
+function openNoteEditComposer(note) {
+  if (!note) return
+  noteComposer.value = {
+    open: true,
+    mode: 'edit',
+    quoteText: note.quoteText || '',
+    content: note.content || '',
+    noteId: note.id,
+    selection: null,
+  }
+}
+
+function closeNoteComposer() {
+  noteComposer.value = { ...noteComposer.value, open: false }
+}
+
+async function submitNoteComposer(content) {
+  if (noteComposerSaving.value) return
+  const composer = noteComposer.value
+  const doc = selectedDocument.value
+  if (!doc || doc.id === 'empty') return
+  noteComposerSaving.value = true
+  try {
+    if (composer.mode === 'edit') {
+      const updated = await invoke('update_note', { input: { id: composer.noteId, content } })
+      const idx = doc.notes.findIndex((note) => note.id === updated.id)
+      if (idx >= 0) doc.notes.splice(idx, 1, updated)
+    } else {
+      const selected = composer.selection
+      const created = await invoke('create_note', {
+        input: {
+          documentId: doc.id,
+          page: selected?.page || activePage.value || 1,
+          bboxList: selected?.bboxList || [],
+          quoteText: selected?.text || '',
+          content,
+        },
+      })
+      doc.notes = [created, ...(doc.notes || [])]
+      doc.notesLoaded = true
+      lastSelection.value = null
+      setRightPaneTab('notes')
+      focusNote(created)
+    }
+    closeNoteComposer()
+  } catch (err) {
+    console.warn('Failed to save note', err)
+  } finally {
+    noteComposerSaving.value = false
+  }
+}
+
+async function deleteNote(note) {
+  const doc = selectedDocument.value
+  if (!doc || !note?.id) return
+  if (!window.confirm(ui.value.noteDeleteConfirm)) return
+  try {
+    await invoke('delete_note', { input: { id: note.id } })
+    doc.notes = (doc.notes || []).filter((item) => item.id !== note.id)
+    if (activeNoteId.value === note.id) {
+      activeNoteId.value = ''
+      activeHighlight.value = null
+    }
+  } catch (err) {
+    console.warn('Failed to delete note', err)
+  }
+}
+
+function focusNote(note) {
+  if (!note) return
+  activeNoteId.value = note.id
+  activePage.value = note.page
+  activeHighlight.value = {
+    page: note.page,
+    bboxList: note.bboxList || [],
+  }
 }
 
 function mergeChatHistoryMessages(doc, historyMessages) {
@@ -2259,6 +2397,7 @@ function handleAskSelection(selection) {
   if (!selected) return
   handleSelection(selected)
   lastSelection.value = selected
+  rightPaneTab.value = 'chat'
   if (rightCollapsed.value) rightCollapsed.value = false
   nextTick(() => {
     chatFocusRequest.value += 1
@@ -2319,10 +2458,7 @@ async function handleTranslateSelection(selection, options = {}) {
 }
 
 function handleNoteSelection(selection) {
-  const selected = selection || lastSelection.value
-  if (!selected) return
-  handleSelection(selected)
-  handleSend(`${ui.value.noteCreated}\n\n"${selected.text}"`, selected)
+  openNoteComposer(selection)
 }
 
 function handleRealign() {
@@ -2929,6 +3065,9 @@ function createLocalDocument(pdf) {
     chatHistoryLoaded: false,
     chatHistoryLoading: null,
     messages: [],
+    notes: [],
+    notesLoaded: false,
+    notesLoading: null,
   }
 }
 
@@ -3200,6 +3339,7 @@ onMounted(() => {
       :active-page="activePage"
       :active-block-id="activeBlockId"
       :active-highlight="activeHighlight"
+      :note-highlights="selectedDocument.notes || []"
       :hovered-linked-block="hoveredLinkedBlock"
       :active-translation="activeTranslation"
       :page-translation="selectedDocument.translation.pages?.[activePage] || null"
@@ -3233,6 +3373,7 @@ onMounted(() => {
     <div v-if="!rightCollapsed" class="drag-handle" @mousedown.prevent="startResize" />
 
     <ChatPane
+      v-show="rightPaneTab !== 'notes'"
       :document="selectedDocument"
       :collapsed="rightCollapsed"
       :width="rightWidth"
@@ -3250,7 +3391,36 @@ onMounted(() => {
       @update:model-id="selectedChatModelId = $event"
       @clear-selection="clearPendingSelection"
       @clear-history="openClearChatHistoryConfirm"
+      @set-tab="setRightPaneTab"
       @send="handleSend"
+    />
+
+    <NotesPane
+      v-if="rightPaneTab === 'notes'"
+      :document="selectedDocument"
+      :collapsed="rightCollapsed"
+      :width="rightWidth"
+      :notes="selectedDocument.notes || []"
+      :loading="Boolean(selectedDocument.notesLoading) && !selectedDocument.notesLoaded"
+      :active-note-id="activeNoteId"
+      :locale="locale"
+      :ui="ui"
+      @toggle-collapse="toggleCollapse"
+      @set-tab="setRightPaneTab"
+      @note-focus="focusNote"
+      @note-edit="openNoteEditComposer"
+      @note-delete="deleteNote"
+    />
+
+    <NoteComposer
+      :show="noteComposer.open"
+      :mode="noteComposer.mode"
+      :quote-text="noteComposer.quoteText"
+      :initial-content="noteComposer.content"
+      :saving="noteComposerSaving"
+      :ui="ui"
+      @save="submitNoteComposer"
+      @cancel="closeNoteComposer"
     />
 
     <div v-if="clearChatConfirmOpen" class="confirm-backdrop" @click.self="closeClearChatHistoryConfirm">
