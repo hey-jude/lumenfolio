@@ -15,6 +15,7 @@ import { listen } from '@tauri-apps/api/event'
 import { translationLanguages } from './mockData'
 import { messages } from './i18n'
 import { normalizeLinkedBlockHover } from './translationLinking'
+import { usePersistedRef, readPersisted, writePersisted } from './persistedState'
 
 const UNCONFIGURED_CHAT_MODEL_ID = 'unconfigured-model'
 const ASSISTANT_STREAM_DRAIN_MS = 35
@@ -74,10 +75,15 @@ const MODEL_CAPABILITY_OPTIONS = ['vision', 'reasoning', 'tool_use']
 const workspace = reactive({
   roots: [],
 })
-const locale = ref('en')
+const locale = usePersistedRef('locale', 'en')
 const ui = computed(() => messages[locale.value] || messages.en)
 const filter = ref('')
 const selectedDocId = ref('')
+// Remember the active document across restarts; restored (with existence
+// validation) in loadLastWorkspace. Skip empty transient values.
+watch(selectedDocId, (id) => {
+  if (id) writePersisted('selectedDocId', id)
+})
 const translationLang = ref('zh')
 const viewMode = ref('original')
 const activePage = ref(1)
@@ -88,9 +94,9 @@ const hoveredLinkedBlock = ref(null)
 const lastSelection = ref(null)
 const activeTranslation = ref(null)
 const inlineTranslateOpen = ref(false)
-const leftCollapsed = ref(false)
-const rightCollapsed = ref(false)
-const rightWidth = ref(500)
+const leftCollapsed = usePersistedRef('leftCollapsed', false)
+const rightCollapsed = usePersistedRef('rightCollapsed', false)
+const rightWidth = usePersistedRef('rightWidth', 500, { debounceMs: 300 })
 const chatFocusRequest = ref(0)
 const viewerReloadKey = ref(0)
 const selectedChatModelId = ref(UNCONFIGURED_CHAT_MODEL_ID)
@@ -103,7 +109,7 @@ const modelProviders = ref([])
 const editableProviders = ref([])
 const selectedProviderEditKey = ref('')
 const settingsOpen = ref(false)
-const settingsSection = ref('chat')
+const settingsSection = usePersistedRef('settingsSection', 'chat')
 const settingsStatus = ref('idle')
 const settingsError = ref('')
 const clearChatConfirmOpen = ref(false)
@@ -2845,7 +2851,11 @@ async function loadLastWorkspace() {
       return
     }
     workspace.roots = snapshot.roots.map((rootSnapshot) => createWorkspaceRoot(rootSnapshot))
-    selectedDocId.value = allDocs.value[0]?.id || ''
+    // Restore the last-selected document if it still exists in the workspace
+    // (it may have been deleted/moved since last run), else fall back to first.
+    const savedDocId = readPersisted('selectedDocId', '')
+    const savedStillExists = savedDocId && allDocs.value.some((doc) => doc.id === savedDocId)
+    selectedDocId.value = savedStillExists ? savedDocId : (allDocs.value[0]?.id || '')
     if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
     workspaceStatus.value = 'idle'
   } catch (err) {
@@ -3877,7 +3887,9 @@ onMounted(() => {
 .settings-modal {
   width: min(1080px, 100%);
   max-height: min(720px, calc(100vh - 48px));
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   border: 1px solid var(--line-soft);
   border-radius: 16px;
   background: #202329;
@@ -3891,6 +3903,7 @@ onMounted(() => {
   justify-content: space-between;
   gap: 12px;
   padding: 18px 20px;
+  flex-shrink: 0;
 }
 
 .settings-head {
@@ -3923,7 +3936,9 @@ onMounted(() => {
 .settings-layout {
   display: grid;
   grid-template-columns: 190px minmax(0, 1fr);
-  min-height: 560px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 .settings-nav {
@@ -4410,12 +4425,13 @@ onMounted(() => {
 }
 
 .settings-message {
-  margin: 0 20px;
+  margin: 12px 20px 0;
   padding: 10px 12px;
   border-radius: 10px;
   border: 1px solid rgba(106, 169, 255, 0.24);
   background: rgba(106, 169, 255, 0.08);
   color: var(--text-secondary);
+  flex-shrink: 0;
 }
 
 .settings-message.failed {
