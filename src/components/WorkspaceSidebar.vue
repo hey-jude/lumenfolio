@@ -261,7 +261,7 @@ function triggerDeleteRoot(root, event = null) {
     </div>
 
     <template v-if="collapsed">
-      <div class="rail-brand" :title="`Lumenfolio${selectedRoot?.path ? ` · ${selectedRoot.path}` : ''}`" data-tauri-drag-region @mousedown="startWindowDrag">
+      <div class="rail-brand" title="Lumenfolio" data-tauri-drag-region @mousedown="startWindowDrag">
         <img :src="lumenfolioLogo" alt="" />
       </div>
 
@@ -340,19 +340,6 @@ function triggerDeleteRoot(root, event = null) {
         </div>
         <div class="brand-copy">
           <div class="sidebar-title">Lumenfolio</div>
-          <div class="sidebar-path-row">
-            <div class="sidebar-subtitle">{{ selectedRoot?.path || '' }}</div>
-            <button
-              type="button"
-              class="path-reveal-btn"
-              :title="ui.openWorkspaceInFileManager"
-              :aria-label="ui.openWorkspaceInFileManager"
-              :disabled="!selectedRoot"
-              @click="emit('open-workspace', selectedRoot?.id)"
-            >
-              ↗
-            </button>
-          </div>
         </div>
       </div>
       <div class="locale-switch">
@@ -804,28 +791,10 @@ function triggerDeleteRoot(root, event = null) {
   min-width: 0;
 }
 
-.sidebar-path-row {
-  margin-top: 4px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
 .sidebar-title {
   font-size: 15px;
   font-weight: 700;
   color: var(--text-primary);
-}
-
-.sidebar-subtitle {
-  font-size: 12px;
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-  max-width: 116px;
 }
 
 .path-reveal-btn {

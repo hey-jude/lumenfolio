@@ -84,6 +84,7 @@ const expandedAgentStages = ref({})
 const expandedAgentPanels = ref({})
 let messageScrollFrame = 0
 let messageScrollbarTimer = null
+let lastMessageScrollTop = 0
 const messageScrollSettleTimers = new Set()
 const capabilityTitle = computed(() => {
   if (!props.modelConfigured) return props.ui.modelNotConfigured
@@ -110,15 +111,10 @@ const pendingSelectionPreview = computed(() => {
 })
 
 function modelOptionLabel(model) {
-  if (model.disabled) return model.label
-  const providerLabel = model.providerType === 'openai' || model.provider === 'OpenAI'
-    ? 'OAI'
-    : model.providerType === 'openrouter' || model.provider === 'OpenRouter'
-      ? 'OR'
-      : model.providerType === 'deepseek' || model.provider === 'DeepSeek'
-        ? 'DS'
-        : model.provider
-  return providerLabel ? `${providerLabel} · ${model.provider} · ${model.label}` : `${model.provider} · ${model.label}`
+  // Show only the model name. The provider prefix (e.g. "DS · DeepSeek · ")
+  // overflowed the trigger and was redundant — model names already imply
+  // their provider.
+  return model.label
 }
 
 function handleSubmit(event) {
@@ -230,20 +226,42 @@ function messageListAtBottom() {
 }
 
 function updateMessageScrollState() {
+  const element = messageListRef.value
+  if (!element) return
+
   messageListScrolling.value = true
   if (messageScrollbarTimer) window.clearTimeout(messageScrollbarTimer)
   messageScrollbarTimer = window.setTimeout(() => {
     messageListScrolling.value = false
     messageScrollbarTimer = null
   }, 760)
+
+  const scrollTop = element.scrollTop
   const atBottom = messageListAtBottom()
-  autoFollowMessages.value = atBottom
-  if (atBottom) userScrolledMessages.value = false
+  // Direction-aware stick-to-bottom: an actual upward scroll detaches
+  // auto-follow so streaming output never yanks the view back down. Content
+  // growth during streaming keeps scrollTop unchanged (only scrollHeight
+  // grows), so it can't be mistaken for a user scrolling up.
+  if (scrollTop < lastMessageScrollTop - 1 && !atBottom) {
+    autoFollowMessages.value = false
+    userScrolledMessages.value = true
+  } else if (atBottom) {
+    // Returning to the bottom re-attaches auto-follow.
+    autoFollowMessages.value = true
+    userScrolledMessages.value = false
+  }
+  lastMessageScrollTop = scrollTop
   showJumpToLatest.value = !atBottom && visibleMessages.value.length > 0
 }
 
 function markUserScrolledMessages() {
-  userScrolledMessages.value = true
+  // A manual gesture (wheel/touch/pointer/key) while not pinned to the bottom
+  // detaches auto-follow immediately. The scroll handler then refines the
+  // state using scroll position/direction.
+  if (!messageListAtBottom()) {
+    autoFollowMessages.value = false
+    userScrolledMessages.value = true
+  }
 }
 
 function scrollMessagesToBottom({ force = false, smooth = false, settle = false } = {}) {
@@ -267,7 +285,10 @@ function scrollMessagesToBottom({ force = false, smooth = false, settle = false 
   for (const delay of [60, 180, 360]) {
     const timer = window.setTimeout(() => {
       messageScrollSettleTimers.delete(timer)
-      scrollMessagesToBottom({ force, smooth: false })
+      // Re-evaluate follow state at fire time and never force: a user who
+      // scrolled up between the initial scroll and this delayed settle pass
+      // must not be dragged back to the bottom. This was the core bug.
+      if (autoFollowMessages.value) scrollMessagesToBottom({ smooth: false })
     }, delay)
     messageScrollSettleTimers.add(timer)
   }
