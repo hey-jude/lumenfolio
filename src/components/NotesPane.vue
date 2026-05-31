@@ -142,7 +142,6 @@ function timeLabel(note) {
   border-left: 1px solid var(--line-soft);
   background: var(--bg-panel);
   transition: width 0.18s ease;
-  overflow: hidden;
 }
 
 .notes-shell.collapsed {

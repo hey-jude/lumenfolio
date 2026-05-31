@@ -212,6 +212,20 @@ function treeLabel(doc) {
   return doc?.treeReady ? props.ui.treeReady : props.ui.treeMissing
 }
 
+function docStatusKind(doc) {
+  const status = doc?.indexStatus
+  if (status === 'indexed') return 'ready'
+  if (status === 'stale') return 'failed'
+  return 'processing'
+}
+
+function docStatusTitle(doc) {
+  const kind = docStatusKind(doc)
+  if (kind === 'ready') return props.ui.docStatusReady
+  if (kind === 'failed') return props.ui.docStatusFailed
+  return props.ui.docStatusProcessing
+}
+
 function compactDocLabel(doc) {
   const name = String(doc?.shortTitle || doc?.title || 'PDF').replace(/\.pdf$/i, '')
   const compact = name
@@ -278,13 +292,8 @@ function triggerDeleteRoot(root, event = null) {
         >
           <span class="rail-doc-icon" aria-hidden="true"></span>
           <span class="rail-doc-name">{{ compactDocLabel(doc) }}</span>
-          <span class="rail-doc-status" aria-hidden="true">
-            <span
-              v-if="doc.indexStatus === 'indexed' || doc.indexStatus === 'stale'"
-              class="rail-status-dot tree"
-              :class="{ ready: doc.treeReady, missing: !doc.treeReady }"
-            ></span>
-            <span class="rail-status-dot index" :class="doc.statusTone"></span>
+          <span class="rail-doc-status" :title="docStatusTitle(doc)">
+            <span class="doc-status-dot" :class="docStatusKind(doc)"></span>
           </span>
           <span v-if="doc.indexStatus === 'indexing'" class="rail-doc-progress" aria-hidden="true">
             <span :style="{ height: `${progressPercent(doc)}%` }"></span>
@@ -419,14 +428,16 @@ function triggerDeleteRoot(root, event = null) {
               @click="emit('select-doc', doc.id)"
             >
               <div class="doc-main">
-                <span class="doc-name">{{ doc.shortTitle }}</span>
-                <span class="doc-time">{{ localized(doc.lastOpened) }}</span>
-              </div>
-              <div class="doc-meta">
-                <span v-if="doc.indexStatus === 'indexed' || doc.indexStatus === 'stale'" class="tree-badge" :class="{ ready: doc.treeReady, missing: !doc.treeReady }">
-                  {{ treeLabel(doc) }}
+                <span class="doc-name-wrap">
+                  <span
+                    class="doc-status-dot"
+                    :class="docStatusKind(doc)"
+                    :title="docStatusTitle(doc)"
+                    :aria-label="docStatusTitle(doc)"
+                  ></span>
+                  <span class="doc-name">{{ doc.shortTitle }}</span>
                 </span>
-                <span class="doc-badge" :class="doc.statusTone">{{ statusLabel(doc.status, doc) }}</span>
+                <span class="doc-time">{{ localized(doc.lastOpened) }}</span>
               </div>
               <div v-if="doc.indexStatus === 'indexing'" class="doc-progress" aria-hidden="true">
                 <span :style="{ width: `${progressPercent(doc)}%` }"></span>
@@ -643,29 +654,7 @@ function triggerDeleteRoot(root, event = null) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
   min-height: 8px;
-}
-
-.rail-status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: rgba(148, 163, 184, 0.8);
-}
-
-.rail-status-dot.tree.ready,
-.rail-status-dot.index.success {
-  background: #46d38d;
-}
-
-.rail-status-dot.tree.missing,
-.rail-status-dot.index.warning {
-  background: #f2b84b;
-}
-
-.rail-status-dot.index.danger {
-  background: #ef7676;
 }
 
 .rail-doc-progress {
@@ -1049,46 +1038,62 @@ function triggerDeleteRoot(root, event = null) {
   gap: 12px;
 }
 
-.doc-meta {
+.doc-name-wrap {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 8px;
+  min-width: 0;
+}
+
+.doc-status-dot {
   flex-shrink: 0;
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--text-muted);
+}
+
+.doc-status-dot.ready {
+  background: #3db570;
+  box-shadow: 0 0 0 3px rgba(61, 181, 112, 0.16);
+}
+
+.doc-status-dot.failed {
+  background: #e06464;
+  box-shadow: 0 0 0 3px rgba(198, 73, 73, 0.16);
+}
+
+.doc-status-dot.processing {
+  background: #f0b54a;
+  animation: doc-status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes doc-status-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(240, 181, 74, 0.45);
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(240, 181, 74, 0);
+    opacity: 0.55;
+  }
 }
 
 .doc-name {
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .doc-time {
   color: var(--text-muted);
   font-size: 12px;
   white-space: nowrap;
-}
-
-.doc-badge {
-  align-self: flex-start;
-  padding: 3px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.doc-badge.success {
-  color: #91f2bf;
-  background: rgba(61, 181, 112, 0.16);
-}
-
-.doc-badge.warning {
-  color: #ffd089;
-  background: rgba(214, 151, 44, 0.18);
-}
-
-.doc-badge.danger {
-  color: #ff9f9f;
-  background: rgba(198, 73, 73, 0.18);
 }
 
 .doc-progress {
@@ -1104,28 +1109,6 @@ function triggerDeleteRoot(root, event = null) {
   border-radius: inherit;
   background: linear-gradient(90deg, #ffd089, #8ae8ff);
   transition: width 180ms ease;
-}
-
-.tree-badge {
-  padding: 3px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--line-soft);
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.04);
-}
-
-.tree-badge.ready {
-  color: #91f2bf;
-  border-color: rgba(61, 181, 112, 0.26);
-  background: rgba(61, 181, 112, 0.12);
-}
-
-.tree-badge.missing {
-  color: #ffd089;
-  border-color: rgba(214, 151, 44, 0.22);
-  background: rgba(214, 151, 44, 0.12);
 }
 
 .recent-area {

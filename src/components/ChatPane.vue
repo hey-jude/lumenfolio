@@ -1416,8 +1416,10 @@ function evidenceSourceLabel(source) {
   padding: 18px 18px 14px;
   border-bottom: 1px solid var(--line-soft);
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .chat-title {

@@ -3339,7 +3339,7 @@ onMounted(() => {
       :active-page="activePage"
       :active-block-id="activeBlockId"
       :active-highlight="activeHighlight"
-      :note-highlights="selectedDocument.notes || []"
+      :note-highlights="rightPaneTab === 'notes' ? (selectedDocument.notes || []) : []"
       :hovered-linked-block="hoveredLinkedBlock"
       :active-translation="activeTranslation"
       :page-translation="selectedDocument.translation.pages?.[activePage] || null"
