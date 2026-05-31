@@ -126,6 +126,30 @@ const mentionedDocIds = ref([])
 const mentionPickerOpen = ref(false)
 const mentionFilter = ref('')
 const mentionActiveIndex = ref(0)
+// Per-document composer drafts so switching tabs preserves an unsent message
+// (textarea text + chosen @-mentions). The textarea stays UNCONTROLLED (no
+// v-model) to keep IME intact; we save/restore its value imperatively on doc
+// switch. In-memory only — drafts are not persisted across app restart.
+const composerDrafts = new Map()
+
+function captureDraft(docId) {
+  if (!docId) return
+  const text = composerTextareaRef.value?.value || ''
+  if (text.trim() || mentionedDocIds.value.length) {
+    composerDrafts.set(docId, { text, mentionedDocIds: [...mentionedDocIds.value] })
+  } else {
+    composerDrafts.delete(docId)
+  }
+}
+
+function restoreDraft(docId) {
+  const draft = composerDrafts.get(docId) || { text: '', mentionedDocIds: [] }
+  mentionedDocIds.value = [...draft.mentionedDocIds]
+  closeMentionPicker()
+  nextTick(() => {
+    if (composerTextareaRef.value) composerTextareaRef.value.value = draft.text
+  })
+}
 
 function docDisplayName(doc) {
   return doc?.shortTitle || doc?.title || ''
@@ -218,6 +242,7 @@ function handleSubmit(event) {
   clearPendingImage()
   clearMentions()
   closeMentionPicker()
+  composerDrafts.delete(props.document.id)
   autoFollowMessages.value = true
   scrollMessagesToBottom({ force: true })
 }
@@ -421,7 +446,10 @@ watch(() => visibleMessages.value.map((message) => [
   scrollMessagesToBottom({ force: !userScrolledMessages.value, settle: !userScrolledMessages.value })
 }, { flush: 'post' })
 
-watch(() => props.document.id, () => {
+watch(() => props.document.id, (newId, oldId) => {
+  // Save the draft of the doc we're leaving, restore the one we're entering.
+  if (oldId) captureDraft(oldId)
+  restoreDraft(newId)
   autoFollowMessages.value = true
   userScrolledMessages.value = false
   showJumpToLatest.value = false
@@ -1019,6 +1047,16 @@ function resolveCitation(message, evidence) {
   return (message.citations || []).find((citation) => citation.id === evidence.citationId) || null
 }
 
+// When a citation belongs to an @-referenced document (not the one being read),
+// return that document's short name so the evidence chip can badge its origin.
+function citationCrossDocName(message, evidence) {
+  const citation = resolveCitation(message, evidence)
+  const docId = citation?.documentId
+  if (!docId || docId === props.document.id) return ''
+  const doc = (props.allDocuments || []).find((item) => item.id === docId)
+  return doc ? docDisplayName(doc) : ''
+}
+
 function evidenceSourceLabel(source) {
   const labels = {
     selection: props.ui.selectedText,
@@ -1267,6 +1305,11 @@ function evidenceSourceLabel(source) {
                   @click="resolveCitation(message, evidence) && emit('citation-click', resolveCitation(message, evidence))"
                 >
                   <span>{{ evidence.label }}</span>
+                  <span
+                    v-if="citationCrossDocName(message, evidence)"
+                    class="evidence-doc-badge"
+                    :title="citationCrossDocName(message, evidence)"
+                  >@{{ citationCrossDocName(message, evidence) }}</span>
                   <span>{{ locale === 'zh' ? `${ui.page}${evidence.page}` : `p${evidence.page}` }}</span>
                   <span>{{ evidence.sectionTitle || evidenceSourceLabel(evidence.source) }}</span>
                 </button>
@@ -1914,6 +1957,18 @@ function evidenceSourceLabel(source) {
 .evidence-more {
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.evidence-doc-badge {
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent, #6aa6ff);
+  background: rgba(120, 170, 255, 0.14);
+  border-radius: 6px;
+  padding: 0 5px;
+  font-size: 10px;
 }
 
 .agent-process {
