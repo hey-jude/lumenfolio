@@ -1062,6 +1062,10 @@ async function handleSend(payload, selection = null) {
   const selectedQuote = selection || (payloadObject?.ignoreSelection ? null : lastSelection.value)
   const maxRetrievalSteps = Number(payloadObject?.maxRetrievalSteps || 20)
   const retrievalAttemptOffset = Number(payloadObject?.retrievalAttemptOffset || 0)
+  // "@-referenced" papers selected in the composer; never includes the active doc.
+  const referenceDocumentIds = Array.isArray(payloadObject?.mentionedDocIds)
+    ? payloadObject.mentionedDocIds.filter((id) => id && id !== doc.id)
+    : []
   if ((!doc.chatReady && !selectedQuote) || !chatModelConfigured.value) return
   const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
   if (!messageText.trim() && !imageDataUrl) return
@@ -1099,6 +1103,7 @@ async function handleSend(payload, selection = null) {
     },
     citations: [],
     imageDataUrl: imageDataUrl || null,
+    mentionedDocumentIds: referenceDocumentIds,
   })
   doc.messages.push({
     id: assistantMessageId,
@@ -1146,6 +1151,7 @@ async function handleSend(payload, selection = null) {
           sensitivity: 'normal',
           source: 'pdf-viewer',
         },
+        referenceDocumentIds,
         maxRetrievalSteps,
         retrievalAttemptOffset,
         activityEventId,
@@ -3524,6 +3530,7 @@ onMounted(() => {
     <ChatPane
       v-show="rightPaneTab !== 'notes'"
       :document="selectedDocument"
+      :all-documents="allDocs"
       :collapsed="rightCollapsed"
       :width="rightWidth"
       :active-citation-id="activeCitationId"

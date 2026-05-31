@@ -384,6 +384,7 @@ enum RagToolName {
     SearchTableFacts,
     InspectVisuals,
     OpenVisual,
+    RecallChatHistory,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -427,6 +428,7 @@ impl RagToolName {
             Self::SearchTableFacts => "search_table_facts",
             Self::InspectVisuals => "inspect_visuals",
             Self::OpenVisual => "open_visual",
+            Self::RecallChatHistory => "recall_chat_history",
         }
     }
 }
@@ -435,31 +437,33 @@ pub fn rag_tool_specs_for_capabilities(vision_enabled: bool) -> Vec<RagToolSpec>
     let mut specs = vec![
         RagToolSpec {
             name: "inspect_tree",
-            description: "Find likely document structure nodes by semantic section query. Returns tree node ids and titles, not text evidence.",
+            description: "Find likely document structure nodes by semantic section query. Returns tree node ids and titles, not text evidence. Optionally pass documentId to inspect a referenced document.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 20 }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20 },
+                    "documentId": { "type": "string", "description": "Optional referenced document id to inspect instead of the primary document" }
                 },
                 "required": ["query"]
             }),
         },
         RagToolSpec {
             name: "open_section",
-            description: "Open text blocks from known structure tree nodes, or first inspect matching nodes from a query when node ids are absent.",
+            description: "Open text blocks from known structure tree nodes, or first inspect matching nodes from a query when node ids are absent. Optionally pass documentId to open from a referenced document (use that document's own tree node ids).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "treeNodeIds": { "type": "array", "items": { "type": "string" } },
                     "query": { "type": "string" },
-                    "perSectionLimit": { "type": "integer", "minimum": 1, "maximum": 20 }
+                    "perSectionLimit": { "type": "integer", "minimum": 1, "maximum": 20 },
+                    "documentId": { "type": "string", "description": "Optional referenced document id to open from instead of the primary document" }
                 }
             }),
         },
         RagToolSpec {
             name: "read_tree_node_lines",
-            description: "Read line-level evidence from known structure tree nodes. Prefer this after inspect_tree when detailed text inside a method, algorithm, or result section is needed.",
+            description: "Read line-level evidence from known structure tree nodes. Prefer this after inspect_tree when detailed text inside a method, algorithm, or result section is needed. Optionally pass documentId to read from a referenced document (use that document's own tree node ids).",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -468,31 +472,35 @@ pub fn rag_tool_specs_for_capabilities(vision_enabled: bool) -> Vec<RagToolSpec>
                     "nodeIds": { "type": "array", "items": { "type": "string" } },
                     "nodeId": { "type": "string" },
                     "query": { "type": "string" },
-                    "lineLimit": { "type": "integer", "minimum": 1, "maximum": 30 }
+                    "lineLimit": { "type": "integer", "minimum": 1, "maximum": 30 },
+                    "documentId": { "type": "string", "description": "Optional referenced document id to read from instead of the primary document" }
                 }
             }),
         },
         RagToolSpec {
             name: "search_chunks",
-            description: "Search chunk text with local SQLite FTS. Use for definitions, figures, references, and broad fallback evidence.",
+            description: "Search chunk text locally. mode=keyword (default) uses FTS with ranking; mode=literal does an exact case-insensitive substring match (use for precise tokens like F1-score, θ, Eq.(3), identifiers). Optionally pass documentId to search a referenced document.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 20 }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20 },
+                    "mode": { "type": "string", "enum": ["keyword", "literal"], "description": "keyword=FTS ranked (default); literal=exact substring" },
+                    "documentId": { "type": "string", "description": "Optional referenced document id to search instead of the primary document" }
                 },
                 "required": ["query"]
             }),
         },
         RagToolSpec {
             name: "open_pages",
-            description: "Open page-level evidence. Supports overview, header, or full page modes. Full mode returns line-ordered page chunks and is the fallback when table/visual structure extraction is incomplete.",
+            description: "Open page-level evidence. Supports overview, header, or full page modes. Full mode returns line-ordered page chunks and is the fallback when table/visual structure extraction is incomplete. Optionally pass documentId to open a page from a referenced document.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "page": { "type": "integer", "minimum": 1 },
                     "mode": { "type": "string", "enum": ["overview", "header", "full"] },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": 80 }
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 80 },
+                    "documentId": { "type": "string", "description": "Optional referenced document id to open a page from instead of the primary document" }
                 },
                 "required": ["page"]
             }),
@@ -602,6 +610,18 @@ pub fn rag_tool_specs_for_capabilities(vision_enabled: bool) -> Vec<RagToolSpec>
                 }
             }),
         },
+        RagToolSpec {
+            name: "recall_chat_history",
+            description: "Recall PRIOR conversation turns in this document's chat. The last few turns are ALREADY in context — use this ONLY to find OLDER discussion or to locate a specific past topic by keyword. Omit query to get the most recent turns. mode=keyword (default) ranks by term overlap; mode=literal does exact substring match.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "mode": { "type": "string", "enum": ["keyword", "literal"], "description": "keyword=term-overlap ranked (default); literal=exact substring" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 8 }
+                }
+            }),
+        },
     ];
     if vision_enabled {
         specs.push(RagToolSpec {
@@ -697,6 +717,23 @@ impl<'a> RagToolRegistry<'a> {
         search_chunks(self.conn, self.document_id, query, limit)
     }
 
+    fn search_chunks_literal(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<EvidenceCandidate>, String> {
+        search_chunks_literal(self.conn, self.document_id, query, limit)
+    }
+
+    fn recall_chat_history(
+        &self,
+        query: &str,
+        literal: bool,
+        limit: u32,
+    ) -> Result<Vec<EvidenceCandidate>, String> {
+        recall_chat_history(self.conn, self.document_id, query, literal, limit)
+    }
+
     fn open_pages(
         &self,
         page: u32,
@@ -789,6 +826,7 @@ fn execute_rag_tool_call(
     execute_rag_tool_call_for_capabilities(
         conn,
         document_id,
+        &[],
         tool,
         args,
         fallback_query,
@@ -799,12 +837,24 @@ fn execute_rag_tool_call(
 pub fn execute_rag_tool_call_for_capabilities(
     conn: &Connection,
     document_id: &str,
+    reference_document_ids: &[&str],
     tool: &str,
     args: &serde_json::Value,
     fallback_query: &str,
     capabilities: RagToolCapabilities,
 ) -> RagToolExecutionOutput {
-    let registry = RagToolRegistry::new(conn, document_id, capabilities.max_quote_chars);
+    // Multi-document routing: a tool call may name a `documentId` to search one of
+    // the user's "@-referenced" documents instead of the primary one. Honor it only
+    // when it is the primary doc or appears in the whitelist (guards against the
+    // model hallucinating an arbitrary id); otherwise fall back to the primary doc.
+    let target_document_id = args
+        .get("documentId")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .filter(|id| *id == document_id || reference_document_ids.contains(id))
+        .unwrap_or(document_id);
+    let registry = RagToolRegistry::new(conn, target_document_id, capabilities.max_quote_chars);
     let normalized_tool = match normalize_rag_tool_name(tool, capabilities) {
         Some(tool) => tool,
         None => {
@@ -839,6 +889,7 @@ pub fn execute_rag_tool_call_for_capabilities(
         "open_visual" => execute_open_visual_tool(&registry, args, fallback_query),
         "analyze_visual" => execute_analyze_visual_tool(&registry, args, fallback_query),
         "analyze_page" => execute_analyze_page_tool(&registry, args, fallback_query),
+        "recall_chat_history" => execute_recall_chat_history_tool(&registry, args),
         _ => execute_search_chunks_tool(&registry, args, fallback_query),
     };
 
@@ -982,7 +1033,18 @@ fn execute_search_chunks_tool(
         .filter(|query| *query != "broad_context")
         .unwrap_or(fallback_query);
     let limit = u32_arg(args, "limit", 6, 1, 20);
-    let candidates = registry.search_chunks(query, limit)?;
+    // mode: "keyword" (FTS, ranked, default) | "literal" (exact substring).
+    let literal = args
+        .get("mode")
+        .and_then(|value| value.as_str())
+        .map(|mode| mode.trim().eq_ignore_ascii_case("literal"))
+        .unwrap_or(false);
+    let mode = if literal { "literal" } else { "keyword" };
+    let candidates = if literal {
+        registry.search_chunks_literal(query, limit)?
+    } else {
+        registry.search_chunks(query, limit)?
+    };
     let citations = candidates_to_citations(&candidates, registry.max_quote_chars);
     let trace_candidates = trace_candidates_from_candidates(&candidates);
     Ok(RagToolExecutionOutput {
@@ -991,7 +1053,35 @@ fn execute_search_chunks_tool(
         tree_nodes: Vec::new(),
         tool_call: tool_success_call(
             RagToolName::SearchChunks,
-            serde_json::json!({ "query": query, "limit": limit }),
+            serde_json::json!({ "query": query, "limit": limit, "mode": mode }),
+            candidates.len(),
+        ),
+    })
+}
+
+fn execute_recall_chat_history_tool(
+    registry: &RagToolRegistry<'_>,
+    args: &serde_json::Value,
+) -> Result<RagToolExecutionOutput, String> {
+    // Optional query: omit to fetch the most recent turns.
+    let query = string_arg(args, "query").unwrap_or("");
+    let limit = u32_arg(args, "limit", 5, 1, 8);
+    let literal = args
+        .get("mode")
+        .and_then(|value| value.as_str())
+        .map(|mode| mode.trim().eq_ignore_ascii_case("literal"))
+        .unwrap_or(false);
+    let mode = if literal { "literal" } else { "keyword" };
+    let candidates = registry.recall_chat_history(query, literal, limit)?;
+    let citations = candidates_to_citations(&candidates, registry.max_quote_chars);
+    let trace_candidates = trace_candidates_from_candidates(&candidates);
+    Ok(RagToolExecutionOutput {
+        citations,
+        trace_candidates,
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::RecallChatHistory,
+            serde_json::json!({ "query": query, "limit": limit, "mode": mode }),
             candidates.len(),
         ),
     })
@@ -1542,6 +1632,220 @@ pub fn search_chunks(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("Failed to read chunk search results: {err}"))?;
     Ok(rows)
+}
+
+/// Exact-substring ("literal") chunk search. Complements `search_chunks` (FTS):
+/// FTS tokenizes and ranks, which splits precise tokens like `F1-score`, `θ`,
+/// `Eq.(3)`, or `snake_case`; this matches the raw query as a case-insensitive
+/// substring so those survive. No ranking — ordered by page then chunk id.
+pub fn search_chunks_literal(
+    conn: &Connection,
+    document_id: &str,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<EvidenceCandidate>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let limit = limit.clamp(1, 20);
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.id, c.document_id, c.page_no, c.block_ids_json, c.text, c.bbox_refs_json
+             FROM document_chunks c
+             WHERE c.document_id = ?1
+               AND instr(lower(c.text), lower(?2)) > 0
+             ORDER BY c.page_no, c.id
+             LIMIT ?3",
+        )
+        .map_err(|err| format!("Failed to prepare literal chunk search: {err}"))?;
+
+    let rows = stmt
+        .query_map(params![document_id, query, limit], |row| {
+            let block_ids_json: String = row.get(3)?;
+            let bbox_refs_json: String = row.get(5)?;
+            let block_ids: Vec<String> =
+                serde_json::from_str(&block_ids_json).unwrap_or_else(|_| Vec::new());
+            let bbox_list: serde_json::Value =
+                serde_json::from_str(&bbox_refs_json).unwrap_or_else(|_| serde_json::json!([]));
+            Ok(EvidenceCandidate {
+                chunk_id: row.get(0)?,
+                document_id: row.get(1)?,
+                page: row.get(2)?,
+                block_id: block_ids.first().cloned().unwrap_or_default(),
+                section_title: None,
+                quote: row.get(4)?,
+                bbox_list,
+                score: 0.0,
+                source: "literal".to_string(),
+                tree_node_id: None,
+                block_role: None,
+            })
+        })
+        .map_err(|err| format!("Failed to run literal chunk search: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to read literal chunk search results: {err}"))?;
+    Ok(rows)
+}
+
+/// Recall PRIOR conversation turns for a document from the persisted `chat_turns`
+/// table. The agent's in-context memory only carries the last few turns (compacted);
+/// this lets it reach OLDER turns or locate a past topic by keyword. Reads the full
+/// persisted history (also survives app restart, unlike the in-memory session).
+///
+/// Modes: empty `query` → most recent `limit` turns; `literal` → exact case-insensitive
+/// substring; otherwise → keyword term-overlap ranking. Per-doc chat history is small,
+/// so we over-fetch a recent window and filter/rank in Rust (no FTS table needed).
+pub fn recall_chat_history(
+    conn: &Connection,
+    document_id: &str,
+    query: &str,
+    literal: bool,
+    limit: u32,
+) -> Result<Vec<EvidenceCandidate>, String> {
+    let query = query.trim();
+    let limit = limit.clamp(1, 8) as usize;
+    let window = (limit.saturating_mul(6)).clamp(limit, 200) as i64;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, user_message, assistant_answer
+             FROM chat_turns
+             WHERE document_id = ?1
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT ?2",
+        )
+        .map_err(|err| format!("Failed to prepare chat history recall: {err}"))?;
+    // Newest-first window.
+    let rows = stmt
+        .query_map(params![document_id, window], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|err| format!("Failed to recall chat history: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to read chat history rows: {err}"))?;
+
+    let selected: Vec<(String, String, String)> = if query.is_empty() {
+        rows.into_iter().take(limit).collect()
+    } else if literal {
+        let needle = query.to_lowercase();
+        rows.into_iter()
+            .filter(|(_, q, a)| {
+                q.to_lowercase().contains(&needle) || a.to_lowercase().contains(&needle)
+            })
+            .take(limit)
+            .collect()
+    } else {
+        let terms = query_terms(query);
+        // Rank by how many query terms appear in the Q+A text. Stable sort keeps the
+        // newest-first order among equal scores (input is already newest-first).
+        let mut ranked: Vec<(usize, (String, String, String))> = rows
+            .into_iter()
+            .map(|(id, q, a)| {
+                let haystack = format!("{q} {a}").to_lowercase();
+                let score = terms
+                    .iter()
+                    .filter(|term| haystack.contains(term.as_str()))
+                    .count();
+                (score, (id, q, a))
+            })
+            .filter(|(score, _)| *score > 0)
+            .collect();
+        ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        ranked.into_iter().take(limit).map(|(_, row)| row).collect()
+    };
+
+    let candidates = selected
+        .into_iter()
+        .map(|(turn_id, user_message, assistant_answer)| EvidenceCandidate {
+            chunk_id: turn_id.clone(),
+            document_id: document_id.to_string(),
+            page: 0,
+            block_id: turn_id,
+            section_title: Some("Chat history".to_string()),
+            quote: format!(
+                "Q: {}\nA: {}",
+                truncate_chars(user_message.trim(), 200),
+                truncate_chars(assistant_answer.trim(), 320)
+            ),
+            bbox_list: serde_json::json!([]),
+            score: 0.0,
+            source: "chat_history".to_string(),
+            tree_node_id: None,
+            block_role: None,
+        })
+        .collect();
+    Ok(candidates)
+}
+
+/// A compact descriptor of a document for injecting into the planner prompt so the
+/// agent knows which "@-referenced" documents exist and what they cover. Kept small
+/// (title + a truncated top-level outline) to bound prompt token cost.
+pub struct DocumentBrief {
+    pub document_id: String,
+    pub title: String,
+    pub outline: Vec<String>,
+}
+
+impl DocumentBrief {
+    /// Render as a single prompt line, e.g.
+    /// `- [doc123] "Attention Is All You Need" — outline: Intro; Model; Results`
+    pub fn to_prompt_line(&self) -> String {
+        if self.outline.is_empty() {
+            format!("- [{}] \"{}\"", self.document_id, self.title)
+        } else {
+            format!(
+                "- [{}] \"{}\" — outline: {}",
+                self.document_id,
+                self.title,
+                self.outline.join("; ")
+            )
+        }
+    }
+}
+
+/// Build a brief (title + up to `max_outline` top-level section titles) for a single
+/// document. Cheap: one row from `documents` plus a capped read of `structure_tree_nodes`.
+/// Returns Ok with an empty-outline brief if the tree is not yet built.
+pub fn document_brief(
+    conn: &Connection,
+    document_id: &str,
+    max_outline: usize,
+) -> Result<DocumentBrief, String> {
+    let title: String = conn
+        .query_row(
+            "SELECT COALESCE(NULLIF(short_title, ''), title) FROM documents WHERE id = ?1",
+            params![document_id],
+            |row| row.get(0),
+        )
+        .map_err(|err| format!("Failed to load document title: {err}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT title FROM structure_tree_nodes
+             WHERE document_id = ?1 AND level = 1
+             ORDER BY order_index
+             LIMIT ?2",
+        )
+        .map_err(|err| format!("Failed to prepare document outline: {err}"))?;
+    let outline = stmt
+        .query_map(params![document_id, max_outline as i64], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|err| format!("Failed to read document outline: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to collect document outline: {err}"))?;
+
+    Ok(DocumentBrief {
+        document_id: document_id.to_string(),
+        title,
+        outline,
+    })
 }
 
 pub fn rebuild_structure_tree(
@@ -6471,7 +6775,8 @@ mod tests {
                 "resolve_table_anchor",
                 "resolve_visual_anchor",
                 "search_chunks",
-                "search_table_facts"
+                "search_table_facts",
+                "recall_chat_history"
             ])
         );
         let vision_names = rag_tool_specs_for_capabilities(true)
@@ -7484,5 +7789,213 @@ mod tests {
             )
             .expect("line insert");
         }
+    }
+
+    fn setup_cross_doc_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                short_title TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE structure_tree_nodes (
+                id TEXT NOT NULL,
+                document_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                keywords_json TEXT NOT NULL,
+                level INTEGER NOT NULL,
+                page_start INTEGER NOT NULL,
+                page_end INTEGER NOT NULL,
+                block_start_index INTEGER NOT NULL,
+                block_end_index INTEGER NOT NULL,
+                order_index INTEGER NOT NULL
+            );
+            CREATE TABLE document_chunks (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                page_no INTEGER NOT NULL,
+                block_ids_json TEXT NOT NULL,
+                text TEXT NOT NULL,
+                bbox_refs_json TEXT NOT NULL
+            );",
+        )
+        .expect("cross-doc schema");
+        conn
+    }
+
+    fn insert_cross_doc_chunk(conn: &Connection, document_id: &str, chunk_id: &str, text: &str) {
+        conn.execute(
+            "INSERT INTO document_chunks
+                (id, document_id, page_no, block_ids_json, text, bbox_refs_json)
+             VALUES (?1, ?2, 1, '[]', ?3, '[]')",
+            params![chunk_id, document_id, text],
+        )
+        .expect("insert chunk");
+    }
+
+    fn cross_doc_caps() -> RagToolCapabilities {
+        RagToolCapabilities {
+            vision_enabled: false,
+            max_quote_chars: 400,
+        }
+    }
+
+    #[test]
+    fn search_chunks_literal_matches_exact_token() {
+        let conn = setup_cross_doc_conn();
+        // FTS tokenization can split tokens like "F1-score"; the literal substring
+        // path must still match the raw string regardless of case.
+        insert_cross_doc_chunk(
+            &conn,
+            "doc-1",
+            "chunk-1",
+            "We report an F1-score of 0.91 on the dev set.",
+        );
+        let hits = search_chunks_literal(&conn, "doc-1", "f1-score", 5).expect("literal search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source, "literal");
+    }
+
+    #[test]
+    fn search_chunks_literal_handles_empty_query() {
+        let conn = setup_cross_doc_conn();
+        let hits = search_chunks_literal(&conn, "doc-1", "   ", 5).expect("literal search");
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn dispatch_routes_to_whitelisted_reference_document() {
+        let conn = setup_cross_doc_conn();
+        insert_cross_doc_chunk(&conn, "primary", "p1", "primary doc mentions apples");
+        insert_cross_doc_chunk(&conn, "ref-1", "r1", "reference doc mentions apples too");
+        let args = serde_json::json!({ "query": "apples", "mode": "literal", "documentId": "ref-1" });
+        let out = execute_rag_tool_call_for_capabilities(
+            &conn,
+            "primary",
+            &["ref-1"],
+            "search_chunks",
+            &args,
+            "apples",
+            cross_doc_caps(),
+        );
+        assert!(!out.citations.is_empty());
+        assert!(out.citations.iter().all(|c| c.document_id == "ref-1"));
+    }
+
+    #[test]
+    fn dispatch_ignores_non_whitelisted_document_id() {
+        let conn = setup_cross_doc_conn();
+        insert_cross_doc_chunk(&conn, "primary", "p1", "primary doc mentions apples");
+        insert_cross_doc_chunk(&conn, "evil", "e1", "evil doc mentions apples");
+        // "evil" is not in the whitelist -> dispatch must fall back to the primary doc.
+        let args = serde_json::json!({ "query": "apples", "mode": "literal", "documentId": "evil" });
+        let out = execute_rag_tool_call_for_capabilities(
+            &conn,
+            "primary",
+            &[],
+            "search_chunks",
+            &args,
+            "apples",
+            cross_doc_caps(),
+        );
+        assert!(out.citations.iter().all(|c| c.document_id == "primary"));
+    }
+
+    #[test]
+    fn document_brief_returns_title_and_outline() {
+        let conn = setup_cross_doc_conn();
+        conn.execute(
+            "INSERT INTO documents (id, title, short_title) VALUES ('doc-1', 'Long Title', 'Short')",
+            [],
+        )
+        .expect("insert document");
+        conn.execute(
+            "INSERT INTO structure_tree_nodes
+                (id, document_id, title, keywords_json, level, page_start, page_end,
+                 block_start_index, block_end_index, order_index)
+             VALUES ('n1', 'doc-1', 'Introduction', '[]', 1, 1, 1, 0, 0, 1)",
+            [],
+        )
+        .expect("insert node");
+        let brief = document_brief(&conn, "doc-1", 12).expect("brief");
+        assert_eq!(brief.document_id, "doc-1");
+        assert_eq!(brief.title, "Short");
+        assert_eq!(brief.outline, vec!["Introduction".to_string()]);
+    }
+
+    fn setup_chat_history_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE chat_turns (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                user_message TEXT NOT NULL,
+                assistant_answer TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                rowid_helper INTEGER
+            );",
+        )
+        .expect("chat_turns schema");
+        conn
+    }
+
+    fn insert_chat_turn(
+        conn: &Connection,
+        id: &str,
+        document_id: &str,
+        user_message: &str,
+        assistant_answer: &str,
+        created_at: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO chat_turns (id, document_id, user_message, assistant_answer, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, document_id, user_message, assistant_answer, created_at],
+        )
+        .expect("insert chat turn");
+    }
+
+    #[test]
+    fn recall_chat_history_returns_recent_turns_when_query_empty() {
+        let conn = setup_chat_history_conn();
+        insert_chat_turn(&conn, "t1", "doc", "first question", "first answer", 1);
+        insert_chat_turn(&conn, "t2", "doc", "second question", "second answer", 2);
+        let hits = recall_chat_history(&conn, "doc", "", false, 5).expect("recall");
+        assert_eq!(hits.len(), 2);
+        // Newest-first.
+        assert_eq!(hits[0].block_id, "t2");
+        assert_eq!(hits[0].source, "chat_history");
+        assert!(hits[0].quote.contains("second question"));
+    }
+
+    #[test]
+    fn recall_chat_history_keyword_ranks_by_term_overlap() {
+        let conn = setup_chat_history_conn();
+        insert_chat_turn(&conn, "t1", "doc", "we discussed pruning", "the pruning method", 1);
+        insert_chat_turn(&conn, "t2", "doc", "unrelated weather chat", "sunny today", 2);
+        let hits = recall_chat_history(&conn, "doc", "pruning method", false, 5).expect("recall");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].block_id, "t1");
+    }
+
+    #[test]
+    fn recall_chat_history_literal_matches_exact_substring() {
+        let conn = setup_chat_history_conn();
+        insert_chat_turn(&conn, "t1", "doc", "what is the F1-score", "the F1-score is 0.9", 1);
+        insert_chat_turn(&conn, "t2", "doc", "general question", "general answer", 2);
+        let hits = recall_chat_history(&conn, "doc", "f1-score", true, 5).expect("recall");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].block_id, "t1");
+    }
+
+    #[test]
+    fn recall_chat_history_scopes_to_document() {
+        let conn = setup_chat_history_conn();
+        insert_chat_turn(&conn, "t1", "doc-a", "apples in a", "answer a", 1);
+        insert_chat_turn(&conn, "t2", "doc-b", "apples in b", "answer b", 2);
+        let hits = recall_chat_history(&conn, "doc-a", "apples", false, 5).expect("recall");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].document_id, "doc-a");
     }
 }

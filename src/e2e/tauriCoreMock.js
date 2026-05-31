@@ -14,5 +14,9 @@ export async function invoke(command) {
   if (command === 'read_pdf_artifact_bytes') return base64ToBytes(PDF_BASE64)
   if (command === 'request_pdf_translation_pages') return { jobId: 'e2e', requestedPages: [] }
   if (command === 'update_document_reading_state') return null
+  // ask_document_stream returns nothing and drives the UI via emitted events; in
+  // e2e there is no Rust backend to emit them, so a no-op resolve is sufficient
+  // to keep the composer flow (including @-mention payloads) from throwing.
+  if (command === 'ask_document_stream') return null
   throw new Error(`Unhandled e2e Tauri invoke: ${command}`)
 }

@@ -2,11 +2,16 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import { startWindowDrag } from '../windowDrag'
+import { testAttrs } from '../testAttrs'
 
 const props = defineProps({
   document: {
     type: Object,
     required: true,
+  },
+  allDocuments: {
+    type: Array,
+    default: () => [],
   },
   collapsed: {
     type: Boolean,
@@ -111,6 +116,87 @@ const pendingSelectionPreview = computed(() => {
   return text.length > 260 ? `${text.slice(0, 260)}...` : text
 })
 
+// --- @-mention of other indexed papers ---------------------------------------
+// Reference state is kept OUT of the textarea (no contenteditable): the `@` key
+// only opens a picker; chosen papers live in this Set and render as removable
+// chips. This keeps IME and the native form.reset() flow untouched.
+const MENTION_MIME = 'application/x-lumenfolio-doc-id'
+const MAX_REFERENCE_DOCS = 4
+const mentionedDocIds = ref([])
+const mentionPickerOpen = ref(false)
+const mentionFilter = ref('')
+const mentionActiveIndex = ref(0)
+
+function docDisplayName(doc) {
+  return doc?.shortTitle || doc?.title || ''
+}
+
+// Candidates: other documents that are indexed/chat-ready, minus the current doc
+// and ones already mentioned, filtered by the live picker query.
+const mentionCandidates = computed(() => {
+  const filter = mentionFilter.value.trim().toLowerCase()
+  return (props.allDocuments || [])
+    .filter((doc) => doc && doc.id && doc.id !== props.document.id)
+    .filter((doc) => doc.chatReady)
+    .filter((doc) => !mentionedDocIds.value.includes(doc.id))
+    .filter((doc) => !filter || docDisplayName(doc).toLowerCase().includes(filter))
+    .slice(0, 8)
+})
+
+const mentionedDocs = computed(() => mentionedDocIds.value
+  .map((id) => (props.allDocuments || []).find((doc) => doc.id === id))
+  .filter(Boolean))
+
+const mentionLimitReached = computed(() => mentionedDocIds.value.length >= MAX_REFERENCE_DOCS)
+
+function addMention(id) {
+  if (!id || id === props.document.id) return
+  if (mentionedDocIds.value.includes(id)) return
+  if (mentionLimitReached.value) return
+  mentionedDocIds.value = [...mentionedDocIds.value, id]
+  closeMentionPicker()
+}
+
+function removeMention(id) {
+  mentionedDocIds.value = mentionedDocIds.value.filter((value) => value !== id)
+}
+
+function clearMentions() {
+  mentionedDocIds.value = []
+}
+
+function openMentionPicker() {
+  if (!chatInputEnabled.value || mentionLimitReached.value) return
+  mentionFilter.value = ''
+  mentionActiveIndex.value = 0
+  mentionPickerOpen.value = true
+}
+
+function closeMentionPicker() {
+  mentionPickerOpen.value = false
+  mentionFilter.value = ''
+  mentionActiveIndex.value = 0
+}
+
+function handleMentionPickerKeydown(event) {
+  if (!mentionPickerOpen.value) return
+  const count = mentionCandidates.value.length
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeMentionPicker()
+  } else if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    if (count) mentionActiveIndex.value = (mentionActiveIndex.value + 1) % count
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    if (count) mentionActiveIndex.value = (mentionActiveIndex.value - 1 + count) % count
+  } else if (event.key === 'Enter') {
+    event.preventDefault()
+    const doc = mentionCandidates.value[mentionActiveIndex.value]
+    if (doc) addMention(doc.id)
+  }
+}
+
 function modelOptionLabel(model) {
   // Show only the model name. The provider prefix (e.g. "DS · DeepSeek · ")
   // overflowed the trigger and was redundant — model names already imply
@@ -126,9 +212,12 @@ function handleSubmit(event) {
     text: text || props.ui.imageOnlyPrompt,
     imageDataUrl: pendingImageDataUrl.value || '',
     imageName: pendingImageName.value || '',
+    mentionedDocIds: [...mentionedDocIds.value],
   })
   event.target.reset()
   clearPendingImage()
+  clearMentions()
+  closeMentionPicker()
   autoFollowMessages.value = true
   scrollMessagesToBottom({ force: true })
 }
@@ -141,6 +230,15 @@ function focusComposer() {
 }
 
 function handleComposerKeydown(event) {
+  if (mentionPickerOpen.value && ['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(event.key)) {
+    handleMentionPickerKeydown(event)
+    return
+  }
+  if (event.key === '@' && !event.isComposing) {
+    // Let the "@" land in the textarea as a normal character, then open the picker.
+    openMentionPicker()
+    return
+  }
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
   event.preventDefault()
   event.currentTarget?.form?.requestSubmit()
@@ -183,6 +281,13 @@ function handleComposerPaste(event) {
 }
 
 function handleComposerDrop(event) {
+  // A document dragged from the sidebar carries our custom MIME — add it as a
+  // reference. This is checked before the image path so the two don't conflict.
+  const droppedDocId = event.dataTransfer?.getData(MENTION_MIME)
+  if (droppedDocId) {
+    if (chatInputEnabled.value) addMention(droppedDocId)
+    return
+  }
   if (!chatInputEnabled.value || !supportsVision.value) return
   const file = Array.from(event.dataTransfer?.files || [])
     .find((item) => item.type.startsWith('image/'))
@@ -1305,6 +1410,49 @@ function evidenceSourceLabel(source) {
             <div class="pending-image-name">{{ pendingImageName || ui.attach }}</div>
             <button type="button" class="pending-image-remove" @click="clearPendingImage">×</button>
           </div>
+        </div>
+
+        <div v-if="mentionedDocs.length" class="mention-chips" v-bind="testAttrs('chat-mention-chips')">
+          <span
+            v-for="doc in mentionedDocs"
+            :key="doc.id"
+            class="mention-chip"
+            v-bind="testAttrs('chat-mention-chip')"
+          >
+            <span class="mention-chip-at">@</span>
+            <span class="mention-chip-name">{{ docDisplayName(doc) }}</span>
+            <button
+              type="button"
+              class="mention-chip-remove"
+              :title="ui.mentionPaperRemove"
+              :aria-label="ui.mentionPaperRemove"
+              @click="removeMention(doc.id)"
+            >×</button>
+          </span>
+        </div>
+
+        <div v-if="mentionPickerOpen" class="mention-picker" v-bind="testAttrs('chat-mention-picker')">
+          <input
+            v-model="mentionFilter"
+            class="mention-picker-search"
+            type="text"
+            :placeholder="ui.mentionPaperPlaceholder"
+            @keydown="handleMentionPickerKeydown"
+          />
+          <ul v-if="mentionCandidates.length" class="mention-picker-list">
+            <li
+              v-for="(doc, index) in mentionCandidates"
+              :key="doc.id"
+              class="mention-picker-item"
+              :class="{ active: index === mentionActiveIndex }"
+              v-bind="testAttrs('chat-mention-option')"
+              @mousedown.prevent="addMention(doc.id)"
+              @mouseenter="mentionActiveIndex = index"
+            >
+              {{ docDisplayName(doc) }}
+            </li>
+          </ul>
+          <div v-else class="mention-picker-empty">{{ ui.mentionPaperNotFound }}</div>
         </div>
 
         <textarea
@@ -2489,6 +2637,97 @@ button.agent-process-head:disabled {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-secondary);
   cursor: pointer;
+}
+
+.mention-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 8px;
+  border-radius: 999px;
+  background: rgba(120, 170, 255, 0.14);
+  border: 1px solid rgba(120, 170, 255, 0.32);
+  color: var(--text-primary);
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.mention-chip-at {
+  color: var(--accent, #6aa6ff);
+  font-weight: 600;
+}
+
+.mention-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+.mention-chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.mention-picker {
+  margin-bottom: 8px;
+  border-radius: 14px;
+  border: 1px solid var(--line-soft);
+  background: var(--surface-raised, rgba(20, 24, 32, 0.96));
+  overflow: hidden;
+}
+
+.mention-picker-search {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--text-primary);
+  padding: 10px 12px;
+  outline: none;
+  font-size: 13px;
+}
+
+.mention-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.mention-picker-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-picker-item.active {
+  background: rgba(120, 170, 255, 0.16);
+}
+
+.mention-picker-empty {
+  padding: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
 }
 
 .chat-composer textarea {

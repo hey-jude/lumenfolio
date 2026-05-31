@@ -6,6 +6,9 @@ import { spawn } from 'node:child_process'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const appRoot = resolve(__dirname, '..')
 const repoRoot = resolve(appRoot, '..')
+const appSourceDir = join(appRoot, 'external', 'PDFMathTranslate', 'pdf2zh', 'kernel', 'PDFMathTranslate-next.git')
+const parentSourceDir = join(repoRoot, 'external', 'PDFMathTranslate', 'pdf2zh', 'kernel', 'PDFMathTranslate-next.git')
+const sourceDir = existsSync(appSourceDir) ? appSourceDir : parentSourceDir
 const smokeRoot = process.env.LUMENFOLIO_PDF2ZH_SMOKE_DIR || '/tmp/lumenfolio-pdf2zh-worker-smoke'
 const venvPython = process.platform === 'win32'
   ? join(appRoot, '.venv-pdf2zh', 'Scripts', 'python.exe')
@@ -18,12 +21,7 @@ const probeTimeoutMs = Number(process.env.LUMENFOLIO_PDF2ZH_SMOKE_PROBE_TIMEOUT_
 const quickErrorTimeoutMs = Number(process.env.LUMENFOLIO_PDF2ZH_SMOKE_ERROR_TIMEOUT_MS || 120_000)
 const killTimeoutMs = Number(process.env.LUMENFOLIO_PDF2ZH_SMOKE_KILL_TIMEOUT_MS || 120_000)
 const samplePdf = join(
-  repoRoot,
-  'external',
-  'PDFMathTranslate',
-  'pdf2zh',
-  'kernel',
-  'PDFMathTranslate-next.git',
+  sourceDir,
   'test',
   'file',
   'translate.cli.plain.text.pdf',

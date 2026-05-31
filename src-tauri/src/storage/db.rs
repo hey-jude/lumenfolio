@@ -452,6 +452,7 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           citations_json TEXT NOT NULL DEFAULT '[]',
           claims_json TEXT NOT NULL DEFAULT '[]',
           retrieval_trace_json TEXT NOT NULL DEFAULT '{}',
+          referenced_document_ids_json TEXT NOT NULL DEFAULT '[]',
           index_version INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
@@ -520,6 +521,12 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         "chat_turns",
         "index_version",
         "ALTER TABLE chat_turns ADD COLUMN index_version INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "chat_turns",
+        "referenced_document_ids_json",
+        "ALTER TABLE chat_turns ADD COLUMN referenced_document_ids_json TEXT NOT NULL DEFAULT '[]'",
     )?;
     ensure_column(
         conn,

@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const appRoot = resolve(__dirname, '..')
 const repoRoot = resolve(appRoot, '..')
-const sourceDir = join(repoRoot, 'external', 'PDFMathTranslate', 'pdf2zh', 'kernel', 'PDFMathTranslate-next.git')
+const appSourceDir = join(appRoot, 'external', 'PDFMathTranslate', 'pdf2zh', 'kernel', 'PDFMathTranslate-next.git')
+const parentSourceDir = join(repoRoot, 'external', 'PDFMathTranslate', 'pdf2zh', 'kernel', 'PDFMathTranslate-next.git')
+const sourceDir = existsSync(appSourceDir) ? appSourceDir : parentSourceDir
 const defaultOutputDir = join(appRoot, 'resources', 'pdf2zh-sidecar', 'python')
 const args = new Set(process.argv.slice(2))
 const dryRun = args.has('--dry-run')

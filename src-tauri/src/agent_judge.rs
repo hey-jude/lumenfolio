@@ -26,6 +26,8 @@ pub(crate) struct LlmJudgeLoopInput<'a> {
     pub(crate) app: Option<&'a tauri::AppHandle>,
     pub(crate) question: &'a str,
     pub(crate) document_id: &'a str,
+    /// "@-referenced" documents the agent may also search (documentId routing whitelist).
+    pub(crate) reference_document_ids: &'a [&'a str],
     pub(crate) provider: &'a OpenAiCompatibleProvider,
     pub(crate) activity_event_id: Option<&'a str>,
 }
@@ -71,6 +73,34 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
             })
             .to_string(),
         );
+    }
+    // Surface the user's "@-referenced" documents so the judge knows they exist and
+    // can route a tool call to one via the optional `documentId` argument — but only
+    // when the question genuinely needs cross-document evidence (rule in the prompt).
+    if !ctx.reference_document_ids.is_empty() {
+        let briefs = {
+            let conn = ctx
+                .database
+                .conn
+                .lock()
+                .map_err(|_| "SQLite lock was poisoned".to_string())?;
+            ctx.reference_document_ids
+                .iter()
+                .filter_map(|id| runtime::rag::document_brief(&conn, id, 12).ok())
+                .map(|brief| brief.to_prompt_line())
+                .collect::<Vec<_>>()
+        };
+        if !briefs.is_empty() {
+            tool_feedback.push(
+                serde_json::json!({
+                    "observation": format!(
+                        "Referenced documents the user attached (search one by passing its id as `documentId`, only if the question needs cross-document evidence):\n{}",
+                        briefs.join("\n")
+                    )
+                })
+                .to_string(),
+            );
+        }
     }
 
     while remaining_llm_judge_rounds > 0 {
@@ -413,6 +443,7 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
             Ok(runtime::rag::execute_rag_tool_call_for_capabilities(
                 &conn,
                 ctx.document_id,
+                ctx.reference_document_ids,
                 &call.tool,
                 &call.args,
                 fallback_query,
@@ -473,6 +504,7 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                     runtime::rag::execute_rag_tool_call_for_capabilities(
                         &conn,
                         ctx.document_id,
+                        ctx.reference_document_ids,
                         "read_tree_node_lines",
                         &line_args,
                         fallback_query,
@@ -519,6 +551,7 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                     runtime::rag::execute_rag_tool_call_for_capabilities(
                         &conn,
                         ctx.document_id,
+                        ctx.reference_document_ids,
                         "open_section",
                         &open_args,
                         fallback_query,
@@ -1297,6 +1330,8 @@ fn maybe_open_table_page_fallback(
         runtime::rag::execute_rag_tool_call_for_capabilities(
             &conn,
             ctx.document_id,
+            // v0: table→page fallback stays single-document (cross-doc tables are Phase 3).
+            &[],
             "open_pages",
             &page_args,
             fallback_query,
