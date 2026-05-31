@@ -1,10 +1,9 @@
-<p align="center">
+<div align="center">
   <img src="./src/assets/lumenfolio-logo-transparent.png" alt="Lumenfolio logo" width="96">
-</p>
-
-# Lumenfolio
-
-[English README](./README.md)
+  <h1>Lumenfolio</h1>
+  <p><strong>本地优先的桌面 PDF AI 阅读工作区</strong></p>
+  <p><a href="./README.md">English README</a></p>
+</div>
 
 Lumenfolio 是一个本地优先的桌面 PDF AI 阅读工作区，面向论文精读、证据可追溯问答、版面级翻译和原文锚定笔记。
 

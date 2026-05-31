@@ -1,10 +1,9 @@
-<p align="center">
+<div align="center">
   <img src="./src/assets/lumenfolio-logo-transparent.png" alt="Lumenfolio logo" width="96">
-</p>
-
-# Lumenfolio
-
-[中文文档 (Chinese README)](./README.zh-CN.md)
+  <h1>Lumenfolio</h1>
+  <p><strong>Local-first desktop AI reading workspace for academic PDFs.</strong></p>
+  <p><a href="./README.zh-CN.md">中文文档 (Chinese README)</a></p>
+</div>
 
 Lumenfolio is a local-first desktop AI reading workspace for academic PDFs. It combines a focused PDF reader, vectorless agentic RAG, layout-aware translation, and evidence-anchored notes into one reading environment.
 
