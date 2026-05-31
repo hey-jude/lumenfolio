@@ -6,6 +6,8 @@ Lumenfolio 是一个本地优先的桌面 PDF AI 阅读工作区，面向论文�
 
 它不是简单的“PDF + 聊天框”。Lumenfolio 的核心是围绕本地 PDF 证据构建阅读工作流：页面、文本块、chunk、结构树、表格、视觉区域、citation 和 bbox 坐标都可以回到原始 PDF。
 
+![Lumenfolio 演示](./docs/assets/lumenfolio-demo.gif)
+
 ## 为什么做 Lumenfolio
 
 很多 PDF AI 工具更偏向快速问答。Lumenfolio 更关注深度阅读：追踪论文论点、核对证据、翻译困难段落、记录读书笔记，并且让每一次回答和每一条笔记都能回到原文位置。

@@ -379,8 +379,10 @@ watch(() => props.linkedBlocks, () => {
   }
 })
 
-watch(scale, async () => {
+watch(scale, async (newScale, oldScale) => {
   if (!pdfDocument.value) return
+  // eslint-disable-next-line no-console
+  console.log(`[pdf-perf] scale changed ${oldScale} -> ${newScale} (re-renders visible pages)`)
   await resetPageViewportsForScale()
   await nextTick()
   goToPage(currentPage.value, {
@@ -392,6 +394,8 @@ watch(scale, async () => {
 })
 
 onMounted(() => {
+  // eslint-disable-next-line no-console
+  console.log(`[pdf-perf] PdfViewer MOUNTED pdfPath=${props.pdfPath || '(source)'}`)
   window.addEventListener('pointerdown', handleGlobalPointerDown, true)
   document.addEventListener('pointerdown', handleGlobalPointerDown, true)
   window.addEventListener('keydown', handleGlobalKeyDown)
@@ -419,6 +423,8 @@ onBeforeUnmount(() => {
 })
 
 async function loadPdf() {
+  // eslint-disable-next-line no-console
+  console.log(`[pdf-perf] loadPdf ENTER pdfPath=${props.pdfPath || '(source)'}`)
   loadRun += 1
   renderRun += 1
   const run = loadRun
@@ -542,7 +548,26 @@ function resetRenderedState() {
   renderedPageKeys.value = new Set()
 }
 
+// TEMP perf helpers — accumulate synchronous (lfPerf) and awaited (bumpPerf)
+// time into window.__lfPerf so the translate probe in App.vue can dump the
+// hottest functions after a click. Remove once the jank is diagnosed.
+function lfPerf(label, fn) {
+  const start = performance.now()
+  try {
+    return fn()
+  } finally {
+    bumpPerf(label, performance.now() - start)
+  }
+}
+function bumpPerf(label, ms) {
+  const store = (window.__lfPerf ||= {})
+  const entry = (store[label] ||= { ms: 0, n: 0 })
+  entry.ms += ms
+  entry.n += 1
+}
+
 async function renderPage(pageNumber) {
+  bumpPerf('renderPage#calls', 0)
   const pdf = pdfDocument.value
   const pageEl = getPageElement(pageNumber)
   if (!pdf || !pageEl) return
@@ -585,38 +610,37 @@ async function renderPage(pageNumber) {
       transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0],
     })
     renderTasks.set(clampedPage, { token: renderToken, task: renderTask })
+    const __cr0 = performance.now()
     await renderTask.promise
+    bumpPerf('canvasRender(await)', performance.now() - __cr0)
     if (renderTasks.get(clampedPage)?.token === renderToken) {
       renderTasks.delete(clampedPage)
     }
 
     if (run !== renderRun) return
+    const __tc0 = performance.now()
     const textContent = await page.getTextContent()
-    const _r0 = performance.now() // TEMP perf
-    const textItems = buildTextItems(textContent, viewport)
+    bumpPerf('getTextContent(await)', performance.now() - __tc0)
+    const textItems = lfPerf('buildTextItems', () => buildTextItems(textContent, viewport))
     // Selection/column detection use CHARACTER-level glyphs: pdf.js item widths
     // are coarse/inflated, so splitting each item's string evenly across its
     // width yields per-char rects whose positions faithfully reflect where text
     // actually sits (the column gutter has no chars). The assist page index
     // keeps the coarse items.
-    const charGlyphs = splitItemsIntoCharGlyphs(textItems)
-    mergePageTextItems(clampedPage, charGlyphs)
-    mergePageColumns(clampedPage, charGlyphs, viewport)
-    mergeAssistPageIndex(buildPageIndex(clampedPage, viewport, textItems))
-    const _r1 = performance.now() // TEMP perf
-    const textLayer = new pdfjsLib.TextLayer({
+    const charGlyphs = lfPerf('splitGlyphs', () => splitItemsIntoCharGlyphs(textItems))
+    lfPerf('mergeText', () => mergePageTextItems(clampedPage, charGlyphs))
+    lfPerf('mergeColumns', () => mergePageColumns(clampedPage, charGlyphs, viewport))
+    lfPerf('assistIndex', () => mergeAssistPageIndex(buildPageIndex(clampedPage, viewport, textItems)))
+    const textLayer = lfPerf('newTextLayer', () => new pdfjsLib.TextLayer({
       textContentSource: textContent,
       container: textLayerEl,
       viewport,
-    })
+    }))
     textLayerTasks.set(clampedPage, textLayer)
+    const __tl0 = performance.now()
     await textLayer.render()
+    bumpPerf('textLayerRender(await)', performance.now() - __tl0)
     textLayerTasks.delete(clampedPage)
-    // TEMP perf: flag pages whose main-thread glyph/text work is heavy
-    if (_r1 - _r0 > 30 || performance.now() - _r1 > 30) {
-      // eslint-disable-next-line no-console
-      console.log(`[pdf-perf] page ${clampedPage} items=${textItems.length} glyphs=${Math.round(_r1 - _r0)}ms textLayer=${Math.round(performance.now() - _r1)}ms`)
-    }
 
     const rendered = new Set(renderedPageKeys.value)
     rendered.add(renderKey)
@@ -638,6 +662,8 @@ async function renderPage(pageNumber) {
 function renderVisiblePages() {
   if (!pdfScroll.value || !pdfDocument.value || loading.value || error.value) return
   const { start, end } = visiblePageRange(RENDER_BUFFER_PX, 2)
+  // eslint-disable-next-line no-console
+  console.log(`[pdf-perf] renderVisiblePages pages ${start}..${end} (scale=${scale.value})`)
   for (let pageNo = start; pageNo <= end; pageNo += 1) {
     renderPage(pageNo)
   }

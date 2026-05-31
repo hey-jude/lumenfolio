@@ -6,6 +6,8 @@ Lumenfolio is a local-first desktop AI reading workspace for academic PDFs. It c
 
 It is not just "chat over a PDF". Lumenfolio is built around local document evidence: pages, blocks, chunks, structure, tables, visual regions, citations, and bounding boxes that can point back to the original PDF.
 
+![Lumenfolio demo](./docs/assets/lumenfolio-demo.gif)
+
 ## Why Lumenfolio
 
 Most PDF AI tools optimize for quick answers. Lumenfolio is designed for deep reading: following claims, checking citations, translating difficult sections, and keeping notes tied to the exact place where an idea appears.

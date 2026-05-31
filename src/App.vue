@@ -112,6 +112,16 @@ const activeNoteId = ref('')
 // Note composer state for create/edit.
 const noteComposer = ref({ open: false, mode: 'create', quoteText: '', content: '', noteId: '', selection: null })
 const noteComposerSaving = ref(false)
+const noteDeleteConfirmOpen = ref(false)
+const noteDeleteStatus = ref('idle')
+const noteDeleteError = ref('')
+const noteDeleteTarget = ref({
+  id: '',
+  documentId: '',
+  page: 0,
+  quoteText: '',
+  content: '',
+})
 const chatFocusRequest = ref(0)
 const viewerReloadKey = ref(0)
 const selectedChatModelId = ref(UNCONFIGURED_CHAT_MODEL_ID)
@@ -355,6 +365,7 @@ watch(selectedDocument, (doc) => {
   inlineTranslateOpen.value = false
   activeNoteId.value = ''
   noteComposer.value = { ...noteComposer.value, open: false }
+  closeNoteDeleteConfirm()
   applySelectedChatModel(doc.chatModelId, doc)
   loadNotesForDocument(doc.id)
   scheduleIdleTask(() => scheduleDocumentVisualIndex(doc), 1800)
@@ -1418,6 +1429,42 @@ function closeNoteComposer() {
   noteComposer.value = { ...noteComposer.value, open: false }
 }
 
+function openNoteDeleteConfirm(note) {
+  if (!note?.id) return
+  noteDeleteTarget.value = {
+    id: note.id,
+    documentId: note.documentId || selectedDocument.value?.id || '',
+    page: Number(note.page || 0),
+    quoteText: String(note.quoteText || ''),
+    content: String(note.content || ''),
+  }
+  noteDeleteStatus.value = 'idle'
+  noteDeleteError.value = ''
+  noteDeleteConfirmOpen.value = true
+}
+
+function closeNoteDeleteConfirm({ force = false } = {}) {
+  if (!force && noteDeleteStatus.value === 'deleting') return
+  noteDeleteConfirmOpen.value = false
+  noteDeleteStatus.value = 'idle'
+  noteDeleteError.value = ''
+  noteDeleteTarget.value = {
+    id: '',
+    documentId: '',
+    page: 0,
+    quoteText: '',
+    content: '',
+  }
+}
+
+const noteDeleteTargetPreview = computed(() => {
+  const target = noteDeleteTarget.value
+  const source = String(target.quoteText || target.content || '').replace(/\s+/g, ' ').trim()
+  if (source) return source.length > 180 ? `${source.slice(0, 180)}...` : source
+  if (!target.page) return ''
+  return locale.value === 'zh' ? `第${target.page}${ui.value.page}` : `${ui.value.page} ${target.page}`
+})
+
 async function submitNoteComposer(content) {
   if (noteComposerSaving.value) return
   const composer = noteComposer.value
@@ -1454,19 +1501,26 @@ async function submitNoteComposer(content) {
   }
 }
 
-async function deleteNote(note) {
-  const doc = selectedDocument.value
-  if (!doc || !note?.id) return
-  if (!window.confirm(ui.value.noteDeleteConfirm)) return
+async function confirmDeleteNote() {
+  if (noteDeleteStatus.value === 'deleting') return
+  const target = noteDeleteTarget.value
+  if (!target.id) return
+  const doc = allDocs.value.find((item) => item.id === target.documentId) || selectedDocument.value
+  if (!doc || doc.id === 'empty') return
+  noteDeleteStatus.value = 'deleting'
+  noteDeleteError.value = ''
   try {
-    await invoke('delete_note', { input: { id: note.id } })
-    doc.notes = (doc.notes || []).filter((item) => item.id !== note.id)
-    if (activeNoteId.value === note.id) {
+    await invoke('delete_note', { input: { id: target.id } })
+    doc.notes = (doc.notes || []).filter((item) => item.id !== target.id)
+    if (activeNoteId.value === target.id) {
       activeNoteId.value = ''
       activeHighlight.value = null
     }
+    closeNoteDeleteConfirm({ force: true })
   } catch (err) {
     console.warn('Failed to delete note', err)
+    noteDeleteStatus.value = 'failed'
+    noteDeleteError.value = String(err?.message || err || '')
   }
 }
 
@@ -1879,6 +1933,7 @@ function formatPdfTranslationError(message) {
 // click reveals where the jank is (Vue DOM patch vs. browser layout/paint).
 // Remove once the translate-open jank is diagnosed.
 function probeTranslateFrames(label, t0) {
+  window.__lfPerf = {}
   const syncMs = performance.now() - t0
   let last = performance.now()
   const frames = []
@@ -1888,14 +1943,35 @@ function probeTranslateFrames(label, t0) {
     frames.push(Math.round(now - last))
     last = now
     count += 1
-    if (count < 8) {
+    if (count < 16) {
       requestAnimationFrame(tick)
     } else {
+      const perf = window.__lfPerf || {}
+      const hot = Object.entries(perf)
+        .map(([k, v]) => [k, v, Math.round(v.ms)])
+        .sort((a, b) => b[2] - a[2])
+        .map(([k, v, ms]) => `${k}:${ms}ms/${v.n}`)
+        .join('  ')
       // eslint-disable-next-line no-console
-      console.log(`[translate-perf] ${label} sync=${syncMs.toFixed(1)}ms frames(ms)=[${frames.join(', ')}]`)
+      console.log(`[translate-perf] ${label} sync=${syncMs.toFixed(1)}ms frames(ms)=[${frames.join(', ')}] hot=[${hot}]`)
+      window.__lfPerf = {}
     }
   }
   requestAnimationFrame(tick)
+}
+
+// TEMP perf helper: accumulate per-label synchronous time into window.__lfPerf
+// so probeTranslateFrames can dump the hottest functions after a translate click.
+function lfPerf(label, fn) {
+  const start = performance.now()
+  try {
+    return fn()
+  } finally {
+    const store = (window.__lfPerf ||= {})
+    const entry = (store[label] ||= { ms: 0, n: 0 })
+    entry.ms += performance.now() - start
+    entry.n += 1
+  }
 }
 
 async function handleTranslationAction(viewerContext = {}) {
@@ -3208,6 +3284,22 @@ onBeforeUnmount(() => {
 })
 
 onMounted(() => {
+  // TEMP: report any main-thread long task (>200ms). If pdf.js used a real
+  // worker, font work would NOT appear here — so a long task during translate
+  // means the heavy work is on the main thread. Remove after diagnosis.
+  try {
+    const lto = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.duration < 200) continue
+        const attr = (entry.attribution && entry.attribution[0]) || {}
+        // eslint-disable-next-line no-console
+        console.log(`[longtask] ${Math.round(entry.duration)}ms container=${attr.containerType || '?'}/${attr.containerName || ''} src=${attr.containerSrc || ''}`)
+      }
+    })
+    lto.observe({ type: 'longtask', buffered: true })
+  } catch (err) {
+    // longtask API unavailable — ignore
+  }
   markStartup('app-mounted')
   afterFirstPaint(() => {
     markStartup('app-first-frame')
@@ -3436,7 +3528,7 @@ onMounted(() => {
       @set-tab="setRightPaneTab"
       @note-focus="focusNote"
       @note-edit="openNoteEditComposer"
-      @note-delete="deleteNote"
+      @note-delete="openNoteDeleteConfirm"
     />
 
     <NoteComposer
@@ -3449,6 +3541,48 @@ onMounted(() => {
       @save="submitNoteComposer"
       @cancel="closeNoteComposer"
     />
+
+    <div v-if="noteDeleteConfirmOpen" class="confirm-backdrop" @click.self="closeNoteDeleteConfirm">
+      <section class="confirm-modal" role="dialog" aria-modal="true" :aria-label="ui.noteDeleteTitle">
+        <div class="confirm-head">
+          <div class="confirm-title">{{ ui.noteDeleteTitle }}</div>
+          <button
+            class="confirm-close"
+            type="button"
+            :aria-label="ui.close"
+            :disabled="noteDeleteStatus === 'deleting'"
+            @click="closeNoteDeleteConfirm"
+          >
+            ×
+          </button>
+        </div>
+        <div class="confirm-body">
+          <p>{{ ui.noteDeleteConfirm }}</p>
+          <div v-if="noteDeleteTargetPreview" class="confirm-target">{{ noteDeleteTargetPreview }}</div>
+          <div v-if="noteDeleteStatus === 'failed'" class="confirm-error">
+            {{ ui.noteDeleteFailed }}: {{ noteDeleteError }}
+          </div>
+        </div>
+        <div class="confirm-actions">
+          <button
+            type="button"
+            class="confirm-btn"
+            :disabled="noteDeleteStatus === 'deleting'"
+            @click="closeNoteDeleteConfirm"
+          >
+            {{ ui.cancel }}
+          </button>
+          <button
+            type="button"
+            class="confirm-btn danger"
+            :disabled="noteDeleteStatus === 'deleting'"
+            @click="confirmDeleteNote"
+          >
+            {{ noteDeleteStatus === 'deleting' ? `${ui.delete}...` : ui.delete }}
+          </button>
+        </div>
+      </section>
+    </div>
 
     <div v-if="clearChatConfirmOpen" class="confirm-backdrop" @click.self="closeClearChatHistoryConfirm">
       <section class="confirm-modal" role="dialog" aria-modal="true" :aria-label="ui.clearChatHistory">

@@ -1481,8 +1481,12 @@ fn delete_note(input: DeleteNoteInput, database: State<'_, AppDatabase>) -> Resu
         .conn
         .lock()
         .map_err(|_| "SQLite lock was poisoned".to_string())?;
-    conn.execute("DELETE FROM notes WHERE id = ?1", params![note_id])
+    let affected = conn
+        .execute("DELETE FROM notes WHERE id = ?1", params![note_id])
         .map_err(|err| format!("Failed to delete note: {err}"))?;
+    if affected == 0 {
+        return Err("Note not found".to_string());
+    }
     Ok(())
 }
 

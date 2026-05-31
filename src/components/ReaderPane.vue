@@ -857,7 +857,11 @@ function isTranslationPageLoaded(translation) {
   return ['succeeded', 'partial', 'failed'].includes(translation?.status)
 }
 
-onMounted(scheduleTranslationObserverRefresh)
+onMounted(() => {
+  // eslint-disable-next-line no-console
+  console.log(`[pdf-perf] ReaderPane MOUNTED doc=${props.document?.id}`)
+  scheduleTranslationObserverRefresh()
+})
 
 onBeforeUnmount(() => {
   if (translationPageObserver) translationPageObserver.disconnect()
@@ -1092,6 +1096,7 @@ watch(translationArtifactActivePage, async () => {
             </div>
             <PdfViewer
               ref="pdfViewerRef"
+              :key="`source-pdf:${document.id}`"
               class="real-pdf-viewer"
               :class="{ 'compare-pdf-viewer': viewMode === 'dual' && canOpenTranslationView }"
               :document="document"
