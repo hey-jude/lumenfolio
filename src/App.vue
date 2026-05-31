@@ -1935,6 +1935,18 @@ function formatPdfTranslationError(message) {
 function probeTranslateFrames(label, t0) {
   window.__lfPerf = {}
   const syncMs = performance.now() - t0
+  // Split the cost: Vue DOM patch (domPatch) vs. browser layout/paint
+  // (patchToPaint). A big patchToPaint means the jank is rendering (e.g. the
+  // PDF canvas reflowing to half width), not JavaScript.
+  const tCall = performance.now()
+  nextTick(() => {
+    const domPatch = performance.now() - tCall
+    requestAnimationFrame(() => {
+      const patchToPaint = performance.now() - tCall - domPatch
+      // eslint-disable-next-line no-console
+      console.log(`[translate-perf] ${label} domPatch=${Math.round(domPatch)}ms patchToPaint=${Math.round(patchToPaint)}ms`)
+    })
+  })
   let last = performance.now()
   const frames = []
   let count = 0
@@ -2024,6 +2036,7 @@ async function handleTranslationAction(viewerContext = {}) {
 
   try {
     const usePdfSidecar = canTryPdfSidecar
+    const __i0 = performance.now()
     const result = usePdfSidecar
       ? await invoke('start_pdf_translation', {
         input: {
@@ -2049,7 +2062,13 @@ async function handleTranslationAction(viewerContext = {}) {
           forceRefresh: false,
         },
       })
+    // TEMP perf: invoke duration + serialized result size
+    try {
+      // eslint-disable-next-line no-console
+      console.log(`[translate-perf] ${usePdfSidecar ? 'start_pdf' : 'start_doc'} invoke=${Math.round(performance.now() - __i0)}ms resultBytes=${JSON.stringify(result).length}`)
+    } catch (e) { /* ignore */ }
     if (selectedDocId.value !== doc.id) return
+    const __a0 = performance.now()
     if (usePdfSidecar) {
       if (!isPdfTranslationJobRelevant(doc, result)) return
       applyPdfTranslationJobResult(doc, result)
@@ -2057,6 +2076,8 @@ async function handleTranslationAction(viewerContext = {}) {
       if (!isTranslationJobRelevant(doc, result)) return
       applyTranslationJobResult(doc, result)
     }
+    // eslint-disable-next-line no-console
+    console.log(`[translate-perf] applyResult=${Math.round(performance.now() - __a0)}ms`)
     if (canOpenTranslatedView(doc) && ['translated', 'dual'].includes(viewMode.value)) {
       scheduleActivePageTranslationLoad(0)
     }
@@ -2298,6 +2319,7 @@ async function loadPageTranslation(pageNo, options = {}) {
   if (translationPageLoadsInFlight.has(loadKey)) return
   translationPageLoadsInFlight.add(loadKey)
   try {
+    const __g0 = performance.now()
     const result = await invoke('get_page_translation', {
       input: {
         documentId: doc.id,
@@ -2307,16 +2329,24 @@ async function loadPageTranslation(pageNo, options = {}) {
         providerKey: doc.translation.providerKey || '',
       },
     })
+    // TEMP perf
+    try {
+      // eslint-disable-next-line no-console
+      console.log(`[translate-perf] get_page_translation(p${pageNo}) invoke=${Math.round(performance.now() - __g0)}ms resultBytes=${JSON.stringify(result).length}`)
+    } catch (e) { /* ignore */ }
     if (selectedDocId.value !== doc.id) return
     if (options.expectedDocumentId && selectedDocId.value !== options.expectedDocumentId) return
     if (options.expectedJobId && doc.translation.jobId !== options.expectedJobId) return
     if (requireActivePage && Number(activePage.value) !== pageNo) return
+    const __w0 = performance.now()
     doc.translation.pages = {
       ...(doc.translation.pages || {}),
       [pageNo]: {
         ...result,
       },
     }
+    // eslint-disable-next-line no-console
+    console.log(`[translate-perf] writePage(p${pageNo})=${Math.round(performance.now() - __w0)}ms`)
   } catch (err) {
     doc.translation.error = err?.message || String(err)
   } finally {

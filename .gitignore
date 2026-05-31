@@ -47,6 +47,8 @@ docs/*
 !docs/assets/
 docs/assets/*
 !docs/assets/lumenfolio-demo.gif
+!docs/assets/lumenfolio-translation-split.png
+!docs/assets/lumenfolio-rag-chat.png
 sotarium-api/src/sotarium_api.egg-info
 scripts/.embedding-venv
 

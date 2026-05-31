@@ -180,7 +180,12 @@ pub(crate) fn probe_pdf_translation_runtime(
     }
 }
 
-#[tauri::command]
+// `(async)` forces Tauri to run this command on a worker thread instead of the
+// main (UI) thread. The body is synchronous and briefly blocks on a sidecar
+// "preflight" round-trip (~seconds); running it on the main thread froze the UI
+// on every translate click. The actual translation already runs on a spawned
+// thread inside the impl, so only the preflight needed to get off the main thread.
+#[tauri::command(async)]
 pub(crate) fn start_pdf_translation(
     input: StartPdfTranslationInput,
     app: AppHandle,

@@ -8,6 +8,16 @@ It is not just "chat over a PDF". Lumenfolio is built around local document evid
 
 ![Lumenfolio demo](./docs/assets/lumenfolio-demo.gif)
 
+## Screenshots
+
+**Side-by-side PDF translation**
+
+![Lumenfolio side-by-side PDF translation](./docs/assets/lumenfolio-translation-split.png)
+
+**Agentic RAG with evidence trace**
+
+![Lumenfolio agentic RAG chat with evidence trace](./docs/assets/lumenfolio-rag-chat.png)
+
 ## Why Lumenfolio
 
 Most PDF AI tools optimize for quick answers. Lumenfolio is designed for deep reading: following claims, checking citations, translating difficult sections, and keeping notes tied to the exact place where an idea appears.
