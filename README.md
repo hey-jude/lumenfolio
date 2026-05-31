@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./src/assets/lumenfolio-logo-transparent.png" alt="Lumenfolio logo" width="96">
+</p>
+
 # Lumenfolio
 
 [中文文档 (Chinese README)](./README.zh-CN.md)
@@ -29,6 +33,18 @@ The core product principles are:
 - **Vectorless agentic RAG**: retrieval does not require embeddings or a vector database.
 - **Layout-aware translation**: PDF translation is handled as a document-layout problem, not just plain text translation.
 - **Anchored notes**: highlights and comments are attached to PDF coordinates and quotes, so they can jump back to the source.
+
+## Vision
+
+Lumenfolio aims to become a Cursor-like AI workspace for academic papers: a local-first environment where readers can translate, question, annotate, compare, and eventually analyze papers with an agent that understands document structure and stays grounded in verifiable evidence.
+
+The long-term direction is not generic PDF chat. It is a paper analysis workspace with:
+
+- citation-grounded reasoning over local PDFs
+- structure-aware navigation across sections, figures, tables, and references
+- translation and note-taking as part of the same reading loop
+- multi-turn research memory for a paper or reading collection
+- agentic workflows for summarizing claims, comparing methods, extracting experiments, and checking evidence
 
 ## Vectorless Agentic RAG
 
@@ -101,6 +117,8 @@ The notes workflow is designed for paper reading:
 ## Architecture
 
 Lumenfolio is a Tauri 2 + Vue 3 desktop app.
+
+![Lumenfolio technical architecture](./src/assets/lumenfolio-technical-architecture.png)
 
 - Frontend: Vue 3 + Vite
 - Desktop runtime: Tauri 2

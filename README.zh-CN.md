@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./src/assets/lumenfolio-logo-transparent.png" alt="Lumenfolio logo" width="96">
+</p>
+
 # Lumenfolio
 
 [English README](./README.md)
@@ -29,6 +33,18 @@ Lumenfolio 是一个本地优先的桌面 PDF AI 阅读工作区，面向论文�
 - **无向量 Agentic RAG**：默认不依赖 embedding 模型和向量数据库。
 - **版面级翻译**：把 PDF 翻译当成文档版面任务，而不是普通纯文本翻译。
 - **原文锚定笔记**：高亮和评注绑定到 PDF 坐标和原文片段，可跳回来源。
+
+## 愿景
+
+Lumenfolio 的长期目标，是成为面向论文阅读与分析的 Cursor-like AI workspace：一个本地优先的研究工作区，让用户可以在同一个环境里翻译、提问、批注、对比，并最终让 agent 基于可验证证据分析论文。
+
+它的方向不是泛化的 PDF 聊天，而是面向论文的分析工具：
+
+- 基于本地 PDF citation 的证据推理
+- 理解章节、图表、表格和参考文献的结构化导航
+- 把翻译和笔记纳入同一个阅读循环
+- 面向单篇论文或文献集合的多轮研究记忆
+- 支持总结贡献、比较方法、抽取实验、核验证据等 agentic workflow
 
 ## 无向量 Agentic RAG
 
@@ -102,6 +118,8 @@ Lumenfolio 的笔记不是脱离原文的普通文本片段，而是绑定到 PD
 ## 架构
 
 Lumenfolio 是一个 Tauri 2 + Vue 3 桌面应用。
+
+![Lumenfolio 技术架构](./src/assets/lumenfolio-technical-architecture.png)
 
 - 前端：Vue 3 + Vite
 - 桌面运行时：Tauri 2

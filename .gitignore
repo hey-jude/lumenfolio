@@ -16,7 +16,14 @@ coverage
 CLAUDE.md
 /cypress/videos/
 /cypress/screenshots/
-
+articles/
+!articles/
+articles/*
+!articles/assets/
+articles/assets/*
+!articles/assets/evidence-grounded-pdf-reading.png
+!articles/assets/lumenfolio-technical-architecture.png
+!articles/zhihu-lumenfolio-vectorless-rag.md
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -49,9 +56,10 @@ docs/assets/*
 !docs/assets/lumenfolio-demo.gif
 !docs/assets/lumenfolio-translation-split.png
 !docs/assets/lumenfolio-rag-chat.png
+!docs/assets/lumenfolio-technical-architecture.png
 sotarium-api/src/sotarium_api.egg-info
 scripts/.embedding-venv
-
+articles/
 sotarium-api/.cache
 video/
 AGENTS.md
