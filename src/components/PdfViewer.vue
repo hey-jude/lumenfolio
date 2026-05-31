@@ -441,13 +441,18 @@ async function loadPdf() {
 
   loading.value = true
   try {
+    const _p0 = performance.now() // TEMP perf
     const bytes = props.pdfPath
       ? await invoke('read_pdf_artifact_bytes', { path: props.pdfPath })
       : await invoke('read_pdf_bytes', { docId: props.document.id })
     if (run !== loadRun) return
+    const _pInvoke = performance.now() // TEMP perf
     const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+    const _pArr = performance.now() // TEMP perf
     const task = pdfjsLib.getDocument({ data, ...pdfRuntimeOptions })
     const loadedPdf = await task.promise
+    // eslint-disable-next-line no-console
+    console.log(`[pdf-perf] load ${props.pdfPath ? 'artifact' : 'source'} invoke=${Math.round(_pInvoke - _p0)}ms toUint8=${Math.round(_pArr - _pInvoke)}ms getDoc=${Math.round(performance.now() - _pArr)}ms`)
     if (run !== loadRun) {
       loadedPdf.destroy?.()
       return
@@ -587,6 +592,7 @@ async function renderPage(pageNumber) {
 
     if (run !== renderRun) return
     const textContent = await page.getTextContent()
+    const _r0 = performance.now() // TEMP perf
     const textItems = buildTextItems(textContent, viewport)
     // Selection/column detection use CHARACTER-level glyphs: pdf.js item widths
     // are coarse/inflated, so splitting each item's string evenly across its
@@ -597,6 +603,7 @@ async function renderPage(pageNumber) {
     mergePageTextItems(clampedPage, charGlyphs)
     mergePageColumns(clampedPage, charGlyphs, viewport)
     mergeAssistPageIndex(buildPageIndex(clampedPage, viewport, textItems))
+    const _r1 = performance.now() // TEMP perf
     const textLayer = new pdfjsLib.TextLayer({
       textContentSource: textContent,
       container: textLayerEl,
@@ -605,6 +612,11 @@ async function renderPage(pageNumber) {
     textLayerTasks.set(clampedPage, textLayer)
     await textLayer.render()
     textLayerTasks.delete(clampedPage)
+    // TEMP perf: flag pages whose main-thread glyph/text work is heavy
+    if (_r1 - _r0 > 30 || performance.now() - _r1 > 30) {
+      // eslint-disable-next-line no-console
+      console.log(`[pdf-perf] page ${clampedPage} items=${textItems.length} glyphs=${Math.round(_r1 - _r0)}ms textLayer=${Math.round(performance.now() - _r1)}ms`)
+    }
 
     const rendered = new Set(renderedPageKeys.value)
     rendered.add(renderKey)

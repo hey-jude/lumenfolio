@@ -1,45 +1,133 @@
-# Lumenfolio 
+# Lumenfolio
 
 [中文文档 (Chinese README)](./README.zh-CN.md)
 
-Local-first desktop PDF AI reading workspace built with Tauri 2 + Vue 3.
+Lumenfolio is a local-first desktop AI reading workspace for academic PDFs. It combines a focused PDF reader, vectorless agentic RAG, layout-aware translation, and evidence-anchored notes into one reading environment.
 
-Lumenfolio is designed for focused paper reading and evidence-grounded Q&A on local PDFs. 
+It is not just "chat over a PDF". Lumenfolio is built around local document evidence: pages, blocks, chunks, structure, tables, visual regions, citations, and bounding boxes that can point back to the original PDF.
 
-## Highlights
+## Why Lumenfolio
 
-- Three-pane reading workflow:
-  - Left: workspace roots and PDF list
-  - Center: PDF reader, selection, translation controls
-  - Right: document chat, evidence chain, folded agent trace
-- Local indexing pipeline for PDF pages/blocks/chunks with SQLite
-- Current-document RAG (structure tree + FTS + page/block evidence)
-- Citation-aware answers with page/bbox jump support
-- Provider-based chat and translation (OpenAI-compatible + translation options)
+Most PDF AI tools optimize for quick answers. Lumenfolio is designed for deep reading: following claims, checking citations, translating difficult sections, and keeping notes tied to the exact place where an idea appears.
+
+The core product principles are:
+
+- **Local-first by default**: PDFs, indexes, chat history, notes, provider settings, and API keys stay on the user's machine.
+- **Evidence-grounded answers**: answers are expected to cite page-level and bbox-level evidence from the current PDF.
+- **Vectorless agentic RAG**: retrieval does not require embeddings or a vector database.
+- **Layout-aware translation**: PDF translation is handled as a document-layout problem, not just plain text translation.
+- **Anchored notes**: highlights and comments are attached to PDF coordinates and quotes, so they can jump back to the source.
+
+## Vectorless Agentic RAG
+
+Lumenfolio's RAG pipeline is vectorless by design. It does not require an embedding model, vector database, or external retrieval service.
+
+Instead, each PDF is indexed into a local, inspectable evidence layer:
+
+- PDF pages, text blocks, lines, and chunks
+- deterministic document structure tree
+- SQLite FTS5 text search
+- page and block bounding boxes
+- table and visual evidence
+- citation records with quote, page, and bbox metadata
+
+At question time, the document agent uses retrieval tools rather than a single opaque similarity lookup:
+
+```text
+Question
+-> inspect document structure
+-> open relevant sections
+-> search local FTS chunks
+-> open pages, neighbors, tables, and visual evidence
+-> run an answerability / finalize gate
+-> answer with citations and evidence trace
+```
+
+This makes retrieval cheap to run locally, independent from embedding model quality, and easier to audit. The goal is not to replace every vector-search use case; it is to optimize for single-document scholarly reading where structure, page context, and verifiable citations matter.
+
+## Translation
+
+Lumenfolio supports both quick selection translation and document-level PDF translation.
+
+For full-document translation, Lumenfolio orchestrates a bundled PDFMathTranslate sidecar. The goal is to preserve academic PDF layout as much as possible, including formulas, figures, tables, double-column structure, pagination, and bilingual output.
+
+Reader workflows include:
+
+- selected-text translation while reading
+- page/document translation jobs with progress and cancellation
+- translated PDF and bilingual PDF outputs
+- original / translated / side-by-side reading modes
+- linked original and translated blocks for easier comparison
+
+## Notes
+
+Notes are evidence-anchored, not detached text snippets.
+
+Each note stores the selected quote, page number, normalized PDF bounding boxes, optional user commentary, and local timestamps. This lets Lumenfolio render persistent highlights, list notes by document, and jump back to the exact source location.
+
+The notes workflow is designed for paper reading:
+
+- highlight a passage from the PDF
+- add an optional Markdown note
+- keep the note in local SQLite
+- click a note to return to the original page and highlight
+- keep notes alongside chat and translation, not in a separate app
+
+## Features
+
+- Three-pane reading workspace:
+  - left: workspace roots and recursive PDF list
+  - center: PDF reader, selection tools, translation controls
+  - right: document chat, evidence chain, agent trace, and notes
+- Local PDF indexing into SQLite
+- Single-document agentic Q&A with citations
+- Evidence chain and foldable agent trace in chat
+- Provider-based chat and translation configuration
+- Visual/table-aware retrieval path for richer PDF evidence
+- PDFMathTranslate-based sidecar for layout-aware translation
+
+## Architecture
+
+Lumenfolio is a Tauri 2 + Vue 3 desktop app.
+
+- Frontend: Vue 3 + Vite
+- Desktop runtime: Tauri 2
+- Backend: Rust
+- Storage: SQLite in the local app data directory
+- PDF rendering: `pdfjs-dist`
+- Translation sidecar: bundled PDFMathTranslate runtime
+
+Key paths:
+
+- `src/App.vue`: top-level app orchestration
+- `src/components/`: workspace, reader, chat, notes, and markdown UI
+- `src/components/pdf/selection/`: geometry-driven PDF text selection
+- `src/translationLinking.js`: original/translated block linking
+- `src-tauri/src/lib.rs`: Tauri command surface and runtime setup
+- `src-tauri/src/runtime/rag/`: retrieval and evidence assembly
+- `src-tauri/src/runtime/agent/`: turn runner, policy gate, session memory, ledger, trace
+- `src-tauri/src/pdf2zh_sidecar/`: PDF translation sidecar manager
+- `docs/`: product, architecture, and runtime plans
 
 ## Current Scope
 
 Implemented today:
 
 - Workspace folder selection and recursive PDF discovery
-- Local PDF read/index with SQLite persistence
-- Reader-side selection and translation flow
-- Agentic retrieval loop for **single-document** Q&A
-- Evidence chain + trace metadata in chat
-
-## Tech Stack
-
-- Frontend: Vue 3 + Vite
-- Desktop runtime: Tauri 2 (Rust backend)
-- Storage: SQLite (local app data)
-- PDF rendering: `pdfjs-dist` (renderer)
+- Local PDF reading and indexing with SQLite persistence
+- Reader-side selection, highlighting, and translation flow
+- Single-document agentic retrieval loop
+- Citation-aware answers with page/bbox jump support
+- Evidence chain and agent trace metadata in chat
+- Local notes with PDF anchors
+- PDFMathTranslate sidecar integration for document translation
 
 ## Prerequisites
 
 - Node.js 18+ (LTS recommended)
 - npm 9+
 - Rust stable toolchain
-- Platform requirements for Tauri 2 (macOS/Linux/Windows build deps)
+- Platform requirements for Tauri 2 (macOS/Linux/Windows build dependencies)
 
 ## Quick Start
 
@@ -77,29 +165,18 @@ npm run build
 cd src-tauri && cargo test
 ```
 
-## Project Structure (Key Paths)
+Additional project checks:
 
-- `src/App.vue`: top-level app orchestration
-- `src/components/`: workspace, reader, chat, markdown UI
-- `src-tauri/src/lib.rs`: Tauri commands and runtime entry points
-- `src-tauri/src/runtime/rag/`: retrieval and evidence assembly
-- `src-tauri/src/runtime/agent/`: intent, finalize policy, session memory, trace
-- `docs/`: product/architecture/runtime plans
-
-## Runtime Flow (High Level)
-
-```text
-Question
--> Retrieval (tree/section/FTS/page/table/visual tools)
--> Finalize gate (answerable / needs more / insufficient)
--> Answer + citations + evidence chain + trace
+```bash
+npm run check:translation-linking
+npm run check:prod-no-testids
 ```
 
-## Data & Privacy Notes
+## Data & Privacy
 
-- Data is local-first; indexing artifacts are stored in local SQLite.
-- API keys are currently stored locally (keychain migration is planned later).
-- If cloud model/translation providers are configured, selected text/questions may be sent to those providers.
+- Lumenfolio is local-first. PDF indexes, notes, chat history, and translation metadata are stored locally.
+- API keys are currently stored locally; migration to the system keychain is planned.
+- If a cloud chat or translation provider is configured, selected text, questions, page context, or translation content may be sent to that provider.
 
 ## Acknowledgements
 
@@ -110,4 +187,3 @@ Question
 This project is licensed under the PolyForm Noncommercial License 1.0.0.
 
 Commercial use is not permitted under this license. If you need commercial licensing, contact the copyright holder at `tanghui315@126.com`.
-

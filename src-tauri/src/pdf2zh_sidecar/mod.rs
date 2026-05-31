@@ -351,7 +351,10 @@ pub(crate) fn clear_pdf_translation_cache(
 }
 
 #[tauri::command]
-pub(crate) fn read_pdf_artifact_bytes(path: String, app: AppHandle) -> Result<Vec<u8>, String> {
+pub(crate) fn read_pdf_artifact_bytes(
+    path: String,
+    app: AppHandle,
+) -> Result<tauri::ipc::Response, String> {
     let paths = paths::Pdf2zhPaths::ensure(&app)?;
     let artifacts_root = paths
         .artifacts
@@ -366,7 +369,11 @@ pub(crate) fn read_pdf_artifact_bytes(path: String, app: AppHandle) -> Result<Ve
     if target.extension().and_then(|ext| ext.to_str()) != Some("pdf") {
         return Err("PDF artifact is not a PDF file".to_string());
     }
-    fs::read(&target).map_err(|err| format!("Failed to read PDF artifact: {err}"))
+    // Return an ArrayBuffer (raw bytes) instead of a JSON number array — see the
+    // note in `read_pdf_bytes`; multi-MB artifacts otherwise block the webview
+    // main thread for seconds while deserializing.
+    let bytes = fs::read(&target).map_err(|err| format!("Failed to read PDF artifact: {err}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 fn run_pdf_translation_job(

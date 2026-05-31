@@ -1,21 +1,114 @@
-# Lumenfolio 
+# Lumenfolio
 
 [English README](./README.md)
 
-一个基于 Tauri 2 + Vue 3 的本地优先（local-first）桌面 PDF AI 阅读工作区。
+Lumenfolio 是一个本地优先的桌面 PDF AI 阅读工作区，面向论文精读、证据可追溯问答、版面级翻译和原文锚定笔记。
 
-Lumenfolio 面向本地论文阅读与证据可追溯问答场景。
+它不是简单的“PDF + 聊天框”。Lumenfolio 的核心是围绕本地 PDF 证据构建阅读工作流：页面、文本块、chunk、结构树、表格、视觉区域、citation 和 bbox 坐标都可以回到原始 PDF。
+
+## 为什么做 Lumenfolio
+
+很多 PDF AI 工具更偏向快速问答。Lumenfolio 更关注深度阅读：追踪论文论点、核对证据、翻译困难段落、记录读书笔记，并且让每一次回答和每一条笔记都能回到原文位置。
+
+核心产品原则：
+
+- **本地优先**：PDF、索引、聊天历史、笔记、Provider 设置和 API Key 都保存在用户本机。
+- **证据优先**：回答应能回到当前 PDF 的页码、bbox 和原文 quote。
+- **无向量 Agentic RAG**：默认不依赖 embedding 模型和向量数据库。
+- **版面级翻译**：把 PDF 翻译当成文档版面任务，而不是普通纯文本翻译。
+- **原文锚定笔记**：高亮和评注绑定到 PDF 坐标和原文片段，可跳回来源。
+
+## 无向量 Agentic RAG
+
+Lumenfolio 的 RAG 默认不依赖向量数据库，也不要求 embedding 模型或外部检索服务。
+
+它不会把论文切碎后丢进一个难以解释的向量索引，而是把每个 PDF 解析成可检查的本地证据层：
+
+- PDF 页面、文本块、行和 chunk
+- 确定性的文档结构树
+- SQLite FTS5 全文检索
+- 页面和文本块 bbox 坐标
+- 表格与视觉证据
+- 带 quote、page、bbox 元数据的 citation
+
+用户提问时，文档 agent 会通过工具分步取证，而不是只做一次黑盒相似度查询：
+
+```text
+Question
+-> 检查文档结构
+-> 打开相关章节
+-> 搜索本地 FTS chunk
+-> 展开页面 / 邻近页 / 表格 / 视觉证据
+-> 经过 answerability / finalize gate
+-> 生成带 citation 和 evidence trace 的回答
+```
+
+这种设计让检索可以在本地低成本运行，不依赖 embedding 模型质量，也更容易审计。它并不是要替代所有向量检索场景，而是专门优化单篇论文精读：结构、页内上下文和可验证 citation 比模糊语义召回更重要。
+
+## 翻译
+
+Lumenfolio 支持阅读中的快速选区翻译，也支持整篇 PDF 的文档级翻译。
+
+对于整篇 PDF 翻译，Lumenfolio 通过内置 PDFMathTranslate sidecar 处理任务。目标是尽可能保留学术 PDF 的版面结构，包括公式、图表、表格、双栏排版、分页和双语输出。
+
+阅读器里的翻译流程包括：
+
+- 阅读时选中文本即时翻译
+- 页级 / 文档级翻译任务，支持进度、取消和重试
+- 译文 PDF 与双语 PDF 输出
+- 原文 / 译文 / 左右对照阅读模式
+- 原文块与译文块联动，方便对照阅读
+
+## 笔记
+
+Lumenfolio 的笔记不是脱离原文的普通文本片段，而是绑定到 PDF 证据位置。
+
+每条笔记会保存选中的原文 quote、页码、归一化 PDF bbox、用户评注和本地时间戳。因此它可以在 PDF 上常驻高亮，在笔记列表中展示，并一键跳回原始阅读位置。
+
+笔记工作流面向论文阅读：
+
+- 在 PDF 中高亮一段原文
+- 添加可选 Markdown 评注
+- 笔记保存在本地 SQLite
+- 点击笔记跳回对应页面和高亮
+- 笔记、聊天和翻译在同一个阅读工作区中协同
 
 ## 功能亮点
 
 - 三栏阅读工作流：
-  - 左侧：工作区目录与 PDF 列表
-  - 中间：PDF 阅读器、选择与翻译控制
-  - 右侧：当前文档聊天、证据链、可折叠 Agent Trace
-- 本地 PDF 索引（pages/blocks/chunks）+ SQLite 存储
-- 当前文档 RAG（structure tree + FTS + page/block evidence）
+  - 左侧：工作区目录与递归 PDF 列表
+  - 中间：PDF 阅读器、选区工具、翻译控制
+  - 右侧：文档聊天、证据链、Agent Trace 和笔记
+- 本地 PDF 索引，持久化到 SQLite
+- 面向单文档的 agentic Q&A
 - 带 citation 的回答，支持 page/bbox 跳转
-- 基于 Provider 的聊天与翻译能力（OpenAI-compatible + 翻译路径）
+- Chat 侧 evidence chain 与可折叠 agent trace
+- Provider 化聊天和翻译配置
+- 表格 / 视觉证据参与检索
+- 基于 PDFMathTranslate sidecar 的版面级 PDF 翻译
+
+## 架构
+
+Lumenfolio 是一个 Tauri 2 + Vue 3 桌面应用。
+
+- 前端：Vue 3 + Vite
+- 桌面运行时：Tauri 2
+- 后端：Rust
+- 存储：SQLite，本地应用数据目录
+- PDF 渲染：`pdfjs-dist`
+- 翻译 Sidecar：内置 PDFMathTranslate runtime
+
+核心路径：
+
+- `src/App.vue`：应用顶层状态与流程编排
+- `src/components/`：workspace、reader、chat、notes、markdown UI
+- `src/components/pdf/selection/`：几何驱动的 PDF 文本选择引擎
+- `src/translationLinking.js`：原文 / 译文块联动逻辑
+- `src-tauri/src/lib.rs`：Tauri 命令与运行时入口
+- `src-tauri/src/runtime/rag/`：检索与证据组装
+- `src-tauri/src/runtime/agent/`：turn runner、policy gate、session memory、ledger、trace
+- `src-tauri/src/pdf2zh_sidecar/`：PDF 翻译 sidecar 管理
+- `docs/`：产品、架构与 runtime 方案文档
 
 ## 当前范围
 
@@ -23,23 +116,19 @@ Lumenfolio 面向本地论文阅读与证据可追溯问答场景。
 
 - 工作区目录选择与递归 PDF 发现
 - 本地 PDF 读取、索引与 SQLite 持久化
-- 阅读态选区翻译流程
-- 面向**单文档**的 Agentic 检索问答链路
+- 阅读态选区、高亮与翻译流程
+- 面向单文档的 Agentic 检索问答链路
+- 带页码 / bbox 的 citation 跳转
 - Chat 侧 evidence chain 与 trace 展示
-
-## 技术栈
-
-- 前端：Vue 3 + Vite
-- 桌面运行时：Tauri 2（Rust 后端）
-- 存储：SQLite（本地应用数据）
-- PDF 渲染：`pdfjs-dist`（Renderer 侧）
+- 本地笔记与 PDF 锚点
+- PDFMathTranslate sidecar 文档翻译集成
 
 ## 环境要求
 
 - Node.js 18+（建议 LTS）
 - npm 9+
 - Rust stable toolchain
-- Tauri 2 对应平台依赖（macOS/Linux/Windows）
+- Tauri 2 对应平台依赖（macOS / Linux / Windows 构建依赖）
 
 ## 快速开始
 
@@ -77,29 +166,18 @@ npm run build
 cd src-tauri && cargo test
 ```
 
-## 目录结构（核心路径）
+项目专项检查：
 
-- `src/App.vue`：应用顶层状态与流程编排
-- `src/components/`：workspace / reader / chat / markdown 组件
-- `src-tauri/src/lib.rs`：Tauri 命令与运行时入口
-- `src-tauri/src/runtime/rag/`：检索与证据组装
-- `src-tauri/src/runtime/agent/`：intent、finalize policy、session memory、trace
-- `docs/`：产品、架构与 runtime 方案文档
-
-## 运行时链路（高层）
-
-```text
-Question
--> Retrieval (tree/section/FTS/page/table/visual tools)
--> Finalize gate (answerable / needs more / insufficient)
--> Answer + citations + evidence chain + trace
+```bash
+npm run check:translation-linking
+npm run check:prod-no-testids
 ```
 
-## 数据与隐私说明
+## 数据与隐私
 
-- 项目是 local-first，索引产物默认存本地 SQLite。
-- API Key 当前仍是本地存储（后续再迁移到系统 keychain）。
-- 若配置云端模型/翻译 Provider，选中文本与问题可能会发送到对应服务商。
+- Lumenfolio 是 local-first，PDF 索引、笔记、聊天历史和翻译元数据默认保存在本地。
+- API Key 当前仍是本地存储，后续计划迁移到系统 keychain。
+- 如果配置云端模型或翻译 Provider，选中文本、问题、页面上下文或翻译内容可能会发送到对应服务商。
 
 ## 致谢
 
@@ -110,4 +188,3 @@ Question
 本项目采用 PolyForm Noncommercial License 1.0.0。
 
 该许可证禁止商业化使用。如需商用授权，请联系版权所有者：`tanghui315@126.com`。
-

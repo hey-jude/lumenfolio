@@ -124,6 +124,7 @@ const pdfViewerRef = ref(null)
 const translationPdfViewerRef = ref(null)
 const translationScrollRef = ref(null)
 const translationScrolling = ref(false)
+const translationListReady = ref(false)
 const paneScrollLinkPreference = ref(loadPaneScrollLinkPreference())
 const paneScrollLinked = ref(false)
 const pdfViewerState = ref({
@@ -157,6 +158,7 @@ let translationScrollSyncFrame = 0
 let linkedScrollSyncFrame = 0
 let translationDrivenPage = 0
 let translationDrivenPageTimer = null
+let translationListReadyFrame = 0
 
 function loadPaneScrollLinkPreference() {
   try {
@@ -406,6 +408,20 @@ const translationFullState = computed(() => {
     }
   }
   if (['pending', 'queued', 'running', 'partial'].includes(translation.status)) {
+    return {
+      tone: 'loading',
+      title: props.ui.translating,
+      detail: translationPhaseLabel.value,
+    }
+  }
+  return null
+})
+// Keep showing the loading panel for one extra frame after translation data
+// first arrives, so the full per-page list mounts off the data-arrival frame
+// instead of janking it. See translationListReady watcher below.
+const translationPaneState = computed(() => {
+  if (translationFullState.value) return translationFullState.value
+  if (translationStreamOpen.value && !translationArtifactPath.value && !translationListReady.value) {
     return {
       tone: 'loading',
       title: props.ui.translating,
@@ -851,6 +867,8 @@ onBeforeUnmount(() => {
   if (translationScrollbarTimer) window.clearTimeout(translationScrollbarTimer)
   if (pdfTranslationPageRequestTimer) window.clearTimeout(pdfTranslationPageRequestTimer)
   if (translationDrivenPageTimer) window.clearTimeout(translationDrivenPageTimer)
+  if (translationListReadyFrame) window.cancelAnimationFrame(translationListReadyFrame)
+  translationListReadyFrame = 0
   translationPageObserver = null
   translationVisibleLoadFrame = 0
   translationScrollSyncFrame = 0
@@ -872,6 +890,29 @@ watch([
   lastPdfTranslationPageRequestKey = ''
   scheduleTranslationObserverRefresh()
 })
+
+// Defer mounting the full per-page translation list by one frame: when the
+// list is about to show (stream open, no full-state, no artifact), hold the
+// loading panel and flip readiness in a rAF so the heavy mount lands off the
+// triggering frame. Reset when the list should no longer be shown.
+watch([translationFullState, translationStreamOpen, translationArtifactPath], () => {
+  const shouldShowList = translationStreamOpen.value
+    && !translationFullState.value
+    && !translationArtifactPath.value
+  if (!shouldShowList) {
+    if (translationListReadyFrame) {
+      window.cancelAnimationFrame(translationListReadyFrame)
+      translationListReadyFrame = 0
+    }
+    translationListReady.value = false
+    return
+  }
+  if (translationListReady.value || translationListReadyFrame) return
+  translationListReadyFrame = window.requestAnimationFrame(() => {
+    translationListReadyFrame = 0
+    translationListReady.value = true
+  })
+}, { immediate: true })
 
 watch([
   translationPageCount,
@@ -1059,8 +1100,8 @@ watch(translationArtifactActivePage, async () => {
               :note-highlights="noteHighlights"
               :active-translation="activeTranslation"
               :linked-blocks="linkedTranslationBlocks"
-              :linked-hover-enabled="viewMode === 'dual' && canOpenTranslationView"
-              :external-linked-block-hover="hoveredLinkedBlock"
+              :linked-hover-enabled="false"
+              :external-linked-block-hover="null"
               :selection-locked="selectionLocked"
               :ui="ui"
               @loaded="emit('document-loaded', $event)"
@@ -1174,26 +1215,26 @@ watch(translationArtifactActivePage, async () => {
               :class="{
                 wide: viewMode === 'translated',
                 'is-scrolling': translationScrolling,
-                'has-full-state': translationFullState,
+                'has-full-state': translationPaneState,
               }"
               @scroll="handleTranslationScroll"
             >
               <div
-                v-if="translationFullState"
+                v-if="translationPaneState"
                 class="translation-full-state"
-                :class="translationFullState.tone"
+                :class="translationPaneState.tone"
                 v-bind="testAttrs('translation-full-state', { status: document.translation.status })"
               >
                 <div class="translation-full-logo">
                   <img :src="lumenfolioLogo" alt="" />
                 </div>
-                <div class="translation-full-title">{{ translationFullState.title }}</div>
-                <div class="translation-full-detail">{{ translationFullState.detail }}</div>
-                <div v-if="translationFullState.tone === 'loading'" class="translation-full-track">
+                <div class="translation-full-title">{{ translationPaneState.title }}</div>
+                <div class="translation-full-detail">{{ translationPaneState.detail }}</div>
+                <div v-if="translationPaneState.tone === 'loading'" class="translation-full-track">
                   <span :style="{ width: `${Math.max(4, translationProgressPercent)}%` }"></span>
                 </div>
                 <button
-                  v-if="translationFullState.tone === 'error'"
+                  v-if="translationPaneState.tone === 'error'"
                   type="button"
                   class="translation-full-retry"
                   @click="emit('translation-action', translationViewportContext())"
@@ -1226,8 +1267,6 @@ watch(translationArtifactActivePage, async () => {
                       :class="{ active: block.blockId === activeBlockId }"
                       v-bind="testAttrs('translation-block', { page: page.pageNo, blockId: block.blockId })"
                       @click="selectTranslatedBlock(page.pageNo, block)"
-                      @mouseenter="emit('linked-block-hover', { page: page.pageNo, blockId: block.blockId })"
-                      @mouseleave="emit('linked-block-hover', null)"
                     >
                       <div class="translation-page-block-source">{{ block.sourceText }}</div>
                       <div class="translation-page-block-translation">{{ block.translatedText }}</div>

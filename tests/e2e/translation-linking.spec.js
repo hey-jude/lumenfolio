@@ -23,7 +23,7 @@ test('translation view lazy-loads page translations without PDF artifacts', asyn
   expect(Math.max(...requestCounts.values())).toBe(1)
 })
 
-test('translated text blocks link back to source highlights', async ({ page }) => {
+test('translated text blocks jump to source on click without hover linking', async ({ page }) => {
   await page.goto('/?harness=translation-linking')
 
   await expect(page.getByTestId('view-mode-dual')).toHaveClass(/active/)
@@ -31,9 +31,12 @@ test('translated text blocks link back to source highlights', async ({ page }) =
   const neuralSkimmerBlock = page.locator('[data-testid="translation-block"][data-block-id="p1-b2"]').first()
   await expect(neuralSkimmerBlock).toBeVisible()
 
+  // Linked hover highlighting is disabled: hovering a translated block must not
+  // paint the matching source block in the original pane.
   await neuralSkimmerBlock.hover()
-  await expect(page.locator('[data-testid="reader-highlight-linked"][data-page="1"]')).toBeVisible()
+  await expect(page.locator('[data-testid="reader-highlight-linked"][data-page="1"]')).toHaveCount(0)
 
+  // Clicking still selects and jumps to the matching source block.
   await neuralSkimmerBlock.click()
   await expect(page.locator('[data-testid="reader-highlight-active"][data-page="1"]').first()).toBeVisible()
 })

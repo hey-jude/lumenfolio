@@ -1874,13 +1874,39 @@ function formatPdfTranslationError(message) {
   return '翻译不可用：Google Web / Microsoft(Bing) Web 均未通过网络检测。请检查网络/代理，或切换到 LLM Provider。'
 }
 
+// TEMP perf probe: measures the synchronous click cost plus the duration of
+// the next several animation frames. A long frame gap (>>16ms) right after the
+// click reveals where the jank is (Vue DOM patch vs. browser layout/paint).
+// Remove once the translate-open jank is diagnosed.
+function probeTranslateFrames(label, t0) {
+  const syncMs = performance.now() - t0
+  let last = performance.now()
+  const frames = []
+  let count = 0
+  const tick = () => {
+    const now = performance.now()
+    frames.push(Math.round(now - last))
+    last = now
+    count += 1
+    if (count < 8) {
+      requestAnimationFrame(tick)
+    } else {
+      // eslint-disable-next-line no-console
+      console.log(`[translate-perf] ${label} sync=${syncMs.toFixed(1)}ms frames(ms)=[${frames.join(', ')}]`)
+    }
+  }
+  requestAnimationFrame(tick)
+}
+
 async function handleTranslationAction(viewerContext = {}) {
+  const perfT0 = performance.now()
   const doc = selectedDocument.value
   if (!doc?.chatReady) return
   const translation = doc.translation
   if (translation.status === 'succeeded') {
     viewMode.value = viewMode.value === 'dual' ? 'original' : 'dual'
     if (viewMode.value === 'dual') rightCollapsed.value = true
+    probeTranslateFrames('toggle-dual', perfT0)
     loadActivePageTranslation()
     return
   }
@@ -1918,6 +1944,7 @@ async function handleTranslationAction(viewerContext = {}) {
   translation.pages = {}
   viewMode.value = 'dual'
   rightCollapsed.value = true
+  probeTranslateFrames('first-translate', perfT0)
 
   try {
     const usePdfSidecar = canTryPdfSidecar

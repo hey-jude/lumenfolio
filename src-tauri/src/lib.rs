@@ -2890,7 +2890,10 @@ async fn test_translation_provider(
 }
 
 #[tauri::command]
-fn read_pdf_bytes(doc_id: String, registry: State<'_, PdfRegistry>) -> Result<Vec<u8>, String> {
+fn read_pdf_bytes(
+    doc_id: String,
+    registry: State<'_, PdfRegistry>,
+) -> Result<tauri::ipc::Response, String> {
     let path = {
         let paths = registry
             .paths
@@ -2902,7 +2905,11 @@ fn read_pdf_bytes(doc_id: String, registry: State<'_, PdfRegistry>) -> Result<Ve
             .ok_or_else(|| "Unknown PDF document id".to_string())?
     };
 
-    fs::read(path).map_err(|err| format!("Failed to read PDF: {err}"))
+    // Return raw bytes via `Response` so the webview receives an ArrayBuffer.
+    // A plain `Vec<u8>` would serialize as a JSON array of numbers, which costs
+    // multiple seconds of main-thread deserialization for multi-MB PDFs.
+    let bytes = fs::read(path).map_err(|err| format!("Failed to read PDF: {err}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 pub(crate) fn stable_text_hash(text: &str) -> String {
