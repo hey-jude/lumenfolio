@@ -172,15 +172,51 @@ jobs:
       - name: Build and upload macOS app bundle
         if: matrix.sidecar_runtime == 'macos'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
           TAG_NAME: ${{ needs.create-release.outputs.tag_name }}
           APPLE_SIGNING_IDENTITY: "-"
         run: |
+          upload_release_asset() {
+            local path="$1"
+            local content_type="$2"
+            local asset_name
+            local encoded_name
+            local existing_id
+
+            asset_name="$(basename "$path")"
+            existing_id="$(
+              curl -fsSL \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" |
+              ruby -rjson -e 'asset = JSON.parse(STDIN.read).find { |item| item["name"] == ARGV[0] }; print asset["id"] if asset' "$asset_name"
+            )"
+
+            if [ -n "$existing_id" ]; then
+              curl -fsSL \
+                -X DELETE \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${existing_id}" >/dev/null
+            fi
+
+            encoded_name="$(ruby -rcgi -e 'print CGI.escape(ARGV[0])' "$asset_name")"
+            curl --fail-with-body -sSL \
+              -X POST \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: ${content_type}" \
+              --data-binary @"$path" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=${encoded_name}" >/dev/null
+            echo "Uploaded ${asset_name}"
+          }
+
           npm run tauri -- build --target ${{ matrix.target }} --bundles app
           ditto -c -k --keepParent \
             "src-tauri/target/${{ matrix.target }}/release/bundle/macos/Lumenfolio.app" \
             "Lumenfolio_${TAG_NAME}_${{ matrix.asset_suffix }}.app.zip"
-          gh release upload "$TAG_NAME" "Lumenfolio_${TAG_NAME}_${{ matrix.asset_suffix }}.app.zip" --clobber
+          upload_release_asset "Lumenfolio_${TAG_NAME}_${{ matrix.asset_suffix }}.app.zip" "application/zip"
 
       - name: Build and upload Windows MSI bundle
         if: matrix.sidecar_runtime == 'windows'
@@ -213,16 +249,49 @@ jobs:
 
       - name: Upload release notices and sidecar source
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ needs.create-release.outputs.tag_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
-          gh release upload "$TAG_NAME" \
-            THIRD_PARTY_NOTICES.md \
-            NOTICE \
-            LICENSE \
-            PDFMathTranslate-AGPL-3.0-LICENSE.txt \
-            PDFMathTranslate-next-source.tar.gz \
-            --clobber
+          upload_release_asset() {
+            local path="$1"
+            local content_type="$2"
+            local asset_name
+            local encoded_name
+            local existing_id
+
+            asset_name="$(basename "$path")"
+            existing_id="$(
+              curl -fsSL \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?per_page=100" |
+              ruby -rjson -e 'asset = JSON.parse(STDIN.read).find { |item| item["name"] == ARGV[0] }; print asset["id"] if asset' "$asset_name"
+            )"
+
+            if [ -n "$existing_id" ]; then
+              curl -fsSL \
+                -X DELETE \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${existing_id}" >/dev/null
+            fi
+
+            encoded_name="$(ruby -rcgi -e 'print CGI.escape(ARGV[0])' "$asset_name")"
+            curl --fail-with-body -sSL \
+              -X POST \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: ${content_type}" \
+              --data-binary @"$path" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=${encoded_name}" >/dev/null
+            echo "Uploaded ${asset_name}"
+          }
+
+          upload_release_asset THIRD_PARTY_NOTICES.md text/markdown
+          upload_release_asset NOTICE text/plain
+          upload_release_asset LICENSE text/plain
+          upload_release_asset PDFMathTranslate-AGPL-3.0-LICENSE.txt text/plain
+          upload_release_asset PDFMathTranslate-next-source.tar.gz application/gzip
 
   publish-release:
     name: Publish release
