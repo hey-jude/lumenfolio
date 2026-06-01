@@ -113,6 +113,8 @@ async function main() {
     join(buildRoot, 'work'),
     '--specpath',
     join(buildRoot, 'spec'),
+    '--collect-submodules',
+    'bitstring',
     worker,
   ])
 
