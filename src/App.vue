@@ -88,10 +88,23 @@ const locale = usePersistedRef('locale', 'en')
 const ui = computed(() => messages[locale.value] || messages.en)
 const filter = ref('')
 const selectedDocId = ref('')
+// IDE-style document tabs: an ordered working set of opened documents, layered on
+// top of selectedDocId (the active tab). Restored (filtered to still-existing docs)
+// in loadLastWorkspace. See docs/lumenfolio_chat_cross_document_mention_plan.md §13.
+const openTabs = ref([])
+// Carries a citation across a cross-document jump: openTab() changes selectedDocId,
+// which triggers watch(selectedDocument) that resets activePage to the doc's saved
+// page. We stash the jump target here and re-apply it after that reset (nextTick).
+let pendingCitationJump = null
 // Remember the active document across restarts; restored (with existence
 // validation) in loadLastWorkspace. Skip empty transient values.
 watch(selectedDocId, (id) => {
   if (id) writePersisted('selectedDocId', id)
+})
+// openTabs is only ever reassigned (never mutated in place), so a shallow watch
+// fires on every change — no deep traversal needed.
+watch(openTabs, (tabs) => {
+  writePersisted('openTabs', tabs)
 })
 const translationLang = ref('zh')
 const viewMode = ref('original')
@@ -293,6 +306,18 @@ const selectedDocument = computed(() => (
   || allDocs.value[0]
   || emptyDocument.value
 ))
+// Tab descriptors for the reader tab bar: resolve each open id to its document,
+// dropping any that no longer exist. Status mirrors the sidebar status dot.
+const openTabDocs = computed(() => openTabs.value
+  .map((id) => allDocs.value.find((doc) => doc.id === id))
+  .filter(Boolean)
+  .map((doc) => ({
+    id: doc.id,
+    name: String(doc.shortTitle || doc.title || 'PDF').replace(/\.pdf$/i, ''),
+    status: doc.indexStatus === 'indexed'
+      ? 'ready'
+      : (doc.indexStatus === 'stale' ? 'failed' : 'processing'),
+  })))
 const activeWorkspaceRoot = computed(() => {
   if (!workspace.roots.length) return null
   const selectedId = selectedDocId.value
@@ -369,6 +394,18 @@ watch(selectedDocument, (doc) => {
   applySelectedChatModel(doc.chatModelId, doc)
   loadNotesForDocument(doc.id)
   scheduleIdleTask(() => scheduleDocumentVisualIndex(doc), 1800)
+  // Re-apply a cross-document citation jump after the reader-state reset above,
+  // so the target page/highlight wins over the doc's saved currentPage. Always
+  // consume the pending jump on the first activation change: if the target doc
+  // loaded we apply it, otherwise (e.g. the doc was deleted and we fell back to
+  // another) we discard it so it can't fire later on an unrelated activation.
+  if (pendingCitationJump) {
+    const jump = pendingCitationJump
+    pendingCitationJump = null
+    if (jump.documentId === doc.id) {
+      nextTick(() => applyCitationJump(jump))
+    }
+  }
 }, { immediate: true })
 
 watch(translationLang, (lang, previousLang) => {
@@ -1033,13 +1070,65 @@ async function testChatModelProvider() {
   }
 }
 
+// Open a document as a tab and activate it. Appends to the working set if new,
+// otherwise just activates the existing tab. The single entry point for sidebar
+// selection, cross-document jumps, and restore.
+function openTab(docId) {
+  if (!docId) return
+  if (!openTabs.value.includes(docId)) {
+    openTabs.value = [...openTabs.value, docId]
+  }
+  if (selectedDocId.value !== docId) {
+    selectedDocId.value = docId
+    loadChatHistoryForDocument(docId)
+    loadNotesForDocument(docId)
+  }
+}
+
+// Close a tab. If it's the active one, fall to the right neighbour, else left.
+// Closing the last tab is a no-op for selection — selectedDocument always renders
+// some document (falling back to allDocs[0]), so we keep that doc as the sole tab
+// rather than blanking selectedDocId (which would leave the reader showing a doc
+// with no matching active tab). The document itself stays in the sidebar regardless.
+function closeTab(docId) {
+  const index = openTabs.value.indexOf(docId)
+  if (index === -1) return
+  const next = openTabs.value.filter((id) => id !== docId)
+  if (selectedDocId.value === docId) {
+    const fallback = next[index] || next[index - 1] || ''
+    if (fallback) {
+      openTabs.value = next
+      selectedDocId.value = fallback
+      loadChatHistoryForDocument(fallback)
+      loadNotesForDocument(fallback)
+    } else {
+      // No other tab: keep the active document's tab open (closing it would
+      // desync the reader from the tab bar). Leave openTabs unchanged.
+    }
+  } else {
+    openTabs.value = next
+  }
+}
+
 function selectDoc(docId) {
-  selectedDocId.value = docId
-  loadChatHistoryForDocument(docId)
-  loadNotesForDocument(docId)
+  openTab(docId)
 }
 
 function handleCitationClick(citation) {
+  // A citation may belong to an @-referenced document the user isn't reading. In
+  // that case switch to (or open) its tab first; the actual page/highlight is
+  // applied after watch(selectedDocument) resets reader state (see pendingCitationJump).
+  if (citation.documentId && citation.documentId !== selectedDocId.value) {
+    pendingCitationJump = citation
+    openTab(citation.documentId)
+    return
+  }
+  applyCitationJump(citation)
+}
+
+// Move the reader to a citation's page and paint its highlight. Shared by direct
+// (same-document) clicks and the deferred cross-document jump.
+function applyCitationJump(citation) {
   activePage.value = citation.page
   activeBlockId.value = citation.blockId
   activeCitationId.value = citation.id
@@ -1062,6 +1151,10 @@ async function handleSend(payload, selection = null) {
   const selectedQuote = selection || (payloadObject?.ignoreSelection ? null : lastSelection.value)
   const maxRetrievalSteps = Number(payloadObject?.maxRetrievalSteps || 20)
   const retrievalAttemptOffset = Number(payloadObject?.retrievalAttemptOffset || 0)
+  // "@-referenced" papers selected in the composer; never includes the active doc.
+  const referenceDocumentIds = Array.isArray(payloadObject?.mentionedDocIds)
+    ? payloadObject.mentionedDocIds.filter((id) => id && id !== doc.id)
+    : []
   if ((!doc.chatReady && !selectedQuote) || !chatModelConfigured.value) return
   const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
   if (!messageText.trim() && !imageDataUrl) return
@@ -1099,6 +1192,7 @@ async function handleSend(payload, selection = null) {
     },
     citations: [],
     imageDataUrl: imageDataUrl || null,
+    mentionedDocumentIds: referenceDocumentIds,
   })
   doc.messages.push({
     id: assistantMessageId,
@@ -1146,6 +1240,7 @@ async function handleSend(payload, selection = null) {
           sensitivity: 'normal',
           source: 'pdf-viewer',
         },
+        referenceDocumentIds,
         maxRetrievalSteps,
         retrievalAttemptOffset,
         activityEventId,
@@ -1356,6 +1451,9 @@ async function loadChatHistoryForDocument(docId) {
         retrievalTrace: message.retrievalTrace || null,
         activityEvents: message.retrievalTrace?.events || [],
         imageDataUrl: message.imageDataUrl || null,
+        // Persisted @-mention provenance (user turns only) so reloaded history still
+        // shows which papers a question referenced.
+        mentionedDocumentIds: message.referencedDocumentIds || [],
         status: 'succeeded',
         canContinueRetrieval: false,
         continuationRequest: null,
@@ -3125,6 +3223,15 @@ async function loadLastWorkspace() {
     const savedDocId = readPersisted('selectedDocId', '')
     const savedStillExists = savedDocId && allDocs.value.some((doc) => doc.id === savedDocId)
     selectedDocId.value = savedStillExists ? savedDocId : (allDocs.value[0]?.id || '')
+    // Restore the tab working set, dropping any docs deleted/moved since last run,
+    // and ensure the active doc is always present as a tab.
+    const savedTabs = readPersisted('openTabs', [])
+    const restoredTabs = (Array.isArray(savedTabs) ? savedTabs : [])
+      .filter((id) => allDocs.value.some((doc) => doc.id === id))
+    if (selectedDocId.value && !restoredTabs.includes(selectedDocId.value)) {
+      restoredTabs.push(selectedDocId.value)
+    }
+    openTabs.value = restoredTabs
     if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
     workspaceStatus.value = 'idle'
   } catch (err) {
@@ -3482,6 +3589,8 @@ onMounted(() => {
     <ReaderPane
       :key="`${selectedDocument.id}:${viewerReloadKey}`"
       :document="selectedDocument"
+      :tabs="openTabDocs"
+      :active-doc-id="selectedDocId"
       :translation-languages="translationLanguages"
       :translation-lang="translationLang"
       :view-mode="viewMode"
@@ -3496,6 +3605,8 @@ onMounted(() => {
       :inline-translate-open="inlineTranslateOpen"
       :locale="locale"
       :ui="ui"
+      @select-tab="openTab"
+      @close-tab="closeTab"
       @update:translationLang="translationLang = $event"
       @translation-action="handleTranslationAction"
       @cancel-translation="cancelTranslation"
@@ -3524,6 +3635,7 @@ onMounted(() => {
     <ChatPane
       v-show="rightPaneTab !== 'notes'"
       :document="selectedDocument"
+      :all-documents="allDocs"
       :collapsed="rightCollapsed"
       :width="rightWidth"
       :active-citation-id="activeCitationId"

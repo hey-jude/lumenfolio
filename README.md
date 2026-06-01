@@ -72,6 +72,19 @@ Question
 
 This makes retrieval cheap to run locally, independent from embedding model quality, and easier to audit. The goal is not to replace every vector-search use case; it is to optimize for single-document scholarly reading where structure, page context, and verifiable citations matter.
 
+## Cross-Document Chat (@-mention)
+
+Reading rarely stays inside a single paper. Lumenfolio lets you pull other indexed papers into the current chat by typing `@` in the composer.
+
+![Lumenfolio cross-document @-mention chat](./resources/screenshot/s_1.png)
+
+- Type `@` to open the paper picker, then search by title and pick a paper to reference.
+- Mention up to 4 other papers in a single question; each mention becomes a chip you can remove.
+- The agent retrieves evidence from the mentioned papers alongside the current one, so answers can compare methods, contrast results, and cite across documents.
+- Citations stay grounded: each cited passage still carries its source document, page, and bbox, and referenced documents open as tabs so you can jump back to the exact location.
+
+This keeps comparison and synthesis inside the same evidence-grounded loop instead of forcing you to copy text between separate chats.
+
 ## Translation
 
 Lumenfolio supports both quick selection translation and document-level PDF translation.
@@ -108,6 +121,7 @@ The notes workflow is designed for paper reading:
   - right: document chat, evidence chain, agent trace, and notes
 - Local PDF indexing into SQLite
 - Single-document agentic Q&A with citations
+- Cross-document chat: `@`-mention up to 4 other indexed papers in one question
 - Evidence chain and foldable agent trace in chat
 - Provider-based chat and translation configuration
 - Visual/table-aware retrieval path for richer PDF evidence
@@ -146,6 +160,7 @@ Implemented today:
 - Local PDF reading and indexing with SQLite persistence
 - Reader-side selection, highlighting, and translation flow
 - Single-document agentic retrieval loop
+- Cross-document `@`-mention chat across multiple indexed papers
 - Citation-aware answers with page/bbox jump support
 - Evidence chain and agent trace metadata in chat
 - Local notes with PDF anchors

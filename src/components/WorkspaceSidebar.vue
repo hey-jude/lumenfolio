@@ -186,6 +186,15 @@ function handleDrop(event) {
   emit('workspace-drop', paths)
 }
 
+// Drag a chat-ready document onto the Chat composer to @-reference it. Uses a
+// dedicated MIME so the composer can tell it apart from an image-file drop, and
+// so it never collides with the sidebar's own file-drop (which carries files).
+function handleDocDragStart(event, doc) {
+  if (!doc?.chatReady || !event?.dataTransfer) return
+  event.dataTransfer.setData('application/x-lumenfolio-doc-id', doc.id)
+  event.dataTransfer.effectAllowed = 'move'
+}
+
 function localized(value) {
   if (!value || typeof value !== 'object') return value
   return value[props.locale] || value.en || Object.values(value)[0]
@@ -425,7 +434,9 @@ function triggerDeleteRoot(root, event = null) {
               :key="doc.id"
               class="doc-row"
               :class="{ active: doc.id === selectedDocId }"
+              :draggable="doc.chatReady ? 'true' : 'false'"
               @click="emit('select-doc', doc.id)"
+              @dragstart="handleDocDragStart($event, doc)"
             >
               <div class="doc-main">
                 <span class="doc-name-wrap">

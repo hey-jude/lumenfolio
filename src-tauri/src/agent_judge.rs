@@ -19,6 +19,10 @@ use crate::{
 };
 
 const M4_LLM_JUDGE_TIMEOUT_SECS: u64 = 45;
+/// One extra attempt on a judge timeout/error before giving up — the provider is
+/// often just briefly slow, and a single retry recovers most of those without
+/// stalling the whole turn.
+const M4_LLM_JUDGE_MAX_TRIES: u32 = 2;
 
 pub(crate) struct LlmJudgeLoopInput<'a> {
     pub(crate) input: &'a AskDocumentInput,
@@ -26,6 +30,8 @@ pub(crate) struct LlmJudgeLoopInput<'a> {
     pub(crate) app: Option<&'a tauri::AppHandle>,
     pub(crate) question: &'a str,
     pub(crate) document_id: &'a str,
+    /// "@-referenced" documents the agent may also search (documentId routing whitelist).
+    pub(crate) reference_document_ids: &'a [&'a str],
     pub(crate) provider: &'a OpenAiCompatibleProvider,
     pub(crate) activity_event_id: Option<&'a str>,
 }
@@ -72,6 +78,34 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
             .to_string(),
         );
     }
+    // Surface the user's "@-referenced" documents so the judge knows they exist and
+    // can route a tool call to one via the optional `documentId` argument — but only
+    // when the question genuinely needs cross-document evidence (rule in the prompt).
+    if !ctx.reference_document_ids.is_empty() {
+        let briefs = {
+            let conn = ctx
+                .database
+                .conn
+                .lock()
+                .map_err(|_| "SQLite lock was poisoned".to_string())?;
+            ctx.reference_document_ids
+                .iter()
+                .filter_map(|id| runtime::rag::document_brief(&conn, id, 12).ok())
+                .map(|brief| brief.to_prompt_line())
+                .collect::<Vec<_>>()
+        };
+        if !briefs.is_empty() {
+            tool_feedback.push(
+                serde_json::json!({
+                    "observation": format!(
+                        "Referenced documents the user attached (search one by passing its id as `documentId`, only if the question needs cross-document evidence):\n{}",
+                        briefs.join("\n")
+                    )
+                })
+                .to_string(),
+            );
+        }
+    }
 
     while remaining_llm_judge_rounds > 0 {
         remaining_llm_judge_rounds = remaining_llm_judge_rounds.saturating_sub(1);
@@ -90,26 +124,54 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                 format!("llm_judge attempt={} checking answerability", attempt + 1),
             ),
         );
-        let judge_result = tokio::time::timeout(
-            Duration::from_secs(M4_LLM_JUDGE_TIMEOUT_SECS),
-            llm::chat::judge_answerability_with_openai_compatible(
-                ctx.question,
-                &agent_run.retrieval_run.intent,
-                &agent_run.retrieval_run.citations,
-                &tool_feedback,
-                ctx.provider,
-                &agent_run.retrieval_run.context_budget,
-            ),
-        )
-        .await
-        .map_err(|_| format!("M4 LLM judge timed out after {M4_LLM_JUDGE_TIMEOUT_SECS}s"));
+        // Retry once on timeout/error: the provider is often just briefly slow, so
+        // a single retry recovers most blips without aborting the turn.
+        let mut judge_result: Result<Result<_, String>, String> =
+            Err("M4 LLM judge not attempted".to_string());
+        for try_index in 0..M4_LLM_JUDGE_MAX_TRIES {
+            judge_result = tokio::time::timeout(
+                Duration::from_secs(M4_LLM_JUDGE_TIMEOUT_SECS),
+                llm::chat::judge_answerability_with_openai_compatible(
+                    ctx.question,
+                    &agent_run.retrieval_run.intent,
+                    &agent_run.retrieval_run.citations,
+                    &tool_feedback,
+                    ctx.provider,
+                    &agent_run.retrieval_run.context_budget,
+                ),
+            )
+            .await
+            .map_err(|_| format!("M4 LLM judge timed out after {M4_LLM_JUDGE_TIMEOUT_SECS}s"));
+            if matches!(judge_result, Ok(Ok(_))) {
+                break;
+            }
+            if try_index + 1 < M4_LLM_JUDGE_MAX_TRIES {
+                emit_agent_activity_optional(
+                    ctx.app,
+                    ctx.activity_event_id,
+                    runtime::agent::AgentTraceEvent::new(
+                        "judge_retry",
+                        "finalize_answer",
+                        "running",
+                        "Retrying evidence check",
+                        "The evidence check did not respond in time; retrying once",
+                        "llm_judge timed out or errored; retrying once".to_string(),
+                    ),
+                );
+            }
+        }
         let mut decision = match judge_result {
             Ok(Ok(decision)) => decision,
             Ok(Err(err)) | Err(err) => {
+                // The judge itself failed (timeout/error) even after the retry. The
+                // gate stays "insufficient" — we did NOT get a positive answerability
+                // verdict — but the downstream best-effort path may still answer from
+                // the evidence already gathered. So the wording must not claim we are
+                // "refusing to fall back": that fallback exists.
                 let gate = serde_json::json!({
                     "status": "insufficient",
                     "reason": format!(
-                        "M4 LLM judge request failed; refusing to fall back to local answerability: {err}"
+                        "The evidence check was unavailable ({err}); answering from the evidence already gathered if there is enough."
                     ),
                     "missing": serde_json::json!(["LLM evidence judge"]),
                     "nextToolCall": serde_json::Value::Null,
@@ -127,8 +189,8 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                     "finalize_answer",
                     "error",
                     "M4 LLM evidence check",
-                    "Judge request failed; refusing to fall back to local answerability",
-                    format!("llm_judge required but unavailable: {err}"),
+                    "Evidence check unavailable; will answer from gathered evidence if sufficient",
+                    format!("llm_judge unavailable after retry: {err}"),
                 )
                 .with_judge(gate);
                 emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());
@@ -413,6 +475,7 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
             Ok(runtime::rag::execute_rag_tool_call_for_capabilities(
                 &conn,
                 ctx.document_id,
+                ctx.reference_document_ids,
                 &call.tool,
                 &call.args,
                 fallback_query,
@@ -473,6 +536,7 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                     runtime::rag::execute_rag_tool_call_for_capabilities(
                         &conn,
                         ctx.document_id,
+                        ctx.reference_document_ids,
                         "read_tree_node_lines",
                         &line_args,
                         fallback_query,
@@ -519,6 +583,7 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                     runtime::rag::execute_rag_tool_call_for_capabilities(
                         &conn,
                         ctx.document_id,
+                        ctx.reference_document_ids,
                         "open_section",
                         &open_args,
                         fallback_query,
@@ -1297,6 +1362,8 @@ fn maybe_open_table_page_fallback(
         runtime::rag::execute_rag_tool_call_for_capabilities(
             &conn,
             ctx.document_id,
+            // v0: table→page fallback stays single-document (cross-doc tables are Phase 3).
+            &[],
             "open_pages",
             &page_args,
             fallback_query,
@@ -1397,6 +1464,25 @@ pub(crate) fn retrieval_is_answerable(agent_run: &runtime::agent::AgentRunResult
         .and_then(|value| value.as_str())
         .is_some_and(|runtime| runtime == FinalizeRuntime::M4LlmJudge.as_str());
     status_is_answerable && runtime_is_llm_judge
+}
+
+/// Minimum accumulated citations to attempt a best-effort answer instead of
+/// refusing. Below this, the evidence is too thin to say anything useful.
+const BEST_EFFORT_MIN_CITATIONS: usize = 2;
+
+/// Best-effort fallback: the judge loop ended WITHOUT "answerable" (it kept asking
+/// for evidence it never found, or marked insufficient), but enough evidence was
+/// actually accumulated to give a useful, caveated answer rather than refusing.
+/// This makes open-ended questions degrade to "here's what I can tell, with stated
+/// limits" instead of "ask a more specific question" — without per-scenario rules.
+///
+/// Excludes the genuinely-empty case (no citations) so we never fabricate an answer
+/// from nothing.
+pub(crate) fn should_answer_best_effort(agent_run: &runtime::agent::AgentRunResult) -> bool {
+    if retrieval_is_answerable(agent_run) {
+        return false;
+    }
+    agent_run.retrieval_run.citations.len() >= BEST_EFFORT_MIN_CITATIONS
 }
 
 fn judge_tool_fallback_query(question: &str, intent: &str, tool: &str) -> String {

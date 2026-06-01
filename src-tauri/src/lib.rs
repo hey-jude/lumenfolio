@@ -283,6 +283,11 @@ struct AskDocumentInput {
     max_retrieval_steps: Option<u32>,
     retrieval_attempt_offset: Option<u32>,
     activity_event_id: Option<String>,
+    /// Other indexed documents the user "@-referenced" in the composer. The agent
+    /// may search these as an additional retrieval dimension (see runtime::rag
+    /// documentId routing). Normalized + capped at MAX_REFERENCE_DOCS before use.
+    #[serde(default)]
+    reference_document_ids: Option<Vec<String>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -324,6 +329,8 @@ struct ChatHistoryMessageOutput {
     claims: Vec<AskDocumentClaim>,
     retrieval_trace: Option<serde_json::Value>,
     image_data_url: Option<String>,
+    #[serde(default)]
+    referenced_document_ids: Vec<String>,
     created_at: i64,
 }
 
@@ -339,6 +346,7 @@ struct StoredChatTurn {
     citations: Vec<runtime::rag::Citation>,
     claims: Vec<AskDocumentClaim>,
     retrieval_trace: serde_json::Value,
+    referenced_document_ids: Vec<String>,
     created_at: i64,
 }
 
@@ -1786,6 +1794,32 @@ fn current_view_visual_metadata(
     Ok(items)
 }
 
+/// Upper bound on how many "@-referenced" documents a single question may pull in,
+/// to keep retrieval token/latency cost bounded.
+const MAX_REFERENCE_DOCS: usize = 4;
+
+/// Normalize the raw reference-document id list from the UI: trim, drop blanks,
+/// drop the primary document itself, dedupe (order-preserving), cap at
+/// MAX_REFERENCE_DOCS. The returned owned Vec is the single source of truth for
+/// both the agent run request and chat-turn persistence.
+fn normalize_reference_document_ids(raw: &[String], primary_document_id: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for id in raw {
+        let id = id.trim();
+        if id.is_empty() || id == primary_document_id {
+            continue;
+        }
+        if seen.insert(id.to_string()) {
+            out.push(id.to_string());
+            if out.len() >= MAX_REFERENCE_DOCS {
+                break;
+            }
+        }
+    }
+    out
+}
+
 async fn run_ask_document(
     input: AskDocumentInput,
     database: &AppDatabase,
@@ -1800,6 +1834,13 @@ async fn run_ask_document(
     if document_id.is_empty() {
         return Err("No document selected".to_string());
     }
+    let reference_document_ids = normalize_reference_document_ids(
+        input.reference_document_ids.as_deref().unwrap_or(&[]),
+        document_id,
+    );
+    // Borrowed view reused by both the agent run request and the LLM-judge loop.
+    let reference_document_id_refs: Vec<&str> =
+        reference_document_ids.iter().map(String::as_str).collect();
 
     let selected_provider_id = input.model_provider_id.as_deref().unwrap_or("").trim();
     let provider_result = providers::resolve_chat_provider(
@@ -1903,6 +1944,7 @@ async fn run_ask_document(
             agent_sessions,
             runtime::agent::AgentRunRequest {
                 document_id,
+                reference_document_ids: reference_document_id_refs.clone(),
                 question,
                 provider_id: Some(selected_provider_id),
                 context_budget,
@@ -1940,6 +1982,7 @@ async fn run_ask_document(
                 app: Some(app),
                 question,
                 document_id,
+                reference_document_ids: &reference_document_id_refs,
                 provider,
                 activity_event_id: activity_event_id.as_deref(),
             },
@@ -2006,7 +2049,14 @@ async fn run_ask_document(
 
     let retrieval_budget_exhausted = agent_judge::retrieval_budget_exhausted(&agent_run);
     let retrieval_attempt_count = agent_judge::retrieval_attempt_count(&agent_run);
-    if !agent_judge::has_image_context(&input) && !agent_judge::retrieval_is_answerable(&agent_run)
+    // Refuse with the "insufficient evidence" message ONLY when the retrieval loop
+    // is neither answerable NOR has enough accumulated evidence for a best-effort,
+    // caveated answer. When best-effort applies, fall through to the normal answer
+    // generator (which is told to state its limits) so open-ended questions degrade
+    // to "here's what I can tell, with stated uncertainty" instead of refusing.
+    if !agent_judge::has_image_context(&input)
+        && !agent_judge::retrieval_is_answerable(&agent_run)
+        && !agent_judge::should_answer_best_effort(&agent_run)
     {
         let answer = insufficient_evidence_answer(question, &agent_run, input.locale.as_deref());
         runtime::agent::record_completed_turn(
@@ -2045,6 +2095,7 @@ async fn run_ask_document(
                 citations: &agent_run.retrieval_run.citations,
                 claims: &[],
                 retrieval_trace: &agent_run.trace,
+                referenced_document_ids: &reference_document_ids,
             },
         ) {
             log::warn!("Failed to persist insufficient-evidence chat turn: {err}");
@@ -2060,6 +2111,22 @@ async fn run_ask_document(
             retrieval_attempt_count,
             retrieval_budget_exhausted,
         });
+    }
+
+    // We're answering. If the gate never reached "answerable" (e.g. the judge
+    // timed out) but we have enough evidence to answer best-effort, stamp the gate
+    // so the UI shows "answered with available evidence" instead of "insufficient".
+    if !agent_judge::has_image_context(&input)
+        && agent_judge::should_answer_best_effort(&agent_run)
+    {
+        for gate in [
+            &mut agent_run.retrieval_run.trace.finalize_gate,
+            &mut agent_run.trace.finalize_gate,
+        ] {
+            if let Some(object) = gate.as_object_mut() {
+                object.insert("bestEffort".to_string(), serde_json::Value::Bool(true));
+            }
+        }
     }
 
     let (provider, provider_label) = provider_result?;
@@ -2124,6 +2191,7 @@ async fn run_ask_document(
             citations: &agent_run.retrieval_run.citations,
             claims: &answer_result.claims,
             retrieval_trace: &agent_run.trace,
+            referenced_document_ids: &reference_document_ids,
         },
     ) {
         log::warn!("Failed to persist chat turn: {err}");
@@ -2155,6 +2223,7 @@ struct ChatTurnPersistInput<'a> {
     citations: &'a [runtime::rag::Citation],
     claims: &'a [AskDocumentClaim],
     retrieval_trace: &'a runtime::agent::AgentTrace,
+    referenced_document_ids: &'a [String],
 }
 
 fn persist_chat_turn(
@@ -2183,6 +2252,8 @@ fn persist_chat_turn(
         .map_err(|err| format!("Failed to encode chat claims: {err}"))?;
     let retrieval_trace_json = serde_json::to_string(input.retrieval_trace)
         .map_err(|err| format!("Failed to encode retrieval trace: {err}"))?;
+    let referenced_document_ids_json = serde_json::to_string(input.referenced_document_ids)
+        .map_err(|err| format!("Failed to encode referenced document ids: {err}"))?;
     let conn = database
         .conn
         .lock()
@@ -2191,8 +2262,9 @@ fn persist_chat_turn(
         "INSERT INTO chat_turns
             (id, document_id, provider_id, model_key, provider_label, user_message,
              assistant_answer, reasoning_content, selected_text, image_data_url, citations_json,
-             claims_json, retrieval_trace_json, index_version, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, unixepoch(), unixepoch())",
+             claims_json, retrieval_trace_json, referenced_document_ids_json, index_version,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, unixepoch(), unixepoch())",
         params![
             turn_id,
             input.document_id,
@@ -2207,6 +2279,7 @@ fn persist_chat_turn(
             citations_json,
             claims_json,
             retrieval_trace_json,
+            referenced_document_ids_json,
             CURRENT_INDEX_VERSION,
         ],
     )
@@ -2223,7 +2296,7 @@ fn load_stored_chat_turns(
         .prepare(
             "SELECT id, provider_id, provider_label, user_message, assistant_answer,
                     reasoning_content, selected_text, image_data_url, citations_json, claims_json,
-                    retrieval_trace_json, created_at
+                    retrieval_trace_json, created_at, referenced_document_ids_json
              FROM (
                SELECT rowid AS turn_rowid, *
                FROM chat_turns
@@ -2254,6 +2327,9 @@ fn read_stored_chat_turn_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stored
     let claims = serde_json::from_str::<Vec<AskDocumentClaim>>(&claims_json).unwrap_or_default();
     let retrieval_trace =
         serde_json::from_str::<serde_json::Value>(&retrieval_trace_json).unwrap_or_default();
+    let referenced_document_ids_json: String = row.get(12)?;
+    let referenced_document_ids =
+        serde_json::from_str::<Vec<String>>(&referenced_document_ids_json).unwrap_or_default();
     let provider_id = optional_non_empty(row.get::<_, String>(1)?);
     Ok(StoredChatTurn {
         id: row.get(0)?,
@@ -2267,6 +2343,7 @@ fn read_stored_chat_turn_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Stored
         citations,
         claims,
         retrieval_trace,
+        referenced_document_ids,
         created_at: row.get(11)?,
     })
 }
@@ -2295,6 +2372,7 @@ fn chat_turns_to_messages(turns: Vec<StoredChatTurn>) -> Vec<ChatHistoryMessageO
                 claims: Vec::new(),
                 retrieval_trace: None,
                 image_data_url: turn.image_data_url.clone(),
+                referenced_document_ids: turn.referenced_document_ids.clone(),
                 created_at: turn.created_at,
             };
             let assistant = ChatHistoryMessageOutput {
@@ -2309,6 +2387,7 @@ fn chat_turns_to_messages(turns: Vec<StoredChatTurn>) -> Vec<ChatHistoryMessageO
                 claims: turn.claims.clone(),
                 retrieval_trace: Some(turn.retrieval_trace.clone()),
                 image_data_url: None,
+                referenced_document_ids: Vec::new(),
                 created_at: turn.created_at,
             };
             [user, assistant]
@@ -3521,6 +3600,58 @@ mod tests {
         assert!(agent_judge::retrieval_is_answerable(&llm_run));
     }
 
+    fn dummy_citation(id: &str) -> runtime::rag::Citation {
+        runtime::rag::Citation {
+            id: id.to_string(),
+            label: "[1]".to_string(),
+            page: 1,
+            block_id: id.to_string(),
+            section_title: None,
+            quote: "evidence".to_string(),
+            bbox_list: serde_json::json!([]),
+            document_id: "doc".to_string(),
+            source: "fts".to_string(),
+        }
+    }
+
+    #[test]
+    fn best_effort_answers_when_not_answerable_but_evidence_accumulated() {
+        // Judge ended needs_more_evidence but several citations were gathered: an
+        // open-ended question should get a caveated answer, not a refusal.
+        let mut run = run_with_finalize_gate(serde_json::json!({
+            "status": "needs_more_evidence",
+            "reason": "could not confirm a direct citation between the two papers",
+            "runtime": "m4-llm-judge"
+        }));
+        run.retrieval_run.citations = vec![dummy_citation("a"), dummy_citation("b")];
+        assert!(!agent_judge::retrieval_is_answerable(&run));
+        assert!(agent_judge::should_answer_best_effort(&run));
+    }
+
+    #[test]
+    fn best_effort_refuses_when_evidence_is_empty() {
+        // No usable evidence at all → still refuse rather than fabricate.
+        let mut run = run_with_finalize_gate(serde_json::json!({
+            "status": "insufficient",
+            "reason": "no evidence found",
+            "runtime": "m4-llm-judge"
+        }));
+        run.retrieval_run.citations = vec![dummy_citation("a")]; // below the min of 2
+        assert!(!agent_judge::should_answer_best_effort(&run));
+    }
+
+    #[test]
+    fn best_effort_does_not_trigger_when_already_answerable() {
+        let mut run = run_with_finalize_gate(serde_json::json!({
+            "status": "answerable",
+            "reason": "evidence supports the answer",
+            "runtime": "m4-llm-judge"
+        }));
+        run.retrieval_run.citations = vec![dummy_citation("a"), dummy_citation("b")];
+        // Already answerable → best-effort path is not needed (returns false).
+        assert!(!agent_judge::should_answer_best_effort(&run));
+    }
+
     #[test]
     fn judge_tool_counts_open_table_replacement_as_new_evidence() {
         let mut run = insufficient_run(false);
@@ -3638,6 +3769,7 @@ mod tests {
               citations_json TEXT NOT NULL DEFAULT '[]',
               claims_json TEXT NOT NULL DEFAULT '[]',
               retrieval_trace_json TEXT NOT NULL DEFAULT '{}',
+              referenced_document_ids_json TEXT NOT NULL DEFAULT '[]',
               index_version INTEGER NOT NULL DEFAULT 0,
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL

@@ -2,11 +2,16 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import { startWindowDrag } from '../windowDrag'
+import { testAttrs } from '../testAttrs'
 
 const props = defineProps({
   document: {
     type: Object,
     required: true,
+  },
+  allDocuments: {
+    type: Array,
+    default: () => [],
   },
   collapsed: {
     type: Boolean,
@@ -111,6 +116,232 @@ const pendingSelectionPreview = computed(() => {
   return text.length > 260 ? `${text.slice(0, 260)}...` : text
 })
 
+// --- @-mention of other indexed papers ---------------------------------------
+// The INPUT TEXT is the source of truth: selecting a paper inserts the plain text
+// "@<name>⁠ " at the caret (no contenteditable, so IME stays intact), and the
+// set of referenced docs is DERIVED from which "@<name>⁠" tokens are still
+// present in the text. This lets the user phrase per-document requests inline
+// (e.g. "对于 @A 总结方法, 对于 @B 对比实验"), giving the LLM full positional semantics.
+//
+// The trailing U+2060 (WORD JOINER) is an invisible token terminator. It makes
+// each "@<label>⁠" a self-delimited unit so that:
+//   - one label can't be a substring of another (@GLM⁠ vs @GLM-5⁠),
+//   - labels containing spaces still match as a whole,
+//   - editing adjacent text never partially matches.
+// It is stripped from the text before sending, so the LLM only sees "@<name>".
+//
+// mentionRegistry maps doc id -> its UNIQUE display label for the current draft
+// (duplicate display names are disambiguated when added). A doc counts as a live
+// reference only while its full "@<label>⁠" token remains in the textarea, so
+// deleting the text deletes the reference.
+const MENTION_MIME = 'application/x-lumenfolio-doc-id'
+const MAX_REFERENCE_DOCS = 4
+const MENTION_TERMINATOR = '⁠'
+const mentionRegistry = ref({})
+const composerText = ref('')
+
+// The full inline token for a label, including the invisible terminator.
+function mentionToken(label) {
+  return `@${label}${MENTION_TERMINATOR}`
+}
+const mentionPickerOpen = ref(false)
+const mentionFilter = ref('')
+const mentionActiveIndex = ref(0)
+const mentionSearchRef = ref(null)
+// Per-document composer drafts so switching tabs preserves an unsent message
+// (textarea text + its mention registry). The textarea stays UNCONTROLLED (no
+// v-model) to keep IME intact; we save/restore its value imperatively on doc
+// switch. In-memory only — drafts are not persisted across app restart.
+const composerDrafts = new Map()
+
+// Doc ids currently referenced, derived from the "@<label>⁠" tokens still present
+// in the composer text (order = registry order). This is the single source of
+// truth for chips and for the send payload. Matching uses the FULL token (with
+// terminator), so it is exact — no substring collisions between labels.
+const mentionedDocIds = computed(() => {
+  const text = composerText.value
+  const ids = []
+  for (const [id, label] of Object.entries(mentionRegistry.value)) {
+    if (text.includes(mentionToken(label))) {
+      ids.push(id)
+    }
+  }
+  return ids
+})
+
+// Keep composerText in sync with the uncontrolled textarea on every input, so the
+// derived mention state (chips, count) updates as the user types or deletes "@…".
+function handleComposerInput(event) {
+  composerText.value = event.target.value
+}
+
+function captureDraft(docId) {
+  if (!docId) return
+  const text = composerTextareaRef.value?.value || ''
+  if (text.trim() || Object.keys(mentionRegistry.value).length) {
+    composerDrafts.set(docId, { text, registry: { ...mentionRegistry.value } })
+  } else {
+    composerDrafts.delete(docId)
+  }
+}
+
+function restoreDraft(docId) {
+  const draft = composerDrafts.get(docId) || { text: '', registry: {} }
+  mentionRegistry.value = { ...draft.registry }
+  composerText.value = draft.text
+  closeMentionPicker()
+  nextTick(() => {
+    if (composerTextareaRef.value) composerTextareaRef.value.value = draft.text
+  })
+}
+
+function docDisplayName(doc) {
+  return doc?.shortTitle || doc?.title || ''
+}
+
+// Candidates: other documents that are indexed/chat-ready, minus the current doc
+// and ones already mentioned, filtered by the live picker query.
+const mentionCandidates = computed(() => {
+  const filter = mentionFilter.value.trim().toLowerCase()
+  return (props.allDocuments || [])
+    .filter((doc) => doc && doc.id && doc.id !== props.document.id)
+    .filter((doc) => doc.chatReady)
+    .filter((doc) => !mentionedDocIds.value.includes(doc.id))
+    .filter((doc) => !filter || docDisplayName(doc).toLowerCase().includes(filter))
+    .slice(0, 8)
+})
+
+const mentionedDocs = computed(() => mentionedDocIds.value
+  .map((id) => (props.allDocuments || []).find((doc) => doc.id === id))
+  .filter(Boolean))
+
+const mentionLimitReached = computed(() => mentionedDocIds.value.length >= MAX_REFERENCE_DOCS)
+
+// Filter-independent: is there ANY other chat-ready doc to mention? Gates whether
+// the "@" key hijacks input to open the picker (single-doc workspaces type "@" normally).
+const hasMentionableDocs = computed(() => (props.allDocuments || [])
+  .some((doc) => doc && doc.id && doc.id !== props.document.id
+    && doc.chatReady && !mentionedDocIds.value.includes(doc.id)))
+
+// Allocate a display label that is UNIQUE among the current registry, so two docs
+// with the same short name don't collide on one registry key / one inline token.
+function uniqueMentionLabel(baseLabel) {
+  const taken = new Set(Object.values(mentionRegistry.value))
+  if (!taken.has(baseLabel)) return baseLabel
+  let n = 2
+  while (taken.has(`${baseLabel} (${n})`)) n += 1
+  return `${baseLabel} (${n})`
+}
+
+// Insert "@<label>⁠ " (with invisible terminator) at the caret and register the
+// id -> label mapping. The text is the source of truth, so this is what makes the
+// doc a live reference.
+function addMention(id) {
+  if (!id || id === props.document.id) return
+  if (mentionedDocIds.value.includes(id)) return
+  if (id in mentionRegistry.value) return
+  if (mentionLimitReached.value) return
+  const doc = (props.allDocuments || []).find((item) => item.id === id)
+  if (!doc) return
+  const label = uniqueMentionLabel(docDisplayName(doc))
+  const token = `${mentionToken(label)} `
+  const textarea = composerTextareaRef.value
+  const current = textarea?.value ?? composerText.value
+  const end = textarea?.selectionEnd ?? current.length
+  // The "@" the user typed to trigger the picker may have slipped into the textarea
+  // (preventDefault doesn't reliably stop it under IME/composition). Absorb a
+  // trailing "@<partial>" immediately before the caret so we never produce "@@name".
+  let start = textarea?.selectionStart ?? current.length
+  const before = current.slice(0, start)
+  const triggerMatch = before.match(/@[^@\s]*$/)
+  if (triggerMatch) {
+    start -= triggerMatch[0].length
+  }
+  const next = current.slice(0, start) + token + current.slice(end)
+  mentionRegistry.value = { ...mentionRegistry.value, [id]: label }
+  composerText.value = next
+  if (textarea) {
+    textarea.value = next
+    const caret = start + token.length
+    nextTick(() => {
+      textarea.focus()
+      textarea.setSelectionRange(caret, caret)
+    })
+  }
+  closeMentionPicker()
+}
+
+// Click-selecting an option: insert it; addMention already restores focus + caret.
+function selectMention(id) {
+  addMention(id)
+}
+
+// Chip "×": remove the doc's full "@<label>⁠" token from the text (text is truth).
+function removeMention(id) {
+  const label = mentionRegistry.value[id]
+  if (label === undefined) return
+  const token = mentionToken(label)
+  let text = composerTextareaRef.value?.value ?? composerText.value
+  // Remove the token plus an immediately-following space if present, else the
+  // bare token. Exact-match on the full token (with terminator) means no other
+  // label or normal text can be hit.
+  text = text.split(`${token} `).join('').split(token).join('')
+  composerText.value = text
+  if (composerTextareaRef.value) composerTextareaRef.value.value = text
+  const nextRegistry = { ...mentionRegistry.value }
+  delete nextRegistry[id]
+  mentionRegistry.value = nextRegistry
+}
+
+function clearMentions() {
+  mentionRegistry.value = {}
+  composerText.value = ''
+}
+
+function openMentionPicker() {
+  if (!chatInputEnabled.value || mentionLimitReached.value) return
+  mentionFilter.value = ''
+  mentionActiveIndex.value = 0
+  mentionPickerOpen.value = true
+  // Move focus into the picker's search box so typed characters filter the list
+  // instead of leaking into the (uncontrolled) textarea.
+  nextTick(() => mentionSearchRef.value?.focus())
+}
+
+function closeMentionPicker({ refocusComposer = false } = {}) {
+  mentionPickerOpen.value = false
+  mentionFilter.value = ''
+  mentionActiveIndex.value = 0
+  if (refocusComposer) nextTick(() => composerTextareaRef.value?.focus())
+}
+
+function handleMentionPickerKeydown(event) {
+  if (!mentionPickerOpen.value) return
+  const count = mentionCandidates.value.length
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeMentionPicker({ refocusComposer: true })
+  } else if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    if (count) mentionActiveIndex.value = (mentionActiveIndex.value + 1) % count
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    if (count) mentionActiveIndex.value = (mentionActiveIndex.value - 1 + count) % count
+  } else if (event.key === 'Enter') {
+    event.preventDefault()
+    const doc = mentionCandidates.value[mentionActiveIndex.value]
+    if (doc) {
+      // addMention closes the picker; return focus to the composer to keep typing.
+      addMention(doc.id)
+      nextTick(() => composerTextareaRef.value?.focus())
+    } else {
+      // No candidate to pick (e.g. no match): dismiss the picker instead of
+      // swallowing Enter, so the user isn't stuck.
+      closeMentionPicker({ refocusComposer: true })
+    }
+  }
+}
+
 function modelOptionLabel(model) {
   // Show only the model name. The provider prefix (e.g. "DS · DeepSeek · ")
   // overflowed the trigger and was redundant — model names already imply
@@ -122,13 +353,23 @@ function handleSubmit(event) {
   if (!chatInputEnabled.value) return
   const text = String(event.target.querySelector('textarea')?.value || '').trim()
   if (!text && !pendingImageDataUrl.value) return
+  // Sync derived state to the latest textarea value (still containing the invisible
+  // terminators), so mentionedDocIds resolves correctly, THEN strip the terminators
+  // from the outgoing text so the LLM only sees clean "@<name>".
+  composerText.value = text
+  const ids = [...mentionedDocIds.value]
+  const cleanText = text.split(MENTION_TERMINATOR).join('')
   emit('send', {
-    text: text || props.ui.imageOnlyPrompt,
+    text: cleanText || props.ui.imageOnlyPrompt,
     imageDataUrl: pendingImageDataUrl.value || '',
     imageName: pendingImageName.value || '',
+    mentionedDocIds: ids,
   })
   event.target.reset()
   clearPendingImage()
+  clearMentions()
+  closeMentionPicker()
+  composerDrafts.delete(props.document.id)
   autoFollowMessages.value = true
   scrollMessagesToBottom({ force: true })
 }
@@ -141,6 +382,15 @@ function focusComposer() {
 }
 
 function handleComposerKeydown(event) {
+  // "@" is a pure trigger: open the picker and DON'T let the character land in the
+  // textarea (mentions live entirely in chip state). Only hijack when there is
+  // actually another doc to mention, so single-doc workspaces type "@" normally.
+  if (event.key === '@' && !event.isComposing && chatInputEnabled.value
+      && hasMentionableDocs.value && !mentionLimitReached.value) {
+    event.preventDefault()
+    openMentionPicker()
+    return
+  }
   if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return
   event.preventDefault()
   event.currentTarget?.form?.requestSubmit()
@@ -183,6 +433,13 @@ function handleComposerPaste(event) {
 }
 
 function handleComposerDrop(event) {
+  // A document dragged from the sidebar carries our custom MIME — add it as a
+  // reference. This is checked before the image path so the two don't conflict.
+  const droppedDocId = event.dataTransfer?.getData(MENTION_MIME)
+  if (droppedDocId) {
+    if (chatInputEnabled.value) addMention(droppedDocId)
+    return
+  }
   if (!chatInputEnabled.value || !supportsVision.value) return
   const file = Array.from(event.dataTransfer?.files || [])
     .find((item) => item.type.startsWith('image/'))
@@ -316,7 +573,10 @@ watch(() => visibleMessages.value.map((message) => [
   scrollMessagesToBottom({ force: !userScrolledMessages.value, settle: !userScrolledMessages.value })
 }, { flush: 'post' })
 
-watch(() => props.document.id, () => {
+watch(() => props.document.id, (newId, oldId) => {
+  // Save the draft of the doc we're leaving, restore the one we're entering.
+  if (oldId) captureDraft(oldId)
+  restoreDraft(newId)
   autoFollowMessages.value = true
   userScrolledMessages.value = false
   showJumpToLatest.value = false
@@ -407,6 +667,7 @@ function formatTraceStatus(status) {
 
 function traceStatusLabel(trace) {
   const status = trace?.finalizeGate?.status || ''
+  if (trace?.finalizeGate?.bestEffort === true) return props.ui.traceStatusBestEffort
   if (status === 'answerable') return props.ui.traceStatusAnswerable
   if (status === 'insufficient') return props.ui.traceStatusInsufficient
   if (status === 'needs_more_evidence') return props.ui.traceStatusSearching
@@ -659,7 +920,16 @@ function traceGateStatus(message) {
   return String(message.retrievalTrace?.finalizeGate?.status || '')
 }
 
+// True when the backend answered best-effort (gate not "answerable", but enough
+// evidence to answer with stated limits) — stamped as bestEffort on the gate.
+function traceGateBestEffort(message) {
+  return message.retrievalTrace?.finalizeGate?.bestEffort === true
+}
+
 function messageHasRetrievalIssue(message) {
+  // A best-effort answer is not an issue: it produced a real answer from the
+  // evidence even though the gate didn't formally reach "answerable".
+  if (traceGateBestEffort(message)) return false
   return message.status === 'failed' || traceGateStatus(message) === 'insufficient'
 }
 
@@ -770,6 +1040,11 @@ function agentProcessState(message) {
     return props.locale === 'zh' ? '正在查找证据' : 'Finding evidence'
   }
   if (message.status === 'failed') return props.locale === 'zh' ? '已失败' : 'Failed'
+  // Best-effort: the gate wasn't "answerable" (e.g. judge timed out) but we still
+  // answered from the gathered evidence — show that, not a failure.
+  if (traceGateBestEffort(message)) {
+    return props.locale === 'zh' ? '基于现有证据作答' : 'Answered with available evidence'
+  }
   if (traceGateStatus(message) === 'insufficient') {
     return props.locale === 'zh' ? '证据不足' : 'Insufficient evidence'
   }
@@ -786,6 +1061,11 @@ function agentProcessSubline(message) {
       : `${stats.completed} steps complete · Current: ${current}`
   }
   if (message.status === 'failed') return eventSummary(latest) || agentActivitySummary(message)
+  if (traceGateBestEffort(message)) {
+    return props.locale === 'zh'
+      ? '证据检查未完成，已基于已检索到的证据作答（详情见检索过程）'
+      : 'The evidence check did not complete; answered from the evidence gathered (see retrieval details)'
+  }
   if (traceGateStatus(message) === 'insufficient') {
     return props.locale === 'zh'
       ? '没有找到足够可靠的证据，详情里保留了检索过程'
@@ -914,6 +1194,29 @@ function resolveCitation(message, evidence) {
   return (message.citations || []).find((citation) => citation.id === evidence.citationId) || null
 }
 
+// Resolve a user message's @-mentioned documents to display names for read-only
+// chips. Accepts either the live (mentionedDocumentIds) or persisted
+// (referencedDocumentIds) field so chips survive reload. Unknown ids fall back to
+// the raw id so the provenance is never silently dropped.
+function messageMentionNames(message) {
+  const ids = message.mentionedDocumentIds || message.referencedDocumentIds || []
+  if (!ids.length) return []
+  return ids.map((id) => {
+    const doc = (props.allDocuments || []).find((item) => item.id === id)
+    return doc ? docDisplayName(doc) : id
+  })
+}
+
+// When a citation belongs to an @-referenced document (not the one being read),
+// return that document's short name so the evidence chip can badge its origin.
+function citationCrossDocName(message, evidence) {
+  const citation = resolveCitation(message, evidence)
+  const docId = citation?.documentId
+  if (!docId || docId === props.document.id) return ''
+  const doc = (props.allDocuments || []).find((item) => item.id === docId)
+  return doc ? docDisplayName(doc) : ''
+}
+
 function evidenceSourceLabel(source) {
   const labels = {
     selection: props.ui.selectedText,
@@ -926,6 +1229,8 @@ function evidenceSourceLabel(source) {
     open_visual: 'Visual',
     analyze_visual: 'Visual',
     fts: 'FTS',
+    literal: 'FTS',
+    chat_history: 'Chat history',
     'client-context': 'Context',
   }
   const zhLabels = {
@@ -939,6 +1244,8 @@ function evidenceSourceLabel(source) {
     open_visual: '视觉证据',
     analyze_visual: '视觉证据',
     fts: '文本检索',
+    literal: '文本检索',
+    chat_history: '对话历史',
     'client-context': '上下文',
   }
   return props.locale === 'zh'
@@ -1026,6 +1333,17 @@ function evidenceSourceLabel(source) {
             :class="[message.role, message.status]"
           >
             <div class="message-role">{{ message.role === 'assistant' ? ui.assistant : ui.user }}</div>
+            <div
+              v-if="message.role === 'user' && messageMentionNames(message).length"
+              class="message-mentions"
+            >
+              <span
+                v-for="(name, index) in messageMentionNames(message)"
+                :key="`${message.id}-mention-${index}`"
+                class="message-mention-chip"
+                :title="name"
+              >@{{ name }}</span>
+            </div>
             <img
               v-if="message.imageDataUrl"
               :src="message.imageDataUrl"
@@ -1162,7 +1480,12 @@ function evidenceSourceLabel(source) {
                   @click="resolveCitation(message, evidence) && emit('citation-click', resolveCitation(message, evidence))"
                 >
                   <span>{{ evidence.label }}</span>
-                  <span>{{ locale === 'zh' ? `${ui.page}${evidence.page}` : `p${evidence.page}` }}</span>
+                  <span
+                    v-if="citationCrossDocName(message, evidence)"
+                    class="evidence-doc-badge"
+                    :title="citationCrossDocName(message, evidence)"
+                  >@{{ citationCrossDocName(message, evidence) }}</span>
+                  <span v-if="evidence.page > 0">{{ locale === 'zh' ? `${ui.page}${evidence.page}` : `p${evidence.page}` }}</span>
                   <span>{{ evidence.sectionTitle || evidenceSourceLabel(evidence.source) }}</span>
                 </button>
                 <span v-if="evidenceItems(message).length > evidencePreviewItems(message).length" class="evidence-more">
@@ -1307,6 +1630,51 @@ function evidenceSourceLabel(source) {
           </div>
         </div>
 
+        <div v-if="mentionedDocs.length" class="mention-chips" v-bind="testAttrs('chat-mention-chips')">
+          <span
+            v-for="doc in mentionedDocs"
+            :key="doc.id"
+            class="mention-chip"
+            v-bind="testAttrs('chat-mention-chip')"
+          >
+            <span class="mention-chip-at">@</span>
+            <span class="mention-chip-name">{{ docDisplayName(doc) }}</span>
+            <button
+              type="button"
+              class="mention-chip-remove"
+              :title="ui.mentionPaperRemove"
+              :aria-label="ui.mentionPaperRemove"
+              @click="removeMention(doc.id)"
+            >×</button>
+          </span>
+        </div>
+
+        <div v-if="mentionPickerOpen" class="mention-picker" v-bind="testAttrs('chat-mention-picker')">
+          <input
+            ref="mentionSearchRef"
+            v-model="mentionFilter"
+            class="mention-picker-search"
+            type="text"
+            :placeholder="ui.mentionPaperPlaceholder"
+            @keydown="handleMentionPickerKeydown"
+            @blur="closeMentionPicker()"
+          />
+          <ul v-if="mentionCandidates.length" class="mention-picker-list">
+            <li
+              v-for="(doc, index) in mentionCandidates"
+              :key="doc.id"
+              class="mention-picker-item"
+              :class="{ active: index === mentionActiveIndex }"
+              v-bind="testAttrs('chat-mention-option')"
+              @mousedown.prevent="selectMention(doc.id)"
+              @mouseenter="mentionActiveIndex = index"
+            >
+              {{ docDisplayName(doc) }}
+            </li>
+          </ul>
+          <div v-else class="mention-picker-empty">{{ ui.mentionPaperNotFound }}</div>
+        </div>
+
         <textarea
           ref="composerTextareaRef"
           :disabled="!chatInputEnabled"
@@ -1320,6 +1688,7 @@ function evidenceSourceLabel(source) {
                   : ui.inputPlaceholder
           "
           @keydown="handleComposerKeydown"
+          @input="handleComposerInput"
         />
 
         <div class="composer-footer">
@@ -1669,6 +2038,25 @@ function evidenceSourceLabel(source) {
   }
 }
 
+.message-mentions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.message-mention-chip {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--accent, #6aa6ff);
+  background: rgba(120, 170, 255, 0.14);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
 .message-image {
   width: min(100%, 280px);
   max-height: 220px;
@@ -1766,6 +2154,18 @@ function evidenceSourceLabel(source) {
 .evidence-more {
   color: var(--text-muted);
   font-size: 11px;
+}
+
+.evidence-doc-badge {
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent, #6aa6ff);
+  background: rgba(120, 170, 255, 0.14);
+  border-radius: 6px;
+  padding: 0 5px;
+  font-size: 10px;
 }
 
 .agent-process {
@@ -2489,6 +2889,97 @@ button.agent-process-head:disabled {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-secondary);
   cursor: pointer;
+}
+
+.mention-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px 3px 8px;
+  border-radius: 999px;
+  background: rgba(120, 170, 255, 0.14);
+  border: 1px solid rgba(120, 170, 255, 0.32);
+  color: var(--text-primary);
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.mention-chip-at {
+  color: var(--accent, #6aa6ff);
+  font-weight: 600;
+}
+
+.mention-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+.mention-chip-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.mention-picker {
+  margin-bottom: 8px;
+  border-radius: 14px;
+  border: 1px solid var(--line-soft);
+  background: var(--surface-raised, rgba(20, 24, 32, 0.96));
+  overflow: hidden;
+}
+
+.mention-picker-search {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--text-primary);
+  padding: 10px 12px;
+  outline: none;
+  font-size: 13px;
+}
+
+.mention-picker-list {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.mention-picker-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-picker-item.active {
+  background: rgba(120, 170, 255, 0.16);
+}
+
+.mention-picker-empty {
+  padding: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
 }
 
 .chat-composer textarea {

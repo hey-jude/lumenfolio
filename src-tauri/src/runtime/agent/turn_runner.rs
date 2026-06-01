@@ -20,6 +20,10 @@ const MAX_RETRIEVAL_STEPS: u32 = 20;
 
 pub struct AgentRunRequest<'a> {
     pub document_id: &'a str,
+    /// Additional "@-referenced" documents the agent may search this turn (empty by
+    /// default). Forms the documentId-routing whitelist passed to the RAG tool
+    /// dispatch in run_answerability_loop, so a tool call may target one of these.
+    pub reference_document_ids: Vec<&'a str>,
     pub question: &'a str,
     pub provider_id: Option<&'a str>,
     pub context_budget: crate::model_catalog::ModelContextBudget,
@@ -286,6 +290,7 @@ where
         let output = rag::execute_rag_tool_call_for_capabilities(
             conn,
             request.document_id,
+            &request.reference_document_ids,
             tool,
             &args,
             fallback_query,
@@ -358,6 +363,7 @@ where
             let page_output = rag::execute_rag_tool_call_for_capabilities(
                 conn,
                 request.document_id,
+                &request.reference_document_ids,
                 "open_pages",
                 &page_args,
                 fallback_query,

@@ -112,6 +112,7 @@ pub async fn run_from_env() -> Result<(), String> {
         max_retrieval_steps: Some(config.max_steps),
         retrieval_attempt_offset: None,
         activity_event_id: None,
+        reference_document_ids: None,
     };
     let current_view_metadata = crate::build_current_view_gate_metadata(
         &database,
@@ -140,6 +141,7 @@ pub async fn run_from_env() -> Result<(), String> {
             &sessions,
             runtime::agent::AgentRunRequest {
                 document_id: &document.id,
+                reference_document_ids: Vec::new(),
                 question,
                 provider_id: input.model_provider_id.as_deref(),
                 context_budget: provider.context_budget.clone(),
@@ -164,6 +166,7 @@ pub async fn run_from_env() -> Result<(), String> {
                 app: None,
                 question,
                 document_id: &document.id,
+                reference_document_ids: &[],
                 provider: &provider,
                 activity_event_id: None,
             },

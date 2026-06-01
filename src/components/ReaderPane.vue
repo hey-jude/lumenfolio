@@ -37,6 +37,14 @@ const props = defineProps({
     type: Object,
     required: true,
   },
+  tabs: {
+    type: Array,
+    default: () => [],
+  },
+  activeDocId: {
+    type: String,
+    default: '',
+  },
   translationLanguages: {
     type: Array,
     required: true,
@@ -96,6 +104,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits([
+  'select-tab',
+  'close-tab',
   'update:translationLang',
   'translation-action',
   'cancel-translation',
@@ -1059,6 +1069,29 @@ watch(translationArtifactActivePage, async () => {
       </div>
     </div>
 
+    <div v-if="tabs.length > 1" class="reader-tab-bar" v-bind="testAttrs('reader-tab-bar')">
+      <div
+        v-for="tab in tabs"
+        :key="tab.id"
+        class="reader-tab"
+        :class="{ active: tab.id === activeDocId }"
+        :title="tab.name"
+        v-bind="testAttrs('reader-tab')"
+        @click="emit('select-tab', tab.id)"
+      >
+        <span class="reader-tab-dot" :class="tab.status"></span>
+        <span class="reader-tab-name">{{ tab.name }}</span>
+        <button
+          type="button"
+          class="reader-tab-close"
+          :title="ui.tabClose"
+          :aria-label="ui.tabClose"
+          v-bind="testAttrs('reader-tab-close')"
+          @click.stop="emit('close-tab', tab.id)"
+        >×</button>
+      </div>
+    </div>
+
     <div
       v-if="document.translation.status === 'failed' && document.translation.error"
       class="translation-error"
@@ -1627,6 +1660,83 @@ watch(translationArtifactActivePage, async () => {
   border-radius: 12px;
   padding: 12px 14px;
   font-size: 13px;
+}
+
+.reader-tab-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 6px 12px 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.reader-tab-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.reader-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 200px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--line-soft);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.reader-tab.active {
+  background: rgba(120, 170, 255, 0.12);
+  color: var(--text-primary);
+  border-color: rgba(120, 170, 255, 0.32);
+}
+
+.reader-tab-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--text-secondary);
+}
+
+.reader-tab-dot.ready {
+  background: #4caf7d;
+}
+
+.reader-tab-dot.failed {
+  background: #c64949;
+}
+
+.reader-tab-dot.processing {
+  background: #d6a14a;
+}
+
+.reader-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.reader-tab-close {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 4px;
+}
+
+.reader-tab-close:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
 }
 
 .viewer-stage {
