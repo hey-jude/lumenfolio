@@ -2049,7 +2049,14 @@ async fn run_ask_document(
 
     let retrieval_budget_exhausted = agent_judge::retrieval_budget_exhausted(&agent_run);
     let retrieval_attempt_count = agent_judge::retrieval_attempt_count(&agent_run);
-    if !agent_judge::has_image_context(&input) && !agent_judge::retrieval_is_answerable(&agent_run)
+    // Refuse with the "insufficient evidence" message ONLY when the retrieval loop
+    // is neither answerable NOR has enough accumulated evidence for a best-effort,
+    // caveated answer. When best-effort applies, fall through to the normal answer
+    // generator (which is told to state its limits) so open-ended questions degrade
+    // to "here's what I can tell, with stated uncertainty" instead of refusing.
+    if !agent_judge::has_image_context(&input)
+        && !agent_judge::retrieval_is_answerable(&agent_run)
+        && !agent_judge::should_answer_best_effort(&agent_run)
     {
         let answer = insufficient_evidence_answer(question, &agent_run, input.locale.as_deref());
         runtime::agent::record_completed_turn(
@@ -3575,6 +3582,58 @@ mod tests {
             "runtime": "m4-llm-judge"
         }));
         assert!(agent_judge::retrieval_is_answerable(&llm_run));
+    }
+
+    fn dummy_citation(id: &str) -> runtime::rag::Citation {
+        runtime::rag::Citation {
+            id: id.to_string(),
+            label: "[1]".to_string(),
+            page: 1,
+            block_id: id.to_string(),
+            section_title: None,
+            quote: "evidence".to_string(),
+            bbox_list: serde_json::json!([]),
+            document_id: "doc".to_string(),
+            source: "fts".to_string(),
+        }
+    }
+
+    #[test]
+    fn best_effort_answers_when_not_answerable_but_evidence_accumulated() {
+        // Judge ended needs_more_evidence but several citations were gathered: an
+        // open-ended question should get a caveated answer, not a refusal.
+        let mut run = run_with_finalize_gate(serde_json::json!({
+            "status": "needs_more_evidence",
+            "reason": "could not confirm a direct citation between the two papers",
+            "runtime": "m4-llm-judge"
+        }));
+        run.retrieval_run.citations = vec![dummy_citation("a"), dummy_citation("b")];
+        assert!(!agent_judge::retrieval_is_answerable(&run));
+        assert!(agent_judge::should_answer_best_effort(&run));
+    }
+
+    #[test]
+    fn best_effort_refuses_when_evidence_is_empty() {
+        // No usable evidence at all → still refuse rather than fabricate.
+        let mut run = run_with_finalize_gate(serde_json::json!({
+            "status": "insufficient",
+            "reason": "no evidence found",
+            "runtime": "m4-llm-judge"
+        }));
+        run.retrieval_run.citations = vec![dummy_citation("a")]; // below the min of 2
+        assert!(!agent_judge::should_answer_best_effort(&run));
+    }
+
+    #[test]
+    fn best_effort_does_not_trigger_when_already_answerable() {
+        let mut run = run_with_finalize_gate(serde_json::json!({
+            "status": "answerable",
+            "reason": "evidence supports the answer",
+            "runtime": "m4-llm-judge"
+        }));
+        run.retrieval_run.citations = vec![dummy_citation("a"), dummy_citation("b")];
+        // Already answerable → best-effort path is not needed (returns false).
+        assert!(!agent_judge::should_answer_best_effort(&run));
     }
 
     #[test]

@@ -20,10 +20,9 @@ const MAX_RETRIEVAL_STEPS: u32 = 20;
 
 pub struct AgentRunRequest<'a> {
     pub document_id: &'a str,
-    /// Additional "@-referenced" documents the agent may search this turn. Empty
-    /// by default. Wired through to the RAG tool dispatch whitelist in a later phase.
-    // Phase 0: populated but not yet consumed by the retrieval loop (Phase 1).
-    #[allow(dead_code)]
+    /// Additional "@-referenced" documents the agent may search this turn (empty by
+    /// default). Forms the documentId-routing whitelist passed to the RAG tool
+    /// dispatch in run_answerability_loop, so a tool call may target one of these.
     pub reference_document_ids: Vec<&'a str>,
     pub question: &'a str,
     pub provider_id: Option<&'a str>,

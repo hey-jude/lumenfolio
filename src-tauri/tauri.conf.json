@@ -28,7 +28,8 @@
           "y": 20
         },
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "dragDropEnabled": false
       }
     ],
     "security": {

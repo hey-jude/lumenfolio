@@ -126,6 +126,7 @@ const mentionedDocIds = ref([])
 const mentionPickerOpen = ref(false)
 const mentionFilter = ref('')
 const mentionActiveIndex = ref(0)
+const mentionSearchRef = ref(null)
 // Per-document composer drafts so switching tabs preserves an unsent message
 // (textarea text + chosen @-mentions). The textarea stays UNCONTROLLED (no
 // v-model) to keep IME intact; we save/restore its value imperatively on doc
@@ -173,12 +174,25 @@ const mentionedDocs = computed(() => mentionedDocIds.value
 
 const mentionLimitReached = computed(() => mentionedDocIds.value.length >= MAX_REFERENCE_DOCS)
 
+// Filter-independent: is there ANY other chat-ready doc to mention? Gates whether
+// the "@" key hijacks input to open the picker (single-doc workspaces type "@" normally).
+const hasMentionableDocs = computed(() => (props.allDocuments || [])
+  .some((doc) => doc && doc.id && doc.id !== props.document.id
+    && doc.chatReady && !mentionedDocIds.value.includes(doc.id)))
+
 function addMention(id) {
   if (!id || id === props.document.id) return
   if (mentionedDocIds.value.includes(id)) return
   if (mentionLimitReached.value) return
   mentionedDocIds.value = [...mentionedDocIds.value, id]
   closeMentionPicker()
+}
+
+// Click-selecting an option: add it and return focus to the composer (the
+// keyboard Enter path does the same via handleMentionPickerKeydown).
+function selectMention(id) {
+  addMention(id)
+  nextTick(() => composerTextareaRef.value?.focus())
 }
 
 function removeMention(id) {
@@ -194,12 +208,16 @@ function openMentionPicker() {
   mentionFilter.value = ''
   mentionActiveIndex.value = 0
   mentionPickerOpen.value = true
+  // Move focus into the picker's search box so typed characters filter the list
+  // instead of leaking into the (uncontrolled) textarea.
+  nextTick(() => mentionSearchRef.value?.focus())
 }
 
-function closeMentionPicker() {
+function closeMentionPicker({ refocusComposer = false } = {}) {
   mentionPickerOpen.value = false
   mentionFilter.value = ''
   mentionActiveIndex.value = 0
+  if (refocusComposer) nextTick(() => composerTextareaRef.value?.focus())
 }
 
 function handleMentionPickerKeydown(event) {
@@ -207,7 +225,7 @@ function handleMentionPickerKeydown(event) {
   const count = mentionCandidates.value.length
   if (event.key === 'Escape') {
     event.preventDefault()
-    closeMentionPicker()
+    closeMentionPicker({ refocusComposer: true })
   } else if (event.key === 'ArrowDown') {
     event.preventDefault()
     if (count) mentionActiveIndex.value = (mentionActiveIndex.value + 1) % count
@@ -217,7 +235,15 @@ function handleMentionPickerKeydown(event) {
   } else if (event.key === 'Enter') {
     event.preventDefault()
     const doc = mentionCandidates.value[mentionActiveIndex.value]
-    if (doc) addMention(doc.id)
+    if (doc) {
+      // addMention closes the picker; return focus to the composer to keep typing.
+      addMention(doc.id)
+      nextTick(() => composerTextareaRef.value?.focus())
+    } else {
+      // No candidate to pick (e.g. no match): dismiss the picker instead of
+      // swallowing Enter, so the user isn't stuck.
+      closeMentionPicker({ refocusComposer: true })
+    }
   }
 }
 
@@ -255,12 +281,12 @@ function focusComposer() {
 }
 
 function handleComposerKeydown(event) {
-  if (mentionPickerOpen.value && ['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(event.key)) {
-    handleMentionPickerKeydown(event)
-    return
-  }
-  if (event.key === '@' && !event.isComposing) {
-    // Let the "@" land in the textarea as a normal character, then open the picker.
+  // "@" is a pure trigger: open the picker and DON'T let the character land in the
+  // textarea (mentions live entirely in chip state). Only hijack when there is
+  // actually another doc to mention, so single-doc workspaces type "@" normally.
+  if (event.key === '@' && !event.isComposing && chatInputEnabled.value
+      && hasMentionableDocs.value && !mentionLimitReached.value) {
+    event.preventDefault()
     openMentionPicker()
     return
   }
@@ -1047,6 +1073,19 @@ function resolveCitation(message, evidence) {
   return (message.citations || []).find((citation) => citation.id === evidence.citationId) || null
 }
 
+// Resolve a user message's @-mentioned documents to display names for read-only
+// chips. Accepts either the live (mentionedDocumentIds) or persisted
+// (referencedDocumentIds) field so chips survive reload. Unknown ids fall back to
+// the raw id so the provenance is never silently dropped.
+function messageMentionNames(message) {
+  const ids = message.mentionedDocumentIds || message.referencedDocumentIds || []
+  if (!ids.length) return []
+  return ids.map((id) => {
+    const doc = (props.allDocuments || []).find((item) => item.id === id)
+    return doc ? docDisplayName(doc) : id
+  })
+}
+
 // When a citation belongs to an @-referenced document (not the one being read),
 // return that document's short name so the evidence chip can badge its origin.
 function citationCrossDocName(message, evidence) {
@@ -1069,6 +1108,8 @@ function evidenceSourceLabel(source) {
     open_visual: 'Visual',
     analyze_visual: 'Visual',
     fts: 'FTS',
+    literal: 'FTS',
+    chat_history: 'Chat history',
     'client-context': 'Context',
   }
   const zhLabels = {
@@ -1082,6 +1123,8 @@ function evidenceSourceLabel(source) {
     open_visual: '视觉证据',
     analyze_visual: '视觉证据',
     fts: '文本检索',
+    literal: '文本检索',
+    chat_history: '对话历史',
     'client-context': '上下文',
   }
   return props.locale === 'zh'
@@ -1169,6 +1212,17 @@ function evidenceSourceLabel(source) {
             :class="[message.role, message.status]"
           >
             <div class="message-role">{{ message.role === 'assistant' ? ui.assistant : ui.user }}</div>
+            <div
+              v-if="message.role === 'user' && messageMentionNames(message).length"
+              class="message-mentions"
+            >
+              <span
+                v-for="(name, index) in messageMentionNames(message)"
+                :key="`${message.id}-mention-${index}`"
+                class="message-mention-chip"
+                :title="name"
+              >@{{ name }}</span>
+            </div>
             <img
               v-if="message.imageDataUrl"
               :src="message.imageDataUrl"
@@ -1310,7 +1364,7 @@ function evidenceSourceLabel(source) {
                     class="evidence-doc-badge"
                     :title="citationCrossDocName(message, evidence)"
                   >@{{ citationCrossDocName(message, evidence) }}</span>
-                  <span>{{ locale === 'zh' ? `${ui.page}${evidence.page}` : `p${evidence.page}` }}</span>
+                  <span v-if="evidence.page > 0">{{ locale === 'zh' ? `${ui.page}${evidence.page}` : `p${evidence.page}` }}</span>
                   <span>{{ evidence.sectionTitle || evidenceSourceLabel(evidence.source) }}</span>
                 </button>
                 <span v-if="evidenceItems(message).length > evidencePreviewItems(message).length" class="evidence-more">
@@ -1476,11 +1530,13 @@ function evidenceSourceLabel(source) {
 
         <div v-if="mentionPickerOpen" class="mention-picker" v-bind="testAttrs('chat-mention-picker')">
           <input
+            ref="mentionSearchRef"
             v-model="mentionFilter"
             class="mention-picker-search"
             type="text"
             :placeholder="ui.mentionPaperPlaceholder"
             @keydown="handleMentionPickerKeydown"
+            @blur="closeMentionPicker()"
           />
           <ul v-if="mentionCandidates.length" class="mention-picker-list">
             <li
@@ -1489,7 +1545,7 @@ function evidenceSourceLabel(source) {
               class="mention-picker-item"
               :class="{ active: index === mentionActiveIndex }"
               v-bind="testAttrs('chat-mention-option')"
-              @mousedown.prevent="addMention(doc.id)"
+              @mousedown.prevent="selectMention(doc.id)"
               @mouseenter="mentionActiveIndex = index"
             >
               {{ docDisplayName(doc) }}
@@ -1858,6 +1914,25 @@ function evidenceSourceLabel(source) {
     opacity: 1;
     transform: translateY(-3px);
   }
+}
+
+.message-mentions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.message-mention-chip {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--accent, #6aa6ff);
+  background: rgba(120, 170, 255, 0.14);
+  border-radius: 6px;
+  padding: 1px 6px;
 }
 
 .message-image {

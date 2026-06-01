@@ -889,7 +889,14 @@ pub fn execute_rag_tool_call_for_capabilities(
         "open_visual" => execute_open_visual_tool(&registry, args, fallback_query),
         "analyze_visual" => execute_analyze_visual_tool(&registry, args, fallback_query),
         "analyze_page" => execute_analyze_page_tool(&registry, args, fallback_query),
-        "recall_chat_history" => execute_recall_chat_history_tool(&registry, args),
+        // Chat-history recall is always scoped to the PRIMARY document, never the
+        // routed target — the model must not be able to read a referenced doc's
+        // private chat history via a stray documentId arg. Build a primary registry.
+        "recall_chat_history" => {
+            let primary_registry =
+                RagToolRegistry::new(conn, document_id, capabilities.max_quote_chars);
+            execute_recall_chat_history_tool(&primary_registry, args)
+        }
         _ => execute_search_chunks_tool(&registry, args, fallback_query),
     };
 
@@ -1650,6 +1657,11 @@ pub fn search_chunks_literal(
     }
 
     let limit = limit.clamp(1, 20);
+    // NOTE: SQLite's built-in lower() only ASCII-case-folds, so this is
+    // case-insensitive for ASCII (covering identifiers like F1-score, snake_case)
+    // and exact-byte for non-ASCII. CJK has no case so it's unaffected; the only
+    // gap is opposite-case non-ASCII letters (e.g. Θ vs θ), which the precise-token
+    // use case rarely hits. Order by page then chunk id (stable within a page).
     let mut stmt = conn
         .prepare(
             "SELECT c.id, c.document_id, c.page_no, c.block_ids_json, c.text, c.bbox_refs_json
@@ -1708,24 +1720,30 @@ pub fn recall_chat_history(
     let limit = limit.clamp(1, 8) as usize;
     let window = (limit.saturating_mul(6)).clamp(limit, 200) as i64;
 
+    // Filter to the current index version, matching the visible-history loader
+    // (lib.rs load_stored_chat_turns) so recall never surfaces turns the UI hides
+    // after a reindex.
     let mut stmt = conn
         .prepare(
             "SELECT id, user_message, assistant_answer
              FROM chat_turns
-             WHERE document_id = ?1
+             WHERE document_id = ?1 AND index_version = ?2
              ORDER BY created_at DESC, rowid DESC
-             LIMIT ?2",
+             LIMIT ?3",
         )
         .map_err(|err| format!("Failed to prepare chat history recall: {err}"))?;
     // Newest-first window.
     let rows = stmt
-        .query_map(params![document_id, window], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
+        .query_map(
+            params![document_id, crate::CURRENT_INDEX_VERSION, window],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
         .map_err(|err| format!("Failed to recall chat history: {err}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("Failed to read chat history rows: {err}"))?;
@@ -1741,9 +1759,20 @@ pub fn recall_chat_history(
             .take(limit)
             .collect()
     } else {
-        let terms = query_terms(query);
-        // Rank by how many query terms appear in the Q+A text. Stable sort keeps the
-        // newest-first order among equal scores (input is already newest-first).
+        // Tokenize for keyword overlap. query_terms splits on non-alphanumeric, which
+        // does NOT split CJK (Han chars are alphanumeric) — so a Chinese phrase stays
+        // one token and whole-phrase matching is too strict. Add CJK single-char terms
+        // as a fallback signal so reworded Chinese queries still rank prior turns.
+        let mut terms = query_terms(query);
+        let cjk_chars: Vec<String> = query
+            .chars()
+            .filter(|ch| is_cjk(*ch))
+            .map(|ch| ch.to_string())
+            .collect();
+        terms.extend(cjk_chars);
+        terms.sort();
+        terms.dedup();
+
         let mut ranked: Vec<(usize, (String, String, String))> = rows
             .into_iter()
             .map(|(id, q, a)| {
@@ -1754,8 +1783,10 @@ pub fn recall_chat_history(
                     .count();
                 (score, (id, q, a))
             })
-            .filter(|(score, _)| *score > 0)
             .collect();
+        // Stable sort by descending score keeps newest-first order among ties (input
+        // is already newest-first). When nothing matches (score all 0), this degrades
+        // to "most recent turns" instead of returning empty.
         ranked.sort_by(|a, b| b.0.cmp(&a.0));
         ranked.into_iter().take(limit).map(|(_, row)| row).collect()
     };
@@ -5709,6 +5740,16 @@ fn query_terms(value: &str) -> Vec<String> {
         .collect()
 }
 
+/// True for CJK ideographs (Han) — used to derive single-character keyword terms
+/// for chat-history recall, since whitespace/word tokenization doesn't split CJK.
+fn is_cjk(ch: char) -> bool {
+    matches!(ch,
+        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VisualAnchorRequest {
     number: String,
@@ -7932,6 +7973,7 @@ mod tests {
                 document_id TEXT NOT NULL,
                 user_message TEXT NOT NULL,
                 assistant_answer TEXT NOT NULL,
+                index_version INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL,
                 rowid_helper INTEGER
             );",
@@ -7948,10 +7990,38 @@ mod tests {
         assistant_answer: &str,
         created_at: i64,
     ) {
+        insert_chat_turn_versioned(
+            conn,
+            id,
+            document_id,
+            user_message,
+            assistant_answer,
+            created_at,
+            crate::CURRENT_INDEX_VERSION,
+        );
+    }
+
+    fn insert_chat_turn_versioned(
+        conn: &Connection,
+        id: &str,
+        document_id: &str,
+        user_message: &str,
+        assistant_answer: &str,
+        created_at: i64,
+        index_version: i64,
+    ) {
         conn.execute(
-            "INSERT INTO chat_turns (id, document_id, user_message, assistant_answer, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, document_id, user_message, assistant_answer, created_at],
+            "INSERT INTO chat_turns
+                (id, document_id, user_message, assistant_answer, index_version, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                id,
+                document_id,
+                user_message,
+                assistant_answer,
+                index_version,
+                created_at
+            ],
         )
         .expect("insert chat turn");
     }
@@ -7975,8 +8045,41 @@ mod tests {
         insert_chat_turn(&conn, "t1", "doc", "we discussed pruning", "the pruning method", 1);
         insert_chat_turn(&conn, "t2", "doc", "unrelated weather chat", "sunny today", 2);
         let hits = recall_chat_history(&conn, "doc", "pruning method", false, 5).expect("recall");
-        assert_eq!(hits.len(), 1);
+        // The matching turn ranks first; non-matching turns degrade to recent (no
+        // longer filtered out, so the agent still gets a fallback instead of empty).
         assert_eq!(hits[0].block_id, "t1");
+    }
+
+    #[test]
+    fn recall_chat_history_keyword_ranks_reworded_cjk_query() {
+        let conn = setup_chat_history_conn();
+        // Stored turn uses "剪枝方法"; the query rewords it as "模型剪枝的方法".
+        // Han chars aren't split by query_terms, so single-char CJK overlap must
+        // still rank the relevant turn above an unrelated one.
+        insert_chat_turn(&conn, "t1", "doc", "请解释剪枝方法", "剪枝方法是一种压缩技术", 1);
+        insert_chat_turn(&conn, "t2", "doc", "今天天气怎么样", "晴天", 2);
+        let hits = recall_chat_history(&conn, "doc", "模型剪枝的方法", false, 5).expect("recall");
+        assert_eq!(hits[0].block_id, "t1");
+    }
+
+    #[test]
+    fn recall_chat_history_excludes_stale_index_version() {
+        let conn = setup_chat_history_conn();
+        // A turn from an older index version must NOT be recalled (matches the
+        // visible-history loader, which filters by CURRENT_INDEX_VERSION).
+        insert_chat_turn_versioned(
+            &conn,
+            "stale",
+            "doc",
+            "old pruning question",
+            "old answer",
+            1,
+            crate::CURRENT_INDEX_VERSION - 1,
+        );
+        insert_chat_turn(&conn, "fresh", "doc", "new pruning question", "new answer", 2);
+        let hits = recall_chat_history(&conn, "doc", "pruning", false, 5).expect("recall");
+        assert!(hits.iter().all(|h| h.block_id != "stale"));
+        assert!(hits.iter().any(|h| h.block_id == "fresh"));
     }
 
     #[test]

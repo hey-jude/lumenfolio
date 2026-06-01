@@ -101,9 +101,11 @@ let pendingCitationJump = null
 watch(selectedDocId, (id) => {
   if (id) writePersisted('selectedDocId', id)
 })
+// openTabs is only ever reassigned (never mutated in place), so a shallow watch
+// fires on every change — no deep traversal needed.
 watch(openTabs, (tabs) => {
   writePersisted('openTabs', tabs)
-}, { deep: true })
+})
 const translationLang = ref('zh')
 const viewMode = ref('original')
 const activePage = ref(1)
@@ -393,11 +395,16 @@ watch(selectedDocument, (doc) => {
   loadNotesForDocument(doc.id)
   scheduleIdleTask(() => scheduleDocumentVisualIndex(doc), 1800)
   // Re-apply a cross-document citation jump after the reader-state reset above,
-  // so the target page/highlight wins over the doc's saved currentPage.
-  if (pendingCitationJump && pendingCitationJump.documentId === doc.id) {
+  // so the target page/highlight wins over the doc's saved currentPage. Always
+  // consume the pending jump on the first activation change: if the target doc
+  // loaded we apply it, otherwise (e.g. the doc was deleted and we fell back to
+  // another) we discard it so it can't fire later on an unrelated activation.
+  if (pendingCitationJump) {
     const jump = pendingCitationJump
     pendingCitationJump = null
-    nextTick(() => applyCitationJump(jump))
+    if (jump.documentId === doc.id) {
+      nextTick(() => applyCitationJump(jump))
+    }
   }
 }, { immediate: true })
 
@@ -1078,22 +1085,28 @@ function openTab(docId) {
   }
 }
 
-// Close a tab. If it's the active one, fall to the right neighbour, else left,
-// else empty. The document itself stays in the sidebar; only the tab closes.
+// Close a tab. If it's the active one, fall to the right neighbour, else left.
+// Closing the last tab is a no-op for selection — selectedDocument always renders
+// some document (falling back to allDocs[0]), so we keep that doc as the sole tab
+// rather than blanking selectedDocId (which would leave the reader showing a doc
+// with no matching active tab). The document itself stays in the sidebar regardless.
 function closeTab(docId) {
   const index = openTabs.value.indexOf(docId)
   if (index === -1) return
   const next = openTabs.value.filter((id) => id !== docId)
-  openTabs.value = next
   if (selectedDocId.value === docId) {
     const fallback = next[index] || next[index - 1] || ''
     if (fallback) {
+      openTabs.value = next
       selectedDocId.value = fallback
       loadChatHistoryForDocument(fallback)
       loadNotesForDocument(fallback)
     } else {
-      selectedDocId.value = ''
+      // No other tab: keep the active document's tab open (closing it would
+      // desync the reader from the tab bar). Leave openTabs unchanged.
     }
+  } else {
+    openTabs.value = next
   }
 }
 
@@ -1110,12 +1123,11 @@ function handleCitationClick(citation) {
     openTab(citation.documentId)
     return
   }
-  activePage.value = citation.page
-  activeBlockId.value = citation.blockId
-  activeCitationId.value = citation.id
-  activeHighlight.value = createHighlight(citation)
+  applyCitationJump(citation)
 }
 
+// Move the reader to a citation's page and paint its highlight. Shared by direct
+// (same-document) clicks and the deferred cross-document jump.
 function applyCitationJump(citation) {
   activePage.value = citation.page
   activeBlockId.value = citation.blockId
@@ -1439,6 +1451,9 @@ async function loadChatHistoryForDocument(docId) {
         retrievalTrace: message.retrievalTrace || null,
         activityEvents: message.retrievalTrace?.events || [],
         imageDataUrl: message.imageDataUrl || null,
+        // Persisted @-mention provenance (user turns only) so reloaded history still
+        // shows which papers a question referenced.
+        mentionedDocumentIds: message.referencedDocumentIds || [],
         status: 'succeeded',
         canContinueRetrieval: false,
         continuationRequest: null,

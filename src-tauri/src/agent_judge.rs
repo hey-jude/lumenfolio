@@ -1434,6 +1434,25 @@ pub(crate) fn retrieval_is_answerable(agent_run: &runtime::agent::AgentRunResult
     status_is_answerable && runtime_is_llm_judge
 }
 
+/// Minimum accumulated citations to attempt a best-effort answer instead of
+/// refusing. Below this, the evidence is too thin to say anything useful.
+const BEST_EFFORT_MIN_CITATIONS: usize = 2;
+
+/// Best-effort fallback: the judge loop ended WITHOUT "answerable" (it kept asking
+/// for evidence it never found, or marked insufficient), but enough evidence was
+/// actually accumulated to give a useful, caveated answer rather than refusing.
+/// This makes open-ended questions degrade to "here's what I can tell, with stated
+/// limits" instead of "ask a more specific question" — without per-scenario rules.
+///
+/// Excludes the genuinely-empty case (no citations) so we never fabricate an answer
+/// from nothing.
+pub(crate) fn should_answer_best_effort(agent_run: &runtime::agent::AgentRunResult) -> bool {
+    if retrieval_is_answerable(agent_run) {
+        return false;
+    }
+    agent_run.retrieval_run.citations.len() >= BEST_EFFORT_MIN_CITATIONS
+}
+
 fn judge_tool_fallback_query(question: &str, intent: &str, tool: &str) -> String {
     let normalized = question.to_lowercase();
     if matches!(
