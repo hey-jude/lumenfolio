@@ -117,35 +117,78 @@ const pendingSelectionPreview = computed(() => {
 })
 
 // --- @-mention of other indexed papers ---------------------------------------
-// Reference state is kept OUT of the textarea (no contenteditable): the `@` key
-// only opens a picker; chosen papers live in this Set and render as removable
-// chips. This keeps IME and the native form.reset() flow untouched.
+// The INPUT TEXT is the source of truth: selecting a paper inserts the plain text
+// "@<name>⁠ " at the caret (no contenteditable, so IME stays intact), and the
+// set of referenced docs is DERIVED from which "@<name>⁠" tokens are still
+// present in the text. This lets the user phrase per-document requests inline
+// (e.g. "对于 @A 总结方法, 对于 @B 对比实验"), giving the LLM full positional semantics.
+//
+// The trailing U+2060 (WORD JOINER) is an invisible token terminator. It makes
+// each "@<label>⁠" a self-delimited unit so that:
+//   - one label can't be a substring of another (@GLM⁠ vs @GLM-5⁠),
+//   - labels containing spaces still match as a whole,
+//   - editing adjacent text never partially matches.
+// It is stripped from the text before sending, so the LLM only sees "@<name>".
+//
+// mentionRegistry maps doc id -> its UNIQUE display label for the current draft
+// (duplicate display names are disambiguated when added). A doc counts as a live
+// reference only while its full "@<label>⁠" token remains in the textarea, so
+// deleting the text deletes the reference.
 const MENTION_MIME = 'application/x-lumenfolio-doc-id'
 const MAX_REFERENCE_DOCS = 4
-const mentionedDocIds = ref([])
+const MENTION_TERMINATOR = '⁠'
+const mentionRegistry = ref({})
+const composerText = ref('')
+
+// The full inline token for a label, including the invisible terminator.
+function mentionToken(label) {
+  return `@${label}${MENTION_TERMINATOR}`
+}
 const mentionPickerOpen = ref(false)
 const mentionFilter = ref('')
 const mentionActiveIndex = ref(0)
 const mentionSearchRef = ref(null)
 // Per-document composer drafts so switching tabs preserves an unsent message
-// (textarea text + chosen @-mentions). The textarea stays UNCONTROLLED (no
+// (textarea text + its mention registry). The textarea stays UNCONTROLLED (no
 // v-model) to keep IME intact; we save/restore its value imperatively on doc
 // switch. In-memory only — drafts are not persisted across app restart.
 const composerDrafts = new Map()
 
+// Doc ids currently referenced, derived from the "@<label>⁠" tokens still present
+// in the composer text (order = registry order). This is the single source of
+// truth for chips and for the send payload. Matching uses the FULL token (with
+// terminator), so it is exact — no substring collisions between labels.
+const mentionedDocIds = computed(() => {
+  const text = composerText.value
+  const ids = []
+  for (const [id, label] of Object.entries(mentionRegistry.value)) {
+    if (text.includes(mentionToken(label))) {
+      ids.push(id)
+    }
+  }
+  return ids
+})
+
+// Keep composerText in sync with the uncontrolled textarea on every input, so the
+// derived mention state (chips, count) updates as the user types or deletes "@…".
+function handleComposerInput(event) {
+  composerText.value = event.target.value
+}
+
 function captureDraft(docId) {
   if (!docId) return
   const text = composerTextareaRef.value?.value || ''
-  if (text.trim() || mentionedDocIds.value.length) {
-    composerDrafts.set(docId, { text, mentionedDocIds: [...mentionedDocIds.value] })
+  if (text.trim() || Object.keys(mentionRegistry.value).length) {
+    composerDrafts.set(docId, { text, registry: { ...mentionRegistry.value } })
   } else {
     composerDrafts.delete(docId)
   }
 }
 
 function restoreDraft(docId) {
-  const draft = composerDrafts.get(docId) || { text: '', mentionedDocIds: [] }
-  mentionedDocIds.value = [...draft.mentionedDocIds]
+  const draft = composerDrafts.get(docId) || { text: '', registry: {} }
+  mentionRegistry.value = { ...draft.registry }
+  composerText.value = draft.text
   closeMentionPicker()
   nextTick(() => {
     if (composerTextareaRef.value) composerTextareaRef.value.value = draft.text
@@ -180,27 +223,79 @@ const hasMentionableDocs = computed(() => (props.allDocuments || [])
   .some((doc) => doc && doc.id && doc.id !== props.document.id
     && doc.chatReady && !mentionedDocIds.value.includes(doc.id)))
 
+// Allocate a display label that is UNIQUE among the current registry, so two docs
+// with the same short name don't collide on one registry key / one inline token.
+function uniqueMentionLabel(baseLabel) {
+  const taken = new Set(Object.values(mentionRegistry.value))
+  if (!taken.has(baseLabel)) return baseLabel
+  let n = 2
+  while (taken.has(`${baseLabel} (${n})`)) n += 1
+  return `${baseLabel} (${n})`
+}
+
+// Insert "@<label>⁠ " (with invisible terminator) at the caret and register the
+// id -> label mapping. The text is the source of truth, so this is what makes the
+// doc a live reference.
 function addMention(id) {
   if (!id || id === props.document.id) return
   if (mentionedDocIds.value.includes(id)) return
+  if (id in mentionRegistry.value) return
   if (mentionLimitReached.value) return
-  mentionedDocIds.value = [...mentionedDocIds.value, id]
+  const doc = (props.allDocuments || []).find((item) => item.id === id)
+  if (!doc) return
+  const label = uniqueMentionLabel(docDisplayName(doc))
+  const token = `${mentionToken(label)} `
+  const textarea = composerTextareaRef.value
+  const current = textarea?.value ?? composerText.value
+  const end = textarea?.selectionEnd ?? current.length
+  // The "@" the user typed to trigger the picker may have slipped into the textarea
+  // (preventDefault doesn't reliably stop it under IME/composition). Absorb a
+  // trailing "@<partial>" immediately before the caret so we never produce "@@name".
+  let start = textarea?.selectionStart ?? current.length
+  const before = current.slice(0, start)
+  const triggerMatch = before.match(/@[^@\s]*$/)
+  if (triggerMatch) {
+    start -= triggerMatch[0].length
+  }
+  const next = current.slice(0, start) + token + current.slice(end)
+  mentionRegistry.value = { ...mentionRegistry.value, [id]: label }
+  composerText.value = next
+  if (textarea) {
+    textarea.value = next
+    const caret = start + token.length
+    nextTick(() => {
+      textarea.focus()
+      textarea.setSelectionRange(caret, caret)
+    })
+  }
   closeMentionPicker()
 }
 
-// Click-selecting an option: add it and return focus to the composer (the
-// keyboard Enter path does the same via handleMentionPickerKeydown).
+// Click-selecting an option: insert it; addMention already restores focus + caret.
 function selectMention(id) {
   addMention(id)
-  nextTick(() => composerTextareaRef.value?.focus())
 }
 
+// Chip "×": remove the doc's full "@<label>⁠" token from the text (text is truth).
 function removeMention(id) {
-  mentionedDocIds.value = mentionedDocIds.value.filter((value) => value !== id)
+  const label = mentionRegistry.value[id]
+  if (label === undefined) return
+  const token = mentionToken(label)
+  let text = composerTextareaRef.value?.value ?? composerText.value
+  // Remove the token plus an immediately-following space if present, else the
+  // bare token. Exact-match on the full token (with terminator) means no other
+  // label or normal text can be hit.
+  text = text.split(`${token} `).join('').split(token).join('')
+  composerText.value = text
+  if (composerTextareaRef.value) composerTextareaRef.value.value = text
+  const nextRegistry = { ...mentionRegistry.value }
+  delete nextRegistry[id]
+  mentionRegistry.value = nextRegistry
 }
 
 function clearMentions() {
-  mentionedDocIds.value = []
+  mentionRegistry.value = {}
+  composerText.value = ''
 }
 
 function openMentionPicker() {
@@ -258,11 +353,17 @@ function handleSubmit(event) {
   if (!chatInputEnabled.value) return
   const text = String(event.target.querySelector('textarea')?.value || '').trim()
   if (!text && !pendingImageDataUrl.value) return
+  // Sync derived state to the latest textarea value (still containing the invisible
+  // terminators), so mentionedDocIds resolves correctly, THEN strip the terminators
+  // from the outgoing text so the LLM only sees clean "@<name>".
+  composerText.value = text
+  const ids = [...mentionedDocIds.value]
+  const cleanText = text.split(MENTION_TERMINATOR).join('')
   emit('send', {
-    text: text || props.ui.imageOnlyPrompt,
+    text: cleanText || props.ui.imageOnlyPrompt,
     imageDataUrl: pendingImageDataUrl.value || '',
     imageName: pendingImageName.value || '',
-    mentionedDocIds: [...mentionedDocIds.value],
+    mentionedDocIds: ids,
   })
   event.target.reset()
   clearPendingImage()
@@ -566,6 +667,7 @@ function formatTraceStatus(status) {
 
 function traceStatusLabel(trace) {
   const status = trace?.finalizeGate?.status || ''
+  if (trace?.finalizeGate?.bestEffort === true) return props.ui.traceStatusBestEffort
   if (status === 'answerable') return props.ui.traceStatusAnswerable
   if (status === 'insufficient') return props.ui.traceStatusInsufficient
   if (status === 'needs_more_evidence') return props.ui.traceStatusSearching
@@ -818,7 +920,16 @@ function traceGateStatus(message) {
   return String(message.retrievalTrace?.finalizeGate?.status || '')
 }
 
+// True when the backend answered best-effort (gate not "answerable", but enough
+// evidence to answer with stated limits) — stamped as bestEffort on the gate.
+function traceGateBestEffort(message) {
+  return message.retrievalTrace?.finalizeGate?.bestEffort === true
+}
+
 function messageHasRetrievalIssue(message) {
+  // A best-effort answer is not an issue: it produced a real answer from the
+  // evidence even though the gate didn't formally reach "answerable".
+  if (traceGateBestEffort(message)) return false
   return message.status === 'failed' || traceGateStatus(message) === 'insufficient'
 }
 
@@ -929,6 +1040,11 @@ function agentProcessState(message) {
     return props.locale === 'zh' ? '正在查找证据' : 'Finding evidence'
   }
   if (message.status === 'failed') return props.locale === 'zh' ? '已失败' : 'Failed'
+  // Best-effort: the gate wasn't "answerable" (e.g. judge timed out) but we still
+  // answered from the gathered evidence — show that, not a failure.
+  if (traceGateBestEffort(message)) {
+    return props.locale === 'zh' ? '基于现有证据作答' : 'Answered with available evidence'
+  }
   if (traceGateStatus(message) === 'insufficient') {
     return props.locale === 'zh' ? '证据不足' : 'Insufficient evidence'
   }
@@ -945,6 +1061,11 @@ function agentProcessSubline(message) {
       : `${stats.completed} steps complete · Current: ${current}`
   }
   if (message.status === 'failed') return eventSummary(latest) || agentActivitySummary(message)
+  if (traceGateBestEffort(message)) {
+    return props.locale === 'zh'
+      ? '证据检查未完成，已基于已检索到的证据作答（详情见检索过程）'
+      : 'The evidence check did not complete; answered from the evidence gathered (see retrieval details)'
+  }
   if (traceGateStatus(message) === 'insufficient') {
     return props.locale === 'zh'
       ? '没有找到足够可靠的证据，详情里保留了检索过程'
@@ -1567,6 +1688,7 @@ function evidenceSourceLabel(source) {
                   : ui.inputPlaceholder
           "
           @keydown="handleComposerKeydown"
+          @input="handleComposerInput"
         />
 
         <div class="composer-footer">

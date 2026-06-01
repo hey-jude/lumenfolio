@@ -19,6 +19,10 @@ use crate::{
 };
 
 const M4_LLM_JUDGE_TIMEOUT_SECS: u64 = 45;
+/// One extra attempt on a judge timeout/error before giving up — the provider is
+/// often just briefly slow, and a single retry recovers most of those without
+/// stalling the whole turn.
+const M4_LLM_JUDGE_MAX_TRIES: u32 = 2;
 
 pub(crate) struct LlmJudgeLoopInput<'a> {
     pub(crate) input: &'a AskDocumentInput,
@@ -120,26 +124,54 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                 format!("llm_judge attempt={} checking answerability", attempt + 1),
             ),
         );
-        let judge_result = tokio::time::timeout(
-            Duration::from_secs(M4_LLM_JUDGE_TIMEOUT_SECS),
-            llm::chat::judge_answerability_with_openai_compatible(
-                ctx.question,
-                &agent_run.retrieval_run.intent,
-                &agent_run.retrieval_run.citations,
-                &tool_feedback,
-                ctx.provider,
-                &agent_run.retrieval_run.context_budget,
-            ),
-        )
-        .await
-        .map_err(|_| format!("M4 LLM judge timed out after {M4_LLM_JUDGE_TIMEOUT_SECS}s"));
+        // Retry once on timeout/error: the provider is often just briefly slow, so
+        // a single retry recovers most blips without aborting the turn.
+        let mut judge_result: Result<Result<_, String>, String> =
+            Err("M4 LLM judge not attempted".to_string());
+        for try_index in 0..M4_LLM_JUDGE_MAX_TRIES {
+            judge_result = tokio::time::timeout(
+                Duration::from_secs(M4_LLM_JUDGE_TIMEOUT_SECS),
+                llm::chat::judge_answerability_with_openai_compatible(
+                    ctx.question,
+                    &agent_run.retrieval_run.intent,
+                    &agent_run.retrieval_run.citations,
+                    &tool_feedback,
+                    ctx.provider,
+                    &agent_run.retrieval_run.context_budget,
+                ),
+            )
+            .await
+            .map_err(|_| format!("M4 LLM judge timed out after {M4_LLM_JUDGE_TIMEOUT_SECS}s"));
+            if matches!(judge_result, Ok(Ok(_))) {
+                break;
+            }
+            if try_index + 1 < M4_LLM_JUDGE_MAX_TRIES {
+                emit_agent_activity_optional(
+                    ctx.app,
+                    ctx.activity_event_id,
+                    runtime::agent::AgentTraceEvent::new(
+                        "judge_retry",
+                        "finalize_answer",
+                        "running",
+                        "Retrying evidence check",
+                        "The evidence check did not respond in time; retrying once",
+                        "llm_judge timed out or errored; retrying once".to_string(),
+                    ),
+                );
+            }
+        }
         let mut decision = match judge_result {
             Ok(Ok(decision)) => decision,
             Ok(Err(err)) | Err(err) => {
+                // The judge itself failed (timeout/error) even after the retry. The
+                // gate stays "insufficient" — we did NOT get a positive answerability
+                // verdict — but the downstream best-effort path may still answer from
+                // the evidence already gathered. So the wording must not claim we are
+                // "refusing to fall back": that fallback exists.
                 let gate = serde_json::json!({
                     "status": "insufficient",
                     "reason": format!(
-                        "M4 LLM judge request failed; refusing to fall back to local answerability: {err}"
+                        "The evidence check was unavailable ({err}); answering from the evidence already gathered if there is enough."
                     ),
                     "missing": serde_json::json!(["LLM evidence judge"]),
                     "nextToolCall": serde_json::Value::Null,
@@ -157,8 +189,8 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                     "finalize_answer",
                     "error",
                     "M4 LLM evidence check",
-                    "Judge request failed; refusing to fall back to local answerability",
-                    format!("llm_judge required but unavailable: {err}"),
+                    "Evidence check unavailable; will answer from gathered evidence if sufficient",
+                    format!("llm_judge unavailable after retry: {err}"),
                 )
                 .with_judge(gate);
                 emit_agent_activity_optional(ctx.app, ctx.activity_event_id, event.clone());

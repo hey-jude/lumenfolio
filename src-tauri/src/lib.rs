@@ -2113,6 +2113,22 @@ async fn run_ask_document(
         });
     }
 
+    // We're answering. If the gate never reached "answerable" (e.g. the judge
+    // timed out) but we have enough evidence to answer best-effort, stamp the gate
+    // so the UI shows "answered with available evidence" instead of "insufficient".
+    if !agent_judge::has_image_context(&input)
+        && agent_judge::should_answer_best_effort(&agent_run)
+    {
+        for gate in [
+            &mut agent_run.retrieval_run.trace.finalize_gate,
+            &mut agent_run.trace.finalize_gate,
+        ] {
+            if let Some(object) = gate.as_object_mut() {
+                object.insert("bestEffort".to_string(), serde_json::Value::Bool(true));
+            }
+        }
+    }
+
     let (provider, provider_label) = provider_result?;
     if let Some(event_id) = activity_event_id.as_deref() {
         let _ = app.emit(
