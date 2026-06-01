@@ -12,6 +12,7 @@ const defaultPython = join(appRoot, '.venv-pdf2zh', 'Scripts', 'python.exe')
 const buildRoot = join(appRoot, 'artifacts', 'pdf2zh-windows-build')
 const args = new Set(process.argv.slice(2))
 const skipInstall = args.has('--skip-install')
+const skipReadiness = args.has('--skip-readiness')
 const clean = args.has('--clean')
 const requireWindows = process.env.LUMENFOLIO_PDF2ZH_REQUIRE_WINDOWS === '1'
 
@@ -119,13 +120,16 @@ async function main() {
     fail(`PyInstaller completed but did not create ${outputExe}`)
   }
 
-  run(npmCommand(), ['run', 'check:pdf2zh-windows-readiness'])
+  if (!skipReadiness) {
+    run(npmCommand(), ['run', 'check:pdf2zh-windows-readiness'])
+  }
 
   console.log(JSON.stringify({
     ok: true,
     python,
     pythonVersion,
     outputExe,
+    readinessChecked: !skipReadiness,
   }, null, 2))
 }
 

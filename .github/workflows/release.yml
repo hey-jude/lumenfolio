@@ -152,7 +152,14 @@ jobs:
         if: matrix.sidecar_runtime == 'windows'
         run: |
           npm run setup:pdf2zh
-          npm run build:pdf2zh-runtime:windows -- --clean
+          npm run build:pdf2zh-runtime:windows -- --clean --skip-readiness
+
+      - name: Verify bundled PDF2ZH runtime for Windows
+        if: matrix.sidecar_runtime == 'windows'
+        env:
+          LUMENFOLIO_PDF2ZH_REQUIRE_WINDOWS: "1"
+          LUMENFOLIO_PDF2ZH_WINDOWS_PROBE_TIMEOUT_MS: "300000"
+        run: npm run check:pdf2zh-windows-readiness
 
       - name: Verify bundled PDF2ZH release runtime
         env:
