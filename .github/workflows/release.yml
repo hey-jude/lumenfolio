@@ -45,8 +45,8 @@ jobs:
               'Automated Lumenfolio desktop release.',
               '',
               'Artifacts:',
-              '- macOS Intel: x86_64 DMG, ad-hoc signed unless Developer ID signing is added later.',
-              '- macOS Apple Silicon: arm64 DMG, ad-hoc signed unless Developer ID signing is added later.',
+              '- macOS Intel: x86_64 .app.zip, ad-hoc signed unless Developer ID signing is added later.',
+              '- macOS Apple Silicon: arm64 .app.zip, ad-hoc signed unless Developer ID signing is added later.',
               '- Windows: x86_64 MSI.',
               '',
               'This release bundles the PDFMathTranslate/pdf2zh sidecar runtime. See THIRD_PARTY_NOTICES.md for AGPL and source availability notes.',
@@ -92,21 +92,24 @@ jobs:
           - label: macOS Intel
             os: macos-15-intel
             target: x86_64-apple-darwin
-            bundles: dmg
+            bundles: app
             sidecar_runtime: macos
             python_arch: x64
+            asset_suffix: macos-x86_64
           - label: macOS Apple Silicon
             os: macos-15
             target: aarch64-apple-darwin
-            bundles: dmg
+            bundles: app
             sidecar_runtime: macos
             python_arch: arm64
+            asset_suffix: macos-arm64
           - label: Windows x86_64
             os: windows-2025
             target: x86_64-pc-windows-msvc
             bundles: msi
             sidecar_runtime: windows
             python_arch: x64
+            asset_suffix: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
@@ -166,11 +169,24 @@ jobs:
           LUMENFOLIO_PDF2ZH_REQUIRE_RELEASE_RUNTIME: "1"
         run: npm run check:pdf2zh-release
 
-      - name: Build and upload Tauri bundle
+      - name: Build and upload macOS app bundle
+        if: matrix.sidecar_runtime == 'macos'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ needs.create-release.outputs.tag_name }}
+          APPLE_SIGNING_IDENTITY: "-"
+        run: |
+          npm run tauri -- build --target ${{ matrix.target }} --bundles app
+          ditto -c -k --keepParent \
+            "src-tauri/target/${{ matrix.target }}/release/bundle/macos/Lumenfolio.app" \
+            "Lumenfolio_${TAG_NAME}_${{ matrix.asset_suffix }}.app.zip"
+          gh release upload "$TAG_NAME" "Lumenfolio_${TAG_NAME}_${{ matrix.asset_suffix }}.app.zip" --clobber
+
+      - name: Build and upload Windows MSI bundle
+        if: matrix.sidecar_runtime == 'windows'
         uses: tauri-apps/tauri-action@action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_SIGNING_IDENTITY: ${{ matrix.sidecar_runtime == 'macos' && '-' || '' }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
