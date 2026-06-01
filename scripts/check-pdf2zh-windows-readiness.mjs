@@ -22,6 +22,10 @@ function assert(condition, message) {
   if (!condition) fail(message)
 }
 
+function formatEvent(event) {
+  return JSON.stringify(event || null, null, 2)
+}
+
 function runtimeCommand() {
   if (existsSync(frozenExe)) {
     return { program: frozenExe, args: [] }
@@ -118,8 +122,14 @@ async function main() {
   const command = runtimeCommand()
   const probe = await runProbe(command, payload)
   const probeResult = probe.events.at(-1)
-  assert(probeResult?.event === 'probe_result', 'probe did not finish with probe_result')
-  assert(probeResult.status === 'succeeded', 'probe did not report succeeded status')
+  assert(
+    probeResult?.event === 'probe_result',
+    `probe did not finish with probe_result. Last event:\n${formatEvent(probeResult)}`,
+  )
+  assert(
+    probeResult.status === 'succeeded',
+    `probe did not report succeeded status. Last event:\n${formatEvent(probeResult)}`,
+  )
   console.log(JSON.stringify({
     ok: true,
     appDataRoot,
