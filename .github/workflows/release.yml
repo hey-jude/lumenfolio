@@ -18,7 +18,6 @@ env:
   NODE_VERSION: "20"
   PYTHON_VERSION: "3.12"
   RUST_VERSION: "1.89.0"
-  TAURI_RUST_FEATURES: "ocr-onnx"
 
 jobs:
   create-release:
@@ -97,6 +96,7 @@ jobs:
             sidecar_runtime: macos
             python_arch: x64
             asset_suffix: macos-x86_64
+            tauri_feature_args: ""
           - label: macOS Apple Silicon
             os: macos-15
             target: aarch64-apple-darwin
@@ -104,6 +104,7 @@ jobs:
             sidecar_runtime: macos
             python_arch: arm64
             asset_suffix: macos-arm64
+            tauri_feature_args: "--features ocr-onnx"
           - label: Windows x86_64
             os: windows-2025
             target: x86_64-pc-windows-msvc
@@ -111,6 +112,7 @@ jobs:
             sidecar_runtime: windows
             python_arch: x64
             asset_suffix: windows-x86_64
+            tauri_feature_args: "--features ocr-onnx"
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
@@ -216,7 +218,7 @@ jobs:
             echo "Uploaded ${asset_name}"
           }
 
-          npm run tauri -- build --target ${{ matrix.target }} --features "${TAURI_RUST_FEATURES}" --bundles app
+          npm run tauri -- build --target ${{ matrix.target }} ${{ matrix.tauri_feature_args }} --bundles app
           ditto -c -k --keepParent \
             "src-tauri/target/${{ matrix.target }}/release/bundle/macos/Lumenfolio.app" \
             "Lumenfolio_${TAG_NAME}_${{ matrix.asset_suffix }}.app.zip"
@@ -229,7 +231,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --target ${{ matrix.target }} --features ${{ env.TAURI_RUST_FEATURES }} --bundles ${{ matrix.bundles }}
+          args: --target ${{ matrix.target }} ${{ matrix.tauri_feature_args }} --bundles ${{ matrix.bundles }}
 
   upload-notices:
     name: Upload legal notices
