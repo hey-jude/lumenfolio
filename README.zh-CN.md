@@ -2,6 +2,14 @@
   <img src="./src/assets/lumenfolio-logo-transparent.png" alt="Lumenfolio logo" width="96">
   <h1>Lumenfolio</h1>
   <p><strong>本地优先的桌面 PDF AI 阅读工作区</strong></p>
+  <p>
+    <a href="https://github.com/tanghui315/lumenfolio/releases/latest"><strong>下载应用</strong></a>
+    ·
+    <a href="./docs/assets/lumenfolio-demo.gif"><strong>观看演示</strong></a>
+    ·
+    <a href="https://github.com/tanghui315/lumenfolio/issues"><strong>反馈问题</strong></a>
+  </p>
+  <p>支持 macOS Intel、macOS Apple Silicon 和 Windows x86_64。</p>
   <p><a href="./README.md">English README</a></p>
 </div>
 
