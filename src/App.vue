@@ -2026,6 +2026,15 @@ function formatPdfTranslationError(message) {
   return '翻译不可用：Google Web / Microsoft(Bing) Web 均未通过网络检测。请检查网络/代理，或切换到 LLM Provider。'
 }
 
+// Map a backend index error to a user-facing message. Scanned/image-only PDFs
+// surface the SCANNED_PDF_NO_TEXT sentinel (see pdf_index/mod.rs) which we turn
+// into a localized, friendly explanation instead of a raw Pdfium error.
+function formatIndexError(message) {
+  const text = String(message || '')
+  if (text.includes('SCANNED_PDF_NO_TEXT')) return ui.value.scannedPdfUnsupported
+  return text
+}
+
 // TEMP perf probe: measures the synchronous click cost plus the duration of
 // the next several animation frames. A long frame gap (>>16ms) right after the
 // click reveals where the jank is (Vue DOM patch vs. browser layout/paint).
@@ -2556,7 +2565,7 @@ function handleDocumentIndexFailed(payload) {
   selectedDocument.value.visualIndexVersion = 0
   selectedDocument.value.visualIndexError = ''
   selectedDocument.value.translation.error = payload?.error || ''
-  workspaceError.value = payload?.error ? `Index failed: ${payload.error}` : ''
+  workspaceError.value = payload?.error ? formatIndexError(payload.error) : ''
 }
 
 function scheduleDocumentVisualIndex(doc) {
@@ -3038,9 +3047,11 @@ function handleDocumentIndexEvent(payload) {
       payload.stageLabel || '',
     )
     target.backendIndexFailed = true
-    workspaceError.value = payload.error
-      ? `Backend reindex failed, falling back to PDF.js: ${payload.error}`
-      : 'Backend reindex failed, falling back to PDF.js'
+    workspaceError.value = String(payload.error || '').includes('SCANNED_PDF_NO_TEXT')
+      ? ui.value.scannedPdfUnsupported
+      : payload.error
+        ? `Backend reindex failed, falling back to PDF.js: ${payload.error}`
+        : 'Backend reindex failed, falling back to PDF.js'
     if (selectedDocId.value === documentId) {
       viewerReloadKey.value += 1
     }
