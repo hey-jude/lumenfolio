@@ -670,8 +670,20 @@ fn run_document_reindex_job(
         document_id,
         &pdf_path,
         |progress| {
-            let percent = progress_percent(10, 65, progress.page_done, progress.page_total);
-            let stage_label = if progress.page_finished {
+            let percent = if progress.ocr_running {
+                // Advance into the CURRENT page's slot (use page_current, not
+                // page_done) so a single-page scan visibly moves off 10% while
+                // OCR runs instead of looking frozen.
+                progress_percent(10, 65, progress.page_current, progress.page_total)
+            } else {
+                progress_percent(10, 65, progress.page_done, progress.page_total)
+            };
+            let stage_label = if progress.ocr_running {
+                format!(
+                    "Recognizing scanned text (OCR) page {}/{}",
+                    progress.page_current, progress.page_total
+                )
+            } else if progress.page_finished {
                 format!(
                     "Extracted PDF text page {}/{}",
                     progress.page_done, progress.page_total

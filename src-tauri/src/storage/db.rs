@@ -173,6 +173,7 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           caption TEXT NOT NULL DEFAULT '',
           bbox_json TEXT NOT NULL DEFAULT '[]',
           image_path TEXT NOT NULL DEFAULT '',
+          ocr_text TEXT NOT NULL DEFAULT '',
           nearby_text TEXT NOT NULL DEFAULT '',
           linked_block_ids_json TEXT NOT NULL DEFAULT '[]',
           source TEXT NOT NULL DEFAULT 'pdf_bbox',
@@ -485,6 +486,15 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         "documents",
         "index_version",
         "ALTER TABLE documents ADD COLUMN index_version INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // Recognized text inside figure/chart/image crops (OCR). The crop image
+    // itself (image_path) is always preserved as the primary evidence; this
+    // only ADDS searchable text alongside it.
+    ensure_column(
+        conn,
+        "document_visual_assets",
+        "ocr_text",
+        "ALTER TABLE document_visual_assets ADD COLUMN ocr_text TEXT NOT NULL DEFAULT ''",
     )?;
     ensure_column(
         conn,

@@ -44,6 +44,11 @@ const tsrFeatureEnabled =
   process.env.LUMENFOLIO_TSR_ONNX === '1' ||
   (process.env.LUMENFOLIO_TSR_ONNX !== '0' && fs.existsSync(defaultTsrModel))
 
+const defaultOcrModel = path.join(rootDir, '.models', 'ocr', 'ch_PP-OCRv4_det_infer.onnx')
+const ocrFeatureEnabled =
+  process.env.LUMENFOLIO_OCR_ONNX === '1' ||
+  (process.env.LUMENFOLIO_OCR_ONNX !== '0' && fs.existsSync(defaultOcrModel))
+
 const configOverride = {
   build: {
     devUrl,
@@ -53,10 +58,15 @@ const configOverride = {
 
 console.log(`[lumenfolio] using dev server ${devUrl}`)
 console.log(`[lumenfolio] Rust TSR ONNX ${tsrFeatureEnabled ? 'enabled' : 'disabled'}`)
+console.log(`[lumenfolio] Rust OCR ONNX ${ocrFeatureEnabled ? 'enabled' : 'disabled'}`)
 
 const tauriArgs = ['tauri', 'dev']
-if (tsrFeatureEnabled) {
-  tauriArgs.push('--features', 'tsr-onnx')
+const cargoFeatures = [
+  ...(tsrFeatureEnabled ? ['tsr-onnx'] : []),
+  ...(ocrFeatureEnabled ? ['ocr-onnx'] : []),
+]
+if (cargoFeatures.length) {
+  tauriArgs.push('--features', cargoFeatures.join(','))
 }
 tauriArgs.push('--config', JSON.stringify(configOverride), ...process.argv.slice(2))
 

@@ -2,6 +2,14 @@
   <img src="./src/assets/lumenfolio-logo-transparent.png" alt="Lumenfolio logo" width="96">
   <h1>Lumenfolio</h1>
   <p><strong>Local-first desktop AI reading workspace for academic PDFs.</strong></p>
+  <p>
+    <a href="https://github.com/tanghui315/lumenfolio/releases/latest"><strong>Download</strong></a>
+    ·
+    <a href="./docs/assets/lumenfolio-demo.gif"><strong>Watch Demo</strong></a>
+    ·
+    <a href="https://github.com/tanghui315/lumenfolio/issues"><strong>Give Feedback</strong></a>
+  </p>
+  <p>Available for macOS Intel, macOS Apple Silicon, and Windows x86_64.</p>
   <p><a href="./README.zh-CN.md">中文文档 (Chinese README)</a></p>
 </div>
 

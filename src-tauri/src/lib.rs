@@ -3891,6 +3891,20 @@ pub fn run() {
             update_document_reading_state
         ])
         .setup(|app| {
+            // Tell the model loader where the bundled `.models/` lives. In a
+            // packaged app the resources sit under the Tauri resource dir; a
+            // `../.models/...` bundle entry is flattened to `<resource>/_up_/.models`.
+            // We register whichever candidate actually contains `.models` so the
+            // shared path-resolution logic finds TSR/OCR models in dev and prod.
+            if let Ok(resource_dir) = app.path().resource_dir() {
+                for candidate in [resource_dir.join("_up_"), resource_dir.clone()] {
+                    if candidate.join(".models").is_dir() {
+                        vision::register_resource_models_dir(candidate);
+                        break;
+                    }
+                }
+            }
+
             let app_data_dir = app
                 .path()
                 .app_data_dir()

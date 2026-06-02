@@ -15,6 +15,12 @@ use crate::{
     PageIndexInput, TextUnitIndexInput, UpsertDocumentIndexInput,
 };
 
+/// Stable sentinel returned when a PDF has pages but no extractable text layer
+/// (scanned / image-only). The frontend matches on this exact string to show a
+/// localized "scanned PDF, OCR not supported yet" message. Keep in sync with
+/// the matcher in src/App.vue.
+pub(crate) const SCANNED_PDF_NO_TEXT_ERROR: &str = "SCANNED_PDF_NO_TEXT";
+
 #[derive(Clone)]
 struct PdfTextRect {
     text: String,
@@ -88,6 +94,10 @@ pub(super) struct PdfIndexProgress {
     pub block_count: usize,
     pub line_count: usize,
     pub page_finished: bool,
+    /// True for the tick emitted just before OCR runs on a scanned page, so the
+    /// UI can show "running OCR on page X" instead of a frozen bar (OCR is the
+    /// slowest single step and produces no sub-page progress).
+    pub ocr_running: bool,
     pub layout_confidence: Option<f64>,
     pub region_count: Option<usize>,
     pub two_column_detected: Option<bool>,
@@ -136,6 +146,7 @@ pub(super) fn build_document_index_from_pdfium_with_progress(
             block_count: extracted_blocks,
             line_count: extracted_lines,
             page_finished: false,
+            ocr_running: false,
             layout_confidence: None,
             region_count: None,
             two_column_detected: None,
@@ -180,6 +191,32 @@ pub(super) fn build_document_index_from_pdfium_with_progress(
                 is_usable_pdf_text_rect(&rect, width, height).then_some(rect)
             })
             .collect::<Vec<_>>();
+        // Scanned / image-only page: pdfium found no text layer. Try OCR to
+        // recover text + boxes so the page becomes a first-class indexed page
+        // (searchable, quotable, annotatable). We render the page bitmap from
+        // THIS already-open `page` handle and hand the pixels to OCR — OCR must
+        // not re-bind pdfium while this document is live (that deadlocks under
+        // pdfium's thread_safe global lock). Without `ocr-onnx` or when models
+        // are absent this yields no rects and we fall through to zero-text.
+        let rects = if rects.is_empty() {
+            // Signal the slow OCR step so the UI shows "running OCR on page X"
+            // rather than a frozen bar while the model runs.
+            on_progress(PdfIndexProgress {
+                page_current: page_no,
+                page_done: page_no.saturating_sub(1),
+                page_total: page_count,
+                block_count: extracted_blocks,
+                line_count: extracted_lines,
+                page_finished: false,
+                ocr_running: true,
+                layout_confidence: None,
+                region_count: None,
+                two_column_detected: None,
+            });
+            ocr_rects_for_page(&page, page_no, width, height)
+        } else {
+            rects
+        };
         let page_input =
             build_pdfium_page_index_with_layout(document_id, page_no, width, height, rects);
         extracted_blocks += page_input.page.blocks.len();
@@ -191,6 +228,7 @@ pub(super) fn build_document_index_from_pdfium_with_progress(
             block_count: extracted_blocks,
             line_count: extracted_lines,
             page_finished: true,
+            ocr_running: false,
             layout_confidence: Some(page_input.layout_summary.confidence),
             region_count: Some(page_input.layout_summary.region_count),
             two_column_detected: Some(page_input.layout_summary.two_column_detected),
@@ -199,6 +237,14 @@ pub(super) fn build_document_index_from_pdfium_with_progress(
     }
 
     if extracted_blocks == 0 {
+        // No pdfium text layer AND OCR (per-page fallback above) recovered
+        // nothing either — either a scanned doc whose OCR found no text, or a
+        // build without the `ocr-onnx` feature / missing models. Surface the
+        // stable sentinel the frontend maps to a friendly, localized "scanned
+        // PDF, OCR unavailable" message (rather than a cryptic Pdfium error).
+        if page_count > 0 {
+            return Err(SCANNED_PDF_NO_TEXT_ERROR.to_string());
+        }
         return Err("Pdfium did not extract any usable text blocks from this PDF".to_string());
     }
 
@@ -413,6 +459,71 @@ fn total_f64_cmp(left: f64, right: f64) -> Ordering {
     left.total_cmp(&right)
 }
 
+/// Run OCR on a page that has no pdfium text layer and convert the recognized
+/// lines into `PdfTextRect`s in the page's point-coordinate space. OCR returns
+/// normalized (0..1) top-down bboxes; `PdfTextRect.y` is also top-down (it is
+/// stored as `height - top`), so no axis flip is needed — just scale by the
+/// page width/height. Failures (or OCR disabled) yield an empty vec, leaving
+/// the existing zero-text handling intact.
+fn ocr_rects_for_page(
+    page: &pdfium_render::prelude::PdfPage<'_>,
+    page_no: u32,
+    page_width: f64,
+    page_height: f64,
+) -> Vec<PdfTextRect> {
+    use pdfium_render::prelude::PdfRenderConfig;
+
+    // Render this page to a bitmap using the already-open page handle (no new
+    // pdfium binding — that would deadlock). 1600px target width matches the
+    // size the OCR models were validated against.
+    let rendered = match page.render_with_config(
+        &PdfRenderConfig::new()
+            .set_target_width(1600)
+            .render_annotations(false)
+            .render_form_data(false),
+    ) {
+        Ok(rendered) => rendered.as_image().to_rgba8(),
+        Err(err) => {
+            log::warn!("OCR page render failed for page {page_no}: {err}");
+            return Vec::new();
+        }
+    };
+    let (img_w, img_h) = (rendered.width(), rendered.height());
+    let lines = match vision::ocr_recognize_image_rgba(rendered.as_raw(), img_w, img_h) {
+        Ok(lines) => lines,
+        Err(err) => {
+            log::warn!("OCR failed for page {page_no}: {err}");
+            return Vec::new();
+        }
+    };
+    let mut rects = Vec::new();
+    for (source_order, line) in lines.into_iter().enumerate() {
+        let [nx0, ny0, nx1, ny1] = line.bbox;
+        let x = nx0 * page_width;
+        let y = ny0 * page_height;
+        let w = ((nx1 - nx0) * page_width).max(1.0);
+        let h = ((ny1 - ny0) * page_height).max(1.0);
+        let rect = PdfTextRect {
+            text: line.text,
+            source_order: source_order as u32,
+            x,
+            y,
+            width: w,
+            height: h,
+            // OCR has no font metadata; use the line height as a reasonable
+            // font-size proxy so downstream layout heuristics behave.
+            font_size: h,
+            font_name: String::new(),
+            font_flags: 0,
+            baseline: None,
+        };
+        if is_usable_pdf_text_rect(&rect, page_width, page_height) {
+            rects.push(rect);
+        }
+    }
+    rects
+}
+
 fn is_usable_pdf_text_rect(rect: &PdfTextRect, page_width: f64, page_height: f64) -> bool {
     if ![
         rect.x,
@@ -566,6 +677,13 @@ mod tests {
     use super::*;
     use serde::Deserialize;
     use std::path::Path;
+
+    #[test]
+    fn scanned_pdf_sentinel_is_stable() {
+        // The frontend (src/App.vue formatIndexError / scanned-pdf matcher) keys
+        // off this exact value. Changing it requires updating the frontend too.
+        assert_eq!(SCANNED_PDF_NO_TEXT_ERROR, "SCANNED_PDF_NO_TEXT");
+    }
 
     fn rect(text: &str, x: f64, y: f64, width: f64) -> PdfTextRect {
         PdfTextRect {

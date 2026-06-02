@@ -262,6 +262,10 @@ fn mark_visual_index_job_failed_db(
 struct VisualCropUpdate {
     asset_id: String,
     crop_path: String,
+    /// OCR text recognized inside the crop. The crop image is still kept as the
+    /// primary evidence; this is additive searchable text (empty when OCR is
+    /// disabled or finds nothing).
+    ocr_text: String,
 }
 
 struct TsrRecognitionPlan {
@@ -353,9 +357,14 @@ fn enrich_visual_assets_with_rust_crops(
         }
         match vision::render_visual_asset_crop(&pdf_path, &asset) {
             Ok(Some(crop_path)) if !crop_path.trim().is_empty() => {
+                // Recognize any text inside the crop and store it ALONGSIDE the
+                // crop image (the image itself stays as the primary evidence for
+                // multimodal use). OCR failure must never drop the crop.
+                let ocr_text = ocr_text_for_crop(&crop_path);
                 updates.push(VisualCropUpdate {
                     asset_id: asset.id,
                     crop_path,
+                    ocr_text,
                 });
             }
             Ok(_) => {}
@@ -371,6 +380,44 @@ fn enrich_visual_assets_with_rust_crops(
     }
     write_visual_crop_updates(database, document_id, updates)?;
     Ok(())
+}
+
+/// OCR the recognized text inside a rendered crop image. Returns an empty
+/// string when OCR is disabled (no `ocr-onnx` feature), the file can't be read,
+/// or nothing is recognized — the crop image is never affected.
+#[cfg(feature = "ocr-onnx")]
+fn ocr_text_for_crop(crop_path: &str) -> String {
+    let path = crop_path.trim();
+    if path.is_empty() {
+        return String::new();
+    }
+    let image = match image::ImageReader::open(path).and_then(|reader| reader.decode().map_err(
+        |err| std::io::Error::new(std::io::ErrorKind::InvalidData, err),
+    )) {
+        Ok(image) => image.to_rgba8(),
+        Err(err) => {
+            log::warn!("OCR skipped for crop {path}: {err}");
+            return String::new();
+        }
+    };
+    let (w, h) = (image.width(), image.height());
+    match vision::ocr_recognize_image_rgba(image.as_raw(), w, h) {
+        Ok(lines) => lines
+            .into_iter()
+            .map(|line| line.text)
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Err(err) => {
+            log::warn!("OCR failed for crop {path}: {err}");
+            String::new()
+        }
+    }
+}
+
+#[cfg(not(feature = "ocr-onnx"))]
+fn ocr_text_for_crop(_crop_path: &str) -> String {
+    String::new()
 }
 
 fn load_visual_crop_plan(
@@ -410,7 +457,13 @@ fn write_visual_crop_updates(
         .transaction()
         .map_err(|err| format!("Failed to start visual crop update transaction: {err}"))?;
     for update in updates {
-        update_visual_asset_crop_path(&tx, document_id, &update.asset_id, &update.crop_path)?;
+        update_visual_asset_crop_path(
+            &tx,
+            document_id,
+            &update.asset_id,
+            &update.crop_path,
+            &update.ocr_text,
+        )?;
     }
     tx.commit()
         .map_err(|err| format!("Failed to commit visual crop updates: {err}"))
@@ -559,14 +612,19 @@ fn update_visual_asset_crop_path(
     document_id: &str,
     asset_id: &str,
     crop_path: &str,
+    ocr_text: &str,
 ) -> Result<(), String> {
+    // image_path is set to the (preserved) crop; ocr_text is only overwritten
+    // when we actually recognized something, so a re-run without OCR never
+    // wipes previously stored text.
     tx.execute(
         "UPDATE document_visual_assets
          SET image_path = ?3,
+             ocr_text = CASE WHEN ?4 != '' THEN ?4 ELSE ocr_text END,
              source = CASE WHEN source = '' THEN 'pdf_crop' ELSE source END,
              confidence = max(confidence, 0.72)
          WHERE id = ?1 AND document_id = ?2",
-        params![asset_id, document_id, crop_path],
+        params![asset_id, document_id, crop_path, ocr_text],
     )
     .map_err(|err| format!("Failed to update visual asset crop path: {err}"))?;
     Ok(())
