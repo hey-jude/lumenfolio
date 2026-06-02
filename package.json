@@ -1,6 +1,6 @@
 {
   "name": "lumenfolio-desktop-prototype",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
@@ -16,6 +16,7 @@
     "tauri:dev": "node scripts/tauri-dev.mjs",
     "tauri:dev:pdf2zh": "node scripts/tauri-dev-pdf2zh.mjs",
     "setup:pdf2zh": "node scripts/setup-pdf2zh-runtime.mjs",
+    "fetch:models": "node scripts/fetch-models.mjs",
     "smoke:pdf2zh": "node scripts/smoke-pdf2zh-worker.mjs",
     "qa:pdf2zh": "node scripts/qa-pdf2zh-samples.mjs",
     "perf:pdf2zh": "node scripts/perf-pdf2zh-samples.mjs",
