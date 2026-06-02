@@ -1,6 +1,6 @@
 [package]
 name = "lumenfolio_desktop"
-version = "0.1.3"
+version = "0.1.4"
 description = "Lumenfolio shell"
 authors = ["Sotarium"]
 license = ""
@@ -21,6 +21,7 @@ tauri-build = { version = "2.5.6", features = [] }
 [features]
 default = []
 tsr-onnx = ["dep:image", "dep:ort"]
+ocr-onnx = ["dep:image", "dep:ort"]
 
 [dependencies]
 base64 = "0.22"

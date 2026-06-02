@@ -3177,6 +3177,7 @@ struct VisualAssetHit {
     caption_bbox_list: serde_json::Value,
     image_path: String,
     nearby_text: String,
+    ocr_text: String,
     source: String,
     confidence: f64,
     score: f64,
@@ -3345,6 +3346,7 @@ fn load_visual_caption_assets(
                 caption_bbox_list,
                 image_path: String::new(),
                 nearby_text: String::new(),
+                ocr_text: String::new(),
                 source: "caption".to_string(),
                 confidence: 0.62,
                 score: 1.0,
@@ -4512,7 +4514,7 @@ fn ranked_visual_hits(
     let mut stmt = conn
         .prepare(
             "SELECT id, document_id, page_no, asset_type, caption, bbox_json, image_path,
-                    nearby_text, source, confidence
+                    nearby_text, ocr_text, source, confidence
              FROM document_visual_assets
              WHERE document_id = ?1
              ORDER BY page_no",
@@ -4525,7 +4527,11 @@ fn ranked_visual_hits(
                 serde_json::from_str(&bbox_json).unwrap_or_else(|_| serde_json::json!([]));
             let caption = row.get::<_, String>(4)?;
             let nearby_text = row.get::<_, String>(7)?;
-            let haystack = format!("{caption} {nearby_text}").to_lowercase();
+            // OCR text recovered from inside the figure/chart/image crop makes
+            // the picture's own words searchable, alongside its caption and the
+            // surrounding body text.
+            let ocr_text = row.get::<_, String>(8)?;
+            let haystack = format!("{caption} {nearby_text} {ocr_text}").to_lowercase();
             let mut score = relevance_score_from_terms(&haystack, &terms);
             if let Some(requested) = requested_anchor.as_ref() {
                 if visual_caption_number(&caption).as_deref() == Some(requested.number.as_str()) {
@@ -4542,8 +4548,9 @@ fn ranked_visual_hits(
                 caption_bbox_list: serde_json::json!([]),
                 image_path: row.get(6)?,
                 nearby_text,
-                source: row.get(8)?,
-                confidence: row.get(9)?,
+                ocr_text,
+                source: row.get(9)?,
+                confidence: row.get(10)?,
                 score,
             })
         })
@@ -4613,7 +4620,7 @@ fn open_visuals(
         let mut stmt = conn
             .prepare(
                 "SELECT id, document_id, page_no, asset_type, caption, bbox_json, image_path,
-                        nearby_text, source, confidence
+                        nearby_text, ocr_text, source, confidence
                  FROM document_visual_assets
                  WHERE document_id = ?1 AND id = ?2
                  LIMIT 1",
@@ -4633,8 +4640,9 @@ fn open_visuals(
                 caption_bbox_list: serde_json::json!([]),
                 image_path: row.get(6)?,
                 nearby_text: row.get(7)?,
-                source: row.get(8)?,
-                confidence: row.get(9)?,
+                ocr_text: row.get(8)?,
+                source: row.get(9)?,
+                confidence: row.get(10)?,
                 score: 1.0,
             })
         });
@@ -4740,6 +4748,17 @@ fn visual_hit_to_object_candidate(hit: &VisualAssetHit) -> EvidenceCandidate {
     }
 }
 
+/// Render the in-image OCR text as a labeled evidence line, or nothing when
+/// empty (most images have no recoverable text, so we don't add a blank field).
+fn visual_ocr_text_suffix(ocr_text: &str) -> String {
+    let trimmed = ocr_text.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("\nText in image (OCR): {trimmed}")
+    }
+}
+
 fn visual_hit_to_candidate(hit: &VisualAssetHit) -> EvidenceCandidate {
     let crop = if hit.image_path.trim().is_empty() {
         "cropPath unavailable"
@@ -4753,8 +4772,12 @@ fn visual_hit_to_candidate(hit: &VisualAssetHit) -> EvidenceCandidate {
         block_id: hit.id.clone(),
         section_title: Some(format!("{} on page {}", hit.asset_type, hit.page_no)),
         quote: format!(
-            "Visual asset: {}\nCaption: {}\nNearby text: {}\n{}",
-            hit.asset_type, hit.caption, hit.nearby_text, crop
+            "Visual asset: {}\nCaption: {}\nNearby text: {}{}\n{}",
+            hit.asset_type,
+            hit.caption,
+            hit.nearby_text,
+            visual_ocr_text_suffix(&hit.ocr_text),
+            crop
         ),
         bbox_list: hit.bbox_list.clone(),
         score: hit.score,
@@ -4777,8 +4800,13 @@ fn visual_hit_to_open_candidate(hit: &VisualAssetHit) -> EvidenceCandidate {
         block_id: hit.id.clone(),
         section_title: Some(format!("{} on page {}", hit.asset_type, hit.page_no)),
         quote: format!(
-            "Opened visual asset: {}\nassetId={}\nCaption: {}\nNearby text: {}\n{}",
-            hit.asset_type, hit.id, hit.caption, hit.nearby_text, crop
+            "Opened visual asset: {}\nassetId={}\nCaption: {}\nNearby text: {}{}\n{}",
+            hit.asset_type,
+            hit.id,
+            hit.caption,
+            hit.nearby_text,
+            visual_ocr_text_suffix(&hit.ocr_text),
+            crop
         ),
         bbox_list: hit.bbox_list.clone(),
         score: hit.score,
@@ -7641,6 +7669,7 @@ mod tests {
                 caption TEXT NOT NULL DEFAULT '',
                 bbox_json TEXT NOT NULL DEFAULT '[]',
                 image_path TEXT NOT NULL DEFAULT '',
+                ocr_text TEXT NOT NULL DEFAULT '',
                 nearby_text TEXT NOT NULL DEFAULT '',
                 linked_block_ids_json TEXT NOT NULL DEFAULT '[]',
                 source TEXT NOT NULL DEFAULT 'pdf_bbox',

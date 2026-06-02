@@ -2,11 +2,44 @@ use serde_json::Value;
 use std::{
     env,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
+
+mod ocr;
+
+pub(crate) use ocr::recognize_image_rgba as ocr_recognize_image_rgba;
+
+/// Bundled-resource root that contains the `.models/` directory. Set once at
+/// startup from the Tauri resource dir (see `register_resource_models_dir`),
+/// because in a packaged app the models live under the app bundle, not relative
+/// to the process working directory. Model lookups add this as a candidate root
+/// so the SAME path-resolution code works in dev and in a shipped build.
+static RESOURCE_MODELS_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Register the directory that holds the bundled `.models/` tree (the Tauri
+/// resource dir). Call once during app setup. Idempotent / first-write-wins.
+pub(crate) fn register_resource_models_dir(dir: PathBuf) {
+    let _ = RESOURCE_MODELS_ROOT.set(dir);
+}
 
 const TSR_MODEL_ENV: &str = "LUMENFOLIO_TSR_MODEL";
 const TSR_IMAGE_ENV: &str = "LUMENFOLIO_TSR_IMAGE";
 const PDFIUM_DIR_ENV: &str = "LUMENFOLIO_PDFIUM_DIR";
+/// Override for the OCR model directory (must contain the det/rec ONNX files +
+/// dictionary). Defaults to the bundled `.models/ocr`.
+const OCR_MODEL_DIR_ENV: &str = "LUMENFOLIO_OCR_MODEL_DIR";
+const DEFAULT_OCR_MODEL_DIR: &str = ".models/ocr";
+
+/// Resolve the OCR model directory: env override first, else the bundled
+/// `.models/ocr` located via the shared resource/project candidate roots.
+pub(crate) fn ocr_model_dir_from_env_or_default() -> Option<PathBuf> {
+    env::var(OCR_MODEL_DIR_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| find_project_relative_dir(DEFAULT_OCR_MODEL_DIR))
+}
 #[cfg(feature = "tsr-onnx")]
 const DEFAULT_TSR_MODEL_PATH: &str = ".models/tsr/slanet_1m.onnx";
 const DEFAULT_PDFIUM_DIR: &str = ".models/pdfium";
@@ -1189,6 +1222,10 @@ fn find_project_relative_dir(relative_path: &str) -> Option<PathBuf> {
 
 fn project_relative_candidates(relative_path: &str) -> Vec<PathBuf> {
     let mut roots = Vec::new();
+    // Packaged app: the bundled resource dir holds `.models/` — check it first.
+    if let Some(resource_root) = RESOURCE_MODELS_ROOT.get() {
+        roots.push(resource_root.clone());
+    }
     if let Ok(current_dir) = env::current_dir() {
         roots.push(current_dir.clone());
         roots.push(current_dir.join("lumenfolio-desktop"));
