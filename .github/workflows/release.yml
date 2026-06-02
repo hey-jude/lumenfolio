@@ -18,6 +18,7 @@ env:
   NODE_VERSION: "20"
   PYTHON_VERSION: "3.12"
   RUST_VERSION: "1.89.0"
+  TAURI_RUST_FEATURES: "ocr-onnx"
 
 jobs:
   create-release:
@@ -143,6 +144,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Fetch bundled OCR models
+        run: npm run fetch:models
+
       - name: Build bundled PDF2ZH runtime for macOS
         if: matrix.sidecar_runtime == 'macos'
         run: npm run build:pdf2zh-runtime:macos -- --force
@@ -212,7 +216,7 @@ jobs:
             echo "Uploaded ${asset_name}"
           }
 
-          npm run tauri -- build --target ${{ matrix.target }} --bundles app
+          npm run tauri -- build --target ${{ matrix.target }} --features "${TAURI_RUST_FEATURES}" --bundles app
           ditto -c -k --keepParent \
             "src-tauri/target/${{ matrix.target }}/release/bundle/macos/Lumenfolio.app" \
             "Lumenfolio_${TAG_NAME}_${{ matrix.asset_suffix }}.app.zip"
@@ -225,7 +229,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+          args: --target ${{ matrix.target }} --features ${{ env.TAURI_RUST_FEATURES }} --bundles ${{ matrix.bundles }}
 
   upload-notices:
     name: Upload legal notices

@@ -40,7 +40,6 @@
     "targets": "all",
     "resources": [
       "../resources/pdf2zh-sidecar",
-      "../.models/tsr",
       "../.models/ocr"
     ],
     "icon": [

@@ -1,4 +1,4 @@
-// Fetch the ONNX models bundled with the app (OCR + TSR) into `.models/`.
+// Fetch the ONNX models bundled with the app into `.models/`.
 //
 // `.models/` is gitignored, so a fresh clone / CI machine has no models. Run
 // `npm run fetch:models` to download them. Existing files of the right size are
@@ -6,7 +6,6 @@
 //
 // Models:
 //   OCR — PP-OCRv4 mobile (RapidOCR / PaddleOCR), Apache-2.0
-//   TSR — SLANet (only re-fetched if missing; the repo author seeded it once)
 
 import { createWriteStream, existsSync, mkdirSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -85,7 +84,7 @@ async function main() {
     downloaded += 1
   }
   console.log(`Done: ${downloaded} downloaded, ${skipped} skipped.`)
-  console.log('Note: TSR model (.models/tsr/slanet_1m.onnx) is not fetched here.')
+  console.log('Note: TSR is optional and is not bundled by this release model fetcher.')
 }
 
 main().catch((err) => {
