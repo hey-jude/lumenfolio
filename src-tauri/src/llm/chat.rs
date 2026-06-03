@@ -243,6 +243,93 @@ pub(crate) async fn judge_current_view_relevance_with_openai_compatible(
     parse_current_view_decision(&text)
 }
 
+/// Single-shot LLM call that condenses a conversation's opening exchange into a
+/// short tab title (the "hybrid" title strategy: a temporary truncated title is
+/// shown immediately, then quietly replaced by this once the first answer lands).
+/// Returns a trimmed title with no surrounding quotes; the caller enforces the
+/// final length cap and falls back to the temporary title on any error.
+pub(crate) async fn generate_session_title_with_openai_compatible(
+    question: &str,
+    answer: &str,
+    provider: &OpenAiCompatibleProvider,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|err| format!("Failed to create session-title client: {err}"))?;
+    let endpoint = format!(
+        "{}/chat/completions",
+        normalize_base_url(&provider.base_url)
+    );
+    let answer_excerpt = truncate_chars(answer, 600);
+    let user_content = format!(
+        "Summarize this conversation as a very short tab title.\n\nUser asked:\n{question}\n\nAssistant answered:\n{answer_excerpt}\n\nRules:\n- Reply with ONLY the title text, nothing else.\n- At most 12 characters (Chinese characters count as one each); fewer is better.\n- No surrounding quotes, no trailing punctuation, no prefix like 'Title:'.\n- Use the same language as the user's question.\n- Capture the core topic, not a generic label."
+    );
+    let request = OpenAiChatRequest {
+        model: provider.model.clone(),
+        temperature: 0.0,
+        stream: None,
+        messages: vec![
+            text_message(
+                "system",
+                "You name chat sessions. Reply with one short title only, no explanation.",
+            ),
+            text_message("user", user_content),
+        ],
+    };
+    let mut builder = client.post(endpoint).json(&request);
+    if let Some(api_key) = &provider.api_key {
+        builder = builder.bearer_auth(api_key);
+    }
+    let response = builder
+        .send()
+        .await
+        .map_err(|err| format!("Session-title request failed: {err}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!(
+            "Session-title request returned {status}: {}",
+            truncate_for_error(&body, 400)
+        ));
+    }
+    let response = serde_json::from_str::<OpenAiChatResponse>(&body).map_err(|err| {
+        format!(
+            "Failed to decode session-title response: {}; body={}",
+            err,
+            truncate_for_error(&body, 400)
+        )
+    })?;
+    let text = response
+        .choices
+        .into_iter()
+        .next()
+        .map(|choice| extract_chat_response_text(&choice.message.content))
+        .map(|text| clean_session_title(&text))
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| "Session-title request returned an empty response".to_string())?;
+    Ok(text)
+}
+
+/// Strip the noise an LLM tends to wrap a short title in: surrounding quotes,
+/// a leading "Title:" label, and trailing punctuation/whitespace. Collapses to
+/// a single line.
+fn clean_session_title(raw: &str) -> String {
+    let first_line = raw.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+    let mut title = first_line.trim().to_string();
+    for prefix in ["Title:", "title:", "标题:", "标题:"] {
+        if let Some(stripped) = title.strip_prefix(prefix) {
+            title = stripped.trim().to_string();
+        }
+    }
+    let trimmed = title
+        .trim_matches(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '「' | '」' | '。' | '.')
+        })
+        .to_string();
+    trimmed
+}
+
 fn build_answerability_judge_prompt(
     question: &str,
     intent: &str,

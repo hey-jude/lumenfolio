@@ -149,7 +149,7 @@ fn run_document_visual_index_job(
         .and_then(|_| mark_visual_index_job_succeeded_db(database, document_id));
     match result {
         Ok((visual_assets, tables, table_facts)) => {
-            agent_sessions.clear_document(document_id);
+            agent_sessions.clear_session(&format!("migrated-{document_id}"));
             Ok(VisualIndexResult {
                 document_id: document_id.to_string(),
                 status: "succeeded".to_string(),

@@ -20,6 +20,10 @@ const MAX_RETRIEVAL_STEPS: u32 = 20;
 
 pub struct AgentRunRequest<'a> {
     pub document_id: &'a str,
+    /// Conversation this turn belongs to. Used to key in-memory working memory
+    /// (recent turns / selection / sections) so memory follows the session, not
+    /// the focus document. Retrieval still targets `document_id`.
+    pub session_key: &'a str,
     /// Additional "@-referenced" documents the agent may search this turn (empty by
     /// default). Forms the documentId-routing whitelist passed to the RAG tool
     /// dispatch in run_answerability_loop, so a tool call may target one of these.
@@ -60,9 +64,9 @@ pub fn run_turn_with_activity<F>(
 where
     F: FnMut(&AgentTraceEvent),
 {
-    let snapshot = sessions.snapshot(request.document_id);
+    let snapshot = sessions.snapshot(request.session_key);
     let compacted = snapshot.as_ref().map(compact_session).unwrap_or_else(|| {
-        compact_session(&empty_snapshot(request.document_id, request.provider_id))
+        compact_session(&empty_snapshot(request.session_key, request.provider_id))
     });
     let intent = AgentIntent::infer(request.question);
     let max_retrieval_attempts = request
@@ -466,7 +470,7 @@ fn broad_context_query(intent: AgentIntent, attempt: u32) -> &'static str {
 }
 
 pub struct CompletedTurnRecord<'a> {
-    pub document_id: &'a str,
+    pub session_key: &'a str,
     pub provider_id: Option<&'a str>,
     pub question: &'a str,
     pub answer: &'a str,
@@ -484,7 +488,7 @@ pub fn record_completed_turn(sessions: &AgentSessionStore, record: CompletedTurn
         .map(|node| node.title.clone())
         .collect::<Vec<_>>();
     sessions.record_turn(
-        record.document_id,
+        record.session_key,
         record.provider_id.map(str::to_string),
         RecentTurnSummary {
             question: preview_text(record.question, 220),
@@ -501,7 +505,7 @@ pub fn record_completed_turn(sessions: &AgentSessionStore, record: CompletedTurn
 }
 
 pub struct RestoredTurnRecord<'a> {
-    pub document_id: &'a str,
+    pub session_key: &'a str,
     pub provider_id: Option<&'a str>,
     pub question: &'a str,
     pub answer: &'a str,
@@ -512,7 +516,7 @@ pub struct RestoredTurnRecord<'a> {
 
 pub fn record_restored_turn(sessions: &AgentSessionStore, record: RestoredTurnRecord<'_>) {
     sessions.record_turn(
-        record.document_id,
+        record.session_key,
         record.provider_id.map(str::to_string),
         RecentTurnSummary {
             question: preview_text(record.question, 220),

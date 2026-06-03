@@ -88,6 +88,7 @@ pub async fn run_from_env() -> Result<(), String> {
     )?;
     let input = AskDocumentInput {
         document_id: document.id.clone(),
+        session_id: None,
         question: question.to_string(),
         locale: config.locale.clone(),
         model_provider_id: if config.provider_id.is_empty() {
@@ -141,6 +142,7 @@ pub async fn run_from_env() -> Result<(), String> {
             &sessions,
             runtime::agent::AgentRunRequest {
                 document_id: &document.id,
+                session_key: &document.id,
                 reference_document_ids: Vec::new(),
                 question,
                 provider_id: input.model_provider_id.as_deref(),

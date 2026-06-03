@@ -270,6 +270,11 @@ struct TranslateTextOutput {
 #[serde(rename_all = "camelCase")]
 struct AskDocumentInput {
     document_id: String,
+    /// Agent workspace session this turn belongs to. When empty (legacy callers),
+    /// the backend falls back to the per-document session `migrated-<document_id>`,
+    /// keeping single-document behavior identical to before the session refactor.
+    #[serde(default)]
+    session_id: Option<String>,
     question: String,
     locale: Option<String>,
     model_provider_id: Option<String>,
@@ -305,14 +310,22 @@ struct ViewportContextInput {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LoadChatTurnsInput {
+    /// Focus document (legacy field). Used only to derive the fallback session id
+    /// when `session_id` is absent.
+    #[serde(default)]
     document_id: String,
+    #[serde(default)]
+    session_id: Option<String>,
     limit: Option<u32>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClearChatTurnsInput {
+    #[serde(default)]
     document_id: String,
+    #[serde(default)]
+    session_id: Option<String>,
     turn_ids: Option<Vec<String>>,
 }
 
@@ -1094,7 +1107,10 @@ fn mark_document_stale(
     .map_err(|err| format!("Failed to clear document index jobs: {err}"))?;
     tx.commit()
         .map_err(|err| format!("Failed to commit reindex request: {err}"))?;
-    agent_sessions.clear_document(&document_id);
+    // Invalidate cached working memory for this document's default (per-document)
+    // session. Memory is keyed by session id now; multi-document sessions refresh
+    // on the next ask via fresh retrieval.
+    agent_sessions.clear_session(&format!("migrated-{document_id}"));
     Ok(())
 }
 
@@ -1254,23 +1270,35 @@ fn list_model_providers(
     providers::load_model_provider_outputs(&conn)
 }
 
+/// Resolve the session a request targets. An explicit, non-empty `session_id`
+/// always wins; otherwise we fall back to the deterministic per-document session
+/// `migrated-<document_id>` so legacy single-document callers keep working and
+/// stay consistent with the migration back-fill.
+fn resolve_session_id(session_id: Option<&str>, document_id: &str) -> Result<String, String> {
+    if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(session_id.to_string());
+    }
+    let document_id = document_id.trim();
+    if document_id.is_empty() {
+        return Err("No session or document selected".to_string());
+    }
+    Ok(format!("migrated-{document_id}"))
+}
+
 #[tauri::command]
 fn load_chat_turns(
     input: LoadChatTurnsInput,
     database: State<'_, AppDatabase>,
     agent_sessions: State<'_, AgentSessionState>,
 ) -> Result<Vec<ChatHistoryMessageOutput>, String> {
-    let document_id = input.document_id.trim();
-    if document_id.is_empty() {
-        return Err("No document selected".to_string());
-    }
+    let session_id = resolve_session_id(input.session_id.as_deref(), &input.document_id)?;
     let limit = input.limit.unwrap_or(40).clamp(1, 120);
     let conn = database
         .conn
         .lock()
         .map_err(|_| "SQLite lock was poisoned".to_string())?;
-    let turns = load_stored_chat_turns(&conn, document_id, limit)?;
-    restore_agent_session_from_turns(&agent_sessions, document_id, &turns);
+    let turns = load_stored_chat_turns(&conn, &session_id, limit)?;
+    restore_agent_session_from_turns(&agent_sessions, &session_id, &turns);
     Ok(chat_turns_to_messages(turns))
 }
 
@@ -1280,10 +1308,7 @@ fn clear_chat_turns(
     database: State<'_, AppDatabase>,
     agent_sessions: State<'_, AgentSessionState>,
 ) -> Result<(), String> {
-    let document_id = input.document_id.trim();
-    if document_id.is_empty() {
-        return Err("No document selected".to_string());
-    }
+    let session_id = resolve_session_id(input.session_id.as_deref(), &input.document_id)?;
     let conn = database
         .conn
         .lock()
@@ -1295,19 +1320,19 @@ fn clear_chat_turns(
             .filter(|value| !value.is_empty())
         {
             conn.execute(
-                "DELETE FROM chat_turns WHERE document_id = ?1 AND id = ?2",
-                params![document_id, turn_id],
+                "DELETE FROM chat_turns WHERE session_id = ?1 AND id = ?2",
+                params![session_id, turn_id],
             )
             .map_err(|err| format!("Failed to clear chat history: {err}"))?;
         }
     } else {
         conn.execute(
-            "DELETE FROM chat_turns WHERE document_id = ?1",
-            params![document_id],
+            "DELETE FROM chat_turns WHERE session_id = ?1",
+            params![session_id],
         )
         .map_err(|err| format!("Failed to clear chat history: {err}"))?;
     }
-    agent_sessions.clear_document(document_id);
+    agent_sessions.clear_session(&session_id);
     Ok(())
 }
 
@@ -1496,6 +1521,314 @@ fn delete_note(input: DeleteNoteInput, database: State<'_, AppDatabase>) -> Resu
         return Err("Note not found".to_string());
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Agent workspace sessions
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatSessionOutput {
+    id: String,
+    title: String,
+    focus_document_id: Option<String>,
+    focus_document_title: Option<String>,
+    referenced_document_ids: Vec<String>,
+    turn_count: i64,
+    created_at: i64,
+    updated_at: i64,
+}
+
+fn read_chat_session_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSessionOutput> {
+    let referenced_json: String = row.get(3)?;
+    let referenced_document_ids =
+        serde_json::from_str::<Vec<String>>(&referenced_json).unwrap_or_default();
+    Ok(ChatSessionOutput {
+        id: row.get(0)?,
+        title: row.get(1)?,
+        focus_document_id: optional_non_empty(row.get::<_, Option<String>>(2)?.unwrap_or_default()),
+        referenced_document_ids,
+        focus_document_title: optional_non_empty(row.get::<_, Option<String>>(4)?.unwrap_or_default()),
+        turn_count: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+const CHAT_SESSION_SELECT: &str = "SELECT s.id, s.title, s.focus_document_id,
+        s.referenced_document_ids_json,
+        COALESCE(NULLIF(d.short_title, ''), d.title),
+        (SELECT COUNT(*) FROM chat_turns t WHERE t.session_id = s.id),
+        s.created_at, s.updated_at
+     FROM chat_sessions s
+     LEFT JOIN documents d ON d.id = s.focus_document_id";
+
+fn load_chat_session_by_id(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<ChatSessionOutput>, String> {
+    let sql = format!("{CHAT_SESSION_SELECT} WHERE s.id = ?1");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|err| format!("Failed to prepare chat session query: {err}"))?;
+    let mut rows = stmt
+        .query_map(params![session_id], read_chat_session_row)
+        .map_err(|err| format!("Failed to load chat session: {err}"))?;
+    match rows.next() {
+        Some(row) => Ok(Some(
+            row.map_err(|err| format!("Failed to read chat session: {err}"))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn list_chat_sessions(database: State<'_, AppDatabase>) -> Result<Vec<ChatSessionOutput>, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let sql = format!("{CHAT_SESSION_SELECT} ORDER BY s.updated_at DESC, s.rowid DESC");
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|err| format!("Failed to prepare chat sessions query: {err}"))?;
+    let sessions = stmt
+        .query_map([], read_chat_session_row)
+        .map_err(|err| format!("Failed to load chat sessions: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to read chat sessions: {err}"))?;
+    Ok(sessions)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateChatSessionInput {
+    #[serde(default)]
+    focus_document_id: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+#[tauri::command]
+fn create_chat_session(
+    input: CreateChatSessionInput,
+    database: State<'_, AppDatabase>,
+) -> Result<ChatSessionOutput, String> {
+    let focus = input
+        .focus_document_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let title = input
+        .title
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let session_id = format!(
+        "session-{}",
+        stable_text_hash(&format!("{}:{nanos}", focus.unwrap_or("")))
+    );
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    conn.execute(
+        "INSERT INTO chat_sessions
+            (id, title, focus_document_id, referenced_document_ids_json, created_at, updated_at)
+         VALUES (?1, ?2, ?3, '[]', unixepoch(), unixepoch())",
+        params![session_id, title, focus],
+    )
+    .map_err(|err| format!("Failed to create chat session: {err}"))?;
+    load_chat_session_by_id(&conn, &session_id)?
+        .ok_or_else(|| "Chat session not found after creation".to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameChatSessionInput {
+    id: String,
+    title: String,
+}
+
+#[tauri::command]
+fn rename_chat_session(
+    input: RenameChatSessionInput,
+    database: State<'_, AppDatabase>,
+) -> Result<ChatSessionOutput, String> {
+    let session_id = input.id.trim();
+    if session_id.is_empty() {
+        return Err("No session specified".to_string());
+    }
+    let title = input.title.trim();
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let affected = conn
+        .execute(
+            "UPDATE chat_sessions SET title = ?2, updated_at = unixepoch() WHERE id = ?1",
+            params![session_id, title],
+        )
+        .map_err(|err| format!("Failed to rename chat session: {err}"))?;
+    if affected == 0 {
+        return Err("Chat session not found".to_string());
+    }
+    load_chat_session_by_id(&conn, session_id)?
+        .ok_or_else(|| "Chat session not found".to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateChatSessionFocusInput {
+    id: String,
+    #[serde(default)]
+    focus_document_id: Option<String>,
+}
+
+#[tauri::command]
+fn update_chat_session_focus(
+    input: UpdateChatSessionFocusInput,
+    database: State<'_, AppDatabase>,
+) -> Result<ChatSessionOutput, String> {
+    let session_id = input.id.trim();
+    if session_id.is_empty() {
+        return Err("No session specified".to_string());
+    }
+    let focus = input
+        .focus_document_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let affected = conn
+        .execute(
+            "UPDATE chat_sessions SET focus_document_id = ?2, updated_at = unixepoch() WHERE id = ?1",
+            params![session_id, focus],
+        )
+        .map_err(|err| format!("Failed to update chat session focus: {err}"))?;
+    if affected == 0 {
+        return Err("Chat session not found".to_string());
+    }
+    load_chat_session_by_id(&conn, session_id)?
+        .ok_or_else(|| "Chat session not found".to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteChatSessionInput {
+    id: String,
+}
+
+#[tauri::command]
+fn delete_chat_session(
+    input: DeleteChatSessionInput,
+    database: State<'_, AppDatabase>,
+    agent_sessions: State<'_, AgentSessionState>,
+) -> Result<(), String> {
+    let session_id = input.id.trim();
+    if session_id.is_empty() {
+        return Err("No session specified".to_string());
+    }
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    // chat_turns FK cascades on document deletion, not session, so remove this
+    // session's turns explicitly before dropping the session row.
+    conn.execute(
+        "DELETE FROM chat_turns WHERE session_id = ?1",
+        params![session_id],
+    )
+    .map_err(|err| format!("Failed to delete chat session turns: {err}"))?;
+    conn.execute("DELETE FROM chat_sessions WHERE id = ?1", params![session_id])
+        .map_err(|err| format!("Failed to delete chat session: {err}"))?;
+    drop(conn);
+    agent_sessions.clear_session(session_id);
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GenerateSessionTitleInput {
+    session_id: String,
+    #[serde(default)]
+    model_provider_id: Option<String>,
+    #[serde(default)]
+    model_key: Option<String>,
+}
+
+/// Generate a short LLM title for a session from its opening exchange and store
+/// it. Best-effort: returns the new title on success; surfaces an error the
+/// frontend can ignore (keeping the temporary title) on any failure.
+#[tauri::command]
+async fn generate_session_title(
+    input: GenerateSessionTitleInput,
+    database: State<'_, AppDatabase>,
+) -> Result<String, String> {
+    let session_id = input.session_id.trim().to_string();
+    if session_id.is_empty() {
+        return Err("No session specified".to_string());
+    }
+    // Pull the first user/assistant exchange for this session.
+    let (question, answer) = {
+        let conn = database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        conn.query_row(
+            "SELECT user_message, assistant_answer
+             FROM chat_turns
+             WHERE session_id = ?1
+             ORDER BY created_at ASC, rowid ASC
+             LIMIT 1",
+            params![session_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|err| format!("No conversation to title yet: {err}"))?
+    };
+    let question = question.trim();
+    if question.is_empty() {
+        return Err("No question to summarize".to_string());
+    }
+    let provider_id = input.model_provider_id.as_deref().unwrap_or("").trim();
+    let (provider, _) =
+        providers::resolve_chat_provider(&database, provider_id, input.model_key.as_deref())?;
+    let raw_title =
+        llm::chat::generate_session_title_with_openai_compatible(question, &answer, &provider)
+            .await?;
+    let title = clamp_session_title(&raw_title);
+    if title.is_empty() {
+        return Err("Generated title was empty".to_string());
+    }
+    {
+        let conn = database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        conn.execute(
+            "UPDATE chat_sessions SET title = ?2, updated_at = unixepoch() WHERE id = ?1",
+            params![session_id, title],
+        )
+        .map_err(|err| format!("Failed to save generated title: {err}"))?;
+    }
+    Ok(title)
+}
+
+/// Hard cap the generated title at 12 characters (by Unicode scalar), trimming
+/// trailing whitespace left by truncation. Keeps tab labels uniform.
+fn clamp_session_title(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let capped: String = trimmed.chars().take(12).collect();
+    capped.trim_end().to_string()
 }
 
 #[tauri::command]
@@ -1834,6 +2167,9 @@ async fn run_ask_document(
     if document_id.is_empty() {
         return Err("No document selected".to_string());
     }
+    // The conversation this turn belongs to. Memory + persistence key off this;
+    // retrieval still targets `document_id` (the session's focus document).
+    let session_id = resolve_session_id(input.session_id.as_deref(), document_id)?;
     let reference_document_ids = normalize_reference_document_ids(
         input.reference_document_ids.as_deref().unwrap_or(&[]),
         document_id,
@@ -1944,6 +2280,7 @@ async fn run_ask_document(
             agent_sessions,
             runtime::agent::AgentRunRequest {
                 document_id,
+                session_key: &session_id,
                 reference_document_ids: reference_document_id_refs.clone(),
                 question,
                 provider_id: Some(selected_provider_id),
@@ -2062,7 +2399,7 @@ async fn run_ask_document(
         runtime::agent::record_completed_turn(
             agent_sessions,
             runtime::agent::CompletedTurnRecord {
-                document_id,
+                session_key: &session_id,
                 provider_id: if selected_provider_id.is_empty() {
                     None
                 } else {
@@ -2079,6 +2416,7 @@ async fn run_ask_document(
             database,
             ChatTurnPersistInput {
                 turn_id: activity_event_id.as_deref(),
+                session_id: &session_id,
                 document_id,
                 provider_id: if selected_provider_id.is_empty() {
                     None
@@ -2158,7 +2496,7 @@ async fn run_ask_document(
     runtime::agent::record_completed_turn(
         agent_sessions,
         runtime::agent::CompletedTurnRecord {
-            document_id,
+            session_key: &session_id,
             provider_id: if selected_provider_id.is_empty() {
                 None
             } else {
@@ -2175,6 +2513,7 @@ async fn run_ask_document(
         database,
         ChatTurnPersistInput {
             turn_id: activity_event_id.as_deref(),
+            session_id: &session_id,
             document_id,
             provider_id: if selected_provider_id.is_empty() {
                 None
@@ -2211,6 +2550,7 @@ async fn run_ask_document(
 
 struct ChatTurnPersistInput<'a> {
     turn_id: Option<&'a str>,
+    session_id: &'a str,
     document_id: &'a str,
     provider_id: Option<&'a str>,
     model_key: Option<&'a str>,
@@ -2258,15 +2598,20 @@ fn persist_chat_turn(
         .conn
         .lock()
         .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    // Make sure the session row exists before we attach turns to it. This keeps
+    // persistence self-sufficient for legacy callers (no explicit session) and
+    // back-fills the focus document from the turn being saved.
+    ensure_chat_session_row(&conn, input.session_id, Some(input.document_id))?;
     conn.execute(
         "INSERT INTO chat_turns
-            (id, document_id, provider_id, model_key, provider_label, user_message,
+            (id, session_id, document_id, provider_id, model_key, provider_label, user_message,
              assistant_answer, reasoning_content, selected_text, image_data_url, citations_json,
              claims_json, retrieval_trace_json, referenced_document_ids_json, index_version,
              created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, unixepoch(), unixepoch())",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, unixepoch(), unixepoch())",
         params![
             turn_id,
+            input.session_id,
             input.document_id,
             input.provider_id.unwrap_or(""),
             input.model_key.unwrap_or(""),
@@ -2284,12 +2629,40 @@ fn persist_chat_turn(
         ],
     )
     .map_err(|err| format!("Failed to save chat turn: {err}"))?;
+    // Surface this session at the top of the recency-ordered session list.
+    conn.execute(
+        "UPDATE chat_sessions SET updated_at = unixepoch() WHERE id = ?1",
+        params![input.session_id],
+    )
+    .map_err(|err| format!("Failed to bump chat session recency: {err}"))?;
+    Ok(())
+}
+
+/// Idempotently create a session row if missing. When `focus_document_id` is
+/// provided and non-empty it is used as the focus for a freshly created row;
+/// existing rows are never overwritten (INSERT OR IGNORE), so a user's explicit
+/// focus choice is preserved.
+fn ensure_chat_session_row(
+    conn: &Connection,
+    session_id: &str,
+    focus_document_id: Option<&str>,
+) -> Result<(), String> {
+    let focus = focus_document_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    conn.execute(
+        "INSERT OR IGNORE INTO chat_sessions
+            (id, title, focus_document_id, referenced_document_ids_json, created_at, updated_at)
+         VALUES (?1, '', ?2, '[]', unixepoch(), unixepoch())",
+        params![session_id, focus],
+    )
+    .map_err(|err| format!("Failed to ensure chat session: {err}"))?;
     Ok(())
 }
 
 fn load_stored_chat_turns(
     conn: &Connection,
-    document_id: &str,
+    session_id: &str,
     limit: u32,
 ) -> Result<Vec<StoredChatTurn>, String> {
     let mut stmt = conn
@@ -2300,7 +2673,7 @@ fn load_stored_chat_turns(
              FROM (
                SELECT rowid AS turn_rowid, *
                FROM chat_turns
-               WHERE document_id = ?1 AND index_version = ?2
+               WHERE session_id = ?1 AND index_version = ?2
                ORDER BY created_at DESC, rowid DESC
                LIMIT ?3
              )
@@ -2309,7 +2682,7 @@ fn load_stored_chat_turns(
         .map_err(|err| format!("Failed to prepare chat turns query: {err}"))?;
     let turns = stmt
         .query_map(
-            params![document_id, CURRENT_INDEX_VERSION, limit],
+            params![session_id, CURRENT_INDEX_VERSION, limit],
             read_stored_chat_turn_row,
         )
         .map_err(|err| format!("Failed to load chat turns: {err}"))?
@@ -2397,10 +2770,10 @@ fn chat_turns_to_messages(turns: Vec<StoredChatTurn>) -> Vec<ChatHistoryMessageO
 
 fn restore_agent_session_from_turns(
     agent_sessions: &AgentSessionState,
-    document_id: &str,
+    session_id: &str,
     turns: &[StoredChatTurn],
 ) {
-    agent_sessions.clear_document(document_id);
+    agent_sessions.clear_session(session_id);
     for turn in turns
         .iter()
         .rev()
@@ -2425,7 +2798,7 @@ fn restore_agent_session_from_turns(
         runtime::agent::record_restored_turn(
             agent_sessions,
             runtime::agent::RestoredTurnRecord {
-                document_id,
+                session_key: session_id,
                 provider_id: turn.provider_id.as_deref(),
                 question: &turn.user_message,
                 answer: &turn.assistant_answer,
@@ -3757,6 +4130,7 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE chat_turns (
               id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL DEFAULT '',
               document_id TEXT NOT NULL,
               provider_id TEXT NOT NULL DEFAULT '',
               model_key TEXT NOT NULL DEFAULT '',
@@ -3778,16 +4152,16 @@ mod tests {
         .expect("chat schema");
         conn.execute(
             "INSERT INTO chat_turns
-               (id, document_id, user_message, assistant_answer, citations_json,
+               (id, session_id, document_id, user_message, assistant_answer, citations_json,
                 claims_json, retrieval_trace_json, index_version, created_at, updated_at)
              VALUES
-               ('stale', 'doc', 'old question', 'old answer', '[]', '[]', '{}', ?1, 1, 1),
-               ('fresh', 'doc', 'new question', 'new answer', '[]', '[]', '{}', ?2, 2, 2)",
+               ('stale', 'sess', 'doc', 'old question', 'old answer', '[]', '[]', '{}', ?1, 1, 1),
+               ('fresh', 'sess', 'doc', 'new question', 'new answer', '[]', '[]', '{}', ?2, 2, 2)",
             params![CURRENT_INDEX_VERSION - 1, CURRENT_INDEX_VERSION],
         )
         .expect("chat rows");
 
-        let turns = load_stored_chat_turns(&conn, "doc", 40).expect("chat turns");
+        let turns = load_stored_chat_turns(&conn, "sess", 40).expect("chat turns");
 
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].id, "fresh");
@@ -3873,6 +4247,12 @@ pub fn run() {
             document_translation::cancel_translation_job,
             load_chat_turns,
             clear_chat_turns,
+            list_chat_sessions,
+            create_chat_session,
+            rename_chat_session,
+            update_chat_session_focus,
+            delete_chat_session,
+            generate_session_title,
             load_notes,
             create_note,
             update_note,
