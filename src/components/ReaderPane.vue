@@ -410,6 +410,13 @@ const hasLoadedTranslationPages = computed(() => (
 const translationFullState = computed(() => {
   const translation = props.document.translation || {}
   if (translationArtifactPath.value || hasLoadedTranslationPages.value) return null
+  if (translation.status === 'unsupported') {
+    return {
+      tone: 'info',
+      title: props.ui.scannedPdfTranslationTitle,
+      detail: translation.error || props.ui.scannedPdfTranslationUnsupported,
+    }
+  }
   if (translation.status === 'failed') {
     return {
       tone: 'error',
@@ -975,120 +982,133 @@ watch(translationArtifactActivePage, async () => {
 
 <template>
   <section class="reader-pane">
-    <div class="translation-toolbar" data-tauri-drag-region @mousedown="startWindowDrag">
-      <div class="toolbar-left">
-        <select
-          class="toolbar-select"
-          :value="translationLang"
-          :title="localizedLabel(translationLanguages.find((item) => item.value === translationLang)?.label)"
-          @change="emit('update:translationLang', $event.target.value)"
-        >
-          <option v-for="item in translationLanguages" :key="item.value" :value="item.value">
-            {{ languageCode(item.value) }}
-          </option>
-        </select>
-
-        <button
-          v-if="showTranslationAction"
-          class="toolbar-btn translate-action"
-          :disabled="!canOperateTranslation"
-          :title="translationActionLabel"
-          :aria-label="translationActionLabel"
-          v-bind="testAttrs('translation-action')"
-          @click="emit('translation-action', translationViewportContext())"
-        >
-          <span class="toolbar-icon">文</span>
-          <span v-if="canCancelTranslation" class="compact-progress">{{ translationProgressPercent }}%</span>
-        </button>
-
-        <button
-          v-if="canCancelTranslation"
-          class="toolbar-btn icon-only"
-          :title="ui.cancel"
-          :aria-label="ui.cancel"
-          v-bind="testAttrs('cancel-translation')"
-          @click="emit('cancel-translation')"
-        >
-          ×
-        </button>
-
-        <button
-          class="toolbar-btn icon-only split-toggle"
-          :class="{ active: viewMode === 'dual' }"
-          :disabled="!canOpenTranslationView || !canOperateTranslation"
-          :title="viewMode === 'dual' ? ui.original : ui.dual"
-          :aria-label="viewMode === 'dual' ? ui.original : ui.dual"
-          v-bind="testAttrs('view-mode-dual')"
-          @click="toggleDualView"
-        >
-          ◧
-        </button>
-      </div>
-
-      <div class="toolbar-right">
-        <template v-if="isLocalPdf">
-          <span v-if="showIndexStatus" class="status-chip" :class="document.indexStatus">
-            {{ indexStatusLabel }}
-          </span>
-
-          <div class="pdf-toolbar-controls">
+    <div class="reader-chrome" data-tauri-drag-region @mousedown="startWindowDrag">
+      <div class="reader-chrome-primary">
+        <div v-if="tabs.length > 1" class="reader-tab-bar" v-bind="testAttrs('reader-tab-bar')">
+          <div
+            v-for="tab in tabs"
+            :key="tab.id"
+            class="reader-tab"
+            :class="{ active: tab.id === activeDocId }"
+            :title="tab.name"
+            v-bind="testAttrs('reader-tab')"
+            @click="emit('select-tab', tab.id)"
+          >
+            <span class="reader-tab-dot" :class="tab.status"></span>
+            <span class="reader-tab-name">{{ tab.name }}</span>
             <button
               type="button"
-              :title="ui.previousPage"
-              :aria-label="ui.previousPage"
-              :disabled="!pdfViewerState.canGoPrevious"
-              @click="goToPreviousPdfPage"
-            >
-              ‹
-            </button>
-            <span class="page-meter">
-              {{ pdfViewerState.currentPage }} / {{ pdfViewerState.pageCount || document.pageCount || '...' }}
-            </span>
-            <button
-              type="button"
-              :title="ui.nextPage"
-              :aria-label="ui.nextPage"
-              :disabled="!pdfViewerState.canGoNext"
-              @click="goToNextPdfPage"
-            >
-              ›
-            </button>
-            <span class="toolbar-divider"></span>
-            <button type="button" title="Zoom out" aria-label="Zoom out" @click="zoomPdf(-0.12)">−</button>
-            <span class="zoom-meter">{{ Math.round(pdfViewerState.scale * 100) }}%</span>
-            <button type="button" title="Zoom in" aria-label="Zoom in" @click="zoomPdf(0.12)">+</button>
+              class="reader-tab-close"
+              :title="ui.tabClose"
+              :aria-label="ui.tabClose"
+              v-bind="testAttrs('reader-tab-close')"
+              @click.stop="emit('close-tab', tab.id)"
+            >×</button>
           </div>
-        </template>
-
-        <span v-else class="status-chip" :class="document.translation.status">
-          {{ translationStatusLabel }}
-          <template v-if="document.translation.total">
-            · {{ document.translation.progress }}/{{ document.translation.total }}
-          </template>
-        </span>
+        </div>
+        <div v-else class="reader-current-doc" :title="document.title || document.shortTitle">
+          <span class="reader-tab-dot" :class="document.indexStatus"></span>
+          <span class="reader-current-name">{{ document.shortTitle || document.title || 'PDF' }}</span>
+        </div>
       </div>
-    </div>
 
-    <div v-if="tabs.length > 1" class="reader-tab-bar" v-bind="testAttrs('reader-tab-bar')">
-      <div
-        v-for="tab in tabs"
-        :key="tab.id"
-        class="reader-tab"
-        :class="{ active: tab.id === activeDocId }"
-        :title="tab.name"
-        v-bind="testAttrs('reader-tab')"
-        @click="emit('select-tab', tab.id)"
-      >
-        <span class="reader-tab-dot" :class="tab.status"></span>
-        <span class="reader-tab-name">{{ tab.name }}</span>
-        <button
-          type="button"
-          class="reader-tab-close"
-          :title="ui.tabClose"
-          :aria-label="ui.tabClose"
-          v-bind="testAttrs('reader-tab-close')"
-          @click.stop="emit('close-tab', tab.id)"
-        >×</button>
+      <div class="reader-chrome-secondary">
+        <div class="toolbar-left">
+          <select
+            class="toolbar-select"
+            :value="translationLang"
+            :title="localizedLabel(translationLanguages.find((item) => item.value === translationLang)?.label)"
+            @change="emit('update:translationLang', $event.target.value)"
+          >
+            <option v-for="item in translationLanguages" :key="item.value" :value="item.value">
+              {{ languageCode(item.value) }}
+            </option>
+          </select>
+
+          <button
+            v-if="showTranslationAction"
+            class="toolbar-btn translate-action"
+            :class="{ running: canCancelTranslation }"
+            :disabled="!canOperateTranslation"
+            :title="translationActionLabel"
+            :aria-label="translationActionLabel"
+            v-bind="testAttrs('translation-action')"
+            @click="emit('translation-action', translationViewportContext())"
+          >
+            <span class="toolbar-action-label">{{ canCancelTranslation ? translationStatusLabel : translationActionLabel }}</span>
+            <span v-if="canCancelTranslation" class="compact-progress">{{ translationProgressPercent }}%</span>
+          </button>
+
+          <button
+            v-if="canCancelTranslation"
+            class="toolbar-btn stop-action"
+            :title="ui.cancel"
+            :aria-label="ui.cancel"
+            v-bind="testAttrs('cancel-translation')"
+            @click="emit('cancel-translation')"
+          >
+            {{ ui.cancel }}
+          </button>
+
+          <button
+            class="toolbar-btn split-toggle"
+            :class="{ active: viewMode === 'dual' }"
+            :disabled="!canOpenTranslationView || !canOperateTranslation"
+            :title="viewMode === 'dual' ? ui.original : ui.dual"
+            :aria-label="viewMode === 'dual' ? ui.original : ui.dual"
+            v-bind="testAttrs('view-mode-dual')"
+            @click="toggleDualView"
+          >
+            <span class="toolbar-icon">◧</span>
+            <span class="toolbar-action-label">{{ viewMode === 'dual' ? ui.original : ui.dual }}</span>
+          </button>
+        </div>
+
+        <div class="toolbar-right">
+          <template v-if="isLocalPdf">
+            <span v-if="showIndexStatus" class="status-chip" :class="document.indexStatus">
+              {{ indexStatusLabel }}
+            </span>
+
+            <div class="pdf-toolbar-controls">
+              <div class="toolbar-control-group page-control-group">
+                <button
+                  type="button"
+                  :title="ui.previousPage"
+                  :aria-label="ui.previousPage"
+                  :disabled="!pdfViewerState.canGoPrevious"
+                  @click="goToPreviousPdfPage"
+                >
+                  ‹
+                </button>
+                <span class="page-meter">
+                  {{ pdfViewerState.currentPage }} / {{ pdfViewerState.pageCount || document.pageCount || '...' }}
+                </span>
+                <button
+                  type="button"
+                  :title="ui.nextPage"
+                  :aria-label="ui.nextPage"
+                  :disabled="!pdfViewerState.canGoNext"
+                  @click="goToNextPdfPage"
+                >
+                  ›
+                </button>
+              </div>
+              <div class="toolbar-control-group zoom-control-group">
+                <button type="button" title="Zoom out" aria-label="Zoom out" @click="zoomPdf(-0.12)">−</button>
+                <span class="zoom-meter">{{ Math.round(pdfViewerState.scale * 100) }}%</span>
+                <button type="button" title="Zoom in" aria-label="Zoom in" @click="zoomPdf(0.12)">+</button>
+              </div>
+            </div>
+          </template>
+
+          <span v-else class="status-chip" :class="document.translation.status">
+            {{ translationStatusLabel }}
+            <template v-if="document.translation.total">
+              · {{ document.translation.progress }}/{{ document.translation.total }}
+            </template>
+          </span>
+        </div>
       </div>
     </div>
 
@@ -1460,27 +1480,42 @@ watch(translationArtifactActivePage, async () => {
   background: var(--bg-app);
 }
 
-.translation-toolbar {
-  min-height: 42px;
-  border-bottom: 1px solid var(--line-soft);
-  padding: 0 14px 0 28px;
+.reader-chrome {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 38px 42px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.012)),
+    var(--bg-app);
+}
+
+.reader-chrome-primary,
+.reader-chrome-secondary {
+  min-width: 0;
+  display: grid;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  padding: 0 14px 0 12px;
+}
+
+.reader-chrome-primary {
+  grid-template-columns: minmax(0, 1fr);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.reader-chrome-secondary {
+  grid-template-columns: minmax(0, 1fr) auto;
 }
 
 .toolbar-left,
 .toolbar-right {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
 .toolbar-left {
-  min-width: 0;
-  gap: 8px;
-  flex-wrap: nowrap;
   overflow: hidden;
 }
 
@@ -1489,61 +1524,96 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .toolbar-select,
-.toolbar-btn {
-  min-height: 30px;
-  border-radius: 9px;
-  border: 1px solid transparent;
-  background: rgba(255, 255, 255, 0.045);
+.toolbar-btn,
+.toolbar-control-group {
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.085);
+  background: rgba(255, 255, 255, 0.035);
   color: var(--text-primary);
-  padding: 0 10px;
   white-space: nowrap;
   flex-shrink: 0;
 }
 
 .toolbar-select {
-  width: 70px;
+  width: 72px;
   appearance: none;
   background:
-    linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%) calc(100% - 16px) 50% / 5px 5px no-repeat,
-    linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%) calc(100% - 11px) 50% / 5px 5px no-repeat,
-    rgba(255, 255, 255, 0.045);
-  color: var(--text-secondary);
+    linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%) calc(100% - 17px) 50% / 5px 5px no-repeat,
+    linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%) calc(100% - 12px) 50% / 5px 5px no-repeat,
+    rgba(255, 255, 255, 0.035);
+  color: var(--text-primary);
   cursor: pointer;
   outline: none;
-  padding: 0 25px 0 11px;
-  font-size: 13px;
-  font-weight: 650;
+  padding: 0 28px 0 13px;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0;
   text-align: center;
+}
+
+.toolbar-select:hover,
+.toolbar-btn:hover,
+.pdf-toolbar-controls button:hover {
+  border-color: rgba(125, 174, 255, 0.28);
+  background-color: rgba(255, 255, 255, 0.06);
+}
+
+.toolbar-select:focus-visible,
+.toolbar-btn:focus-visible,
+.pdf-toolbar-controls button:focus-visible,
+.reader-tab:focus-visible,
+.reader-tab-close:focus-visible {
+  outline: 2px solid rgba(106, 169, 255, 0.62);
+  outline-offset: 2px;
 }
 
 .toolbar-select:hover,
 .toolbar-select:focus-visible {
   background:
-    linear-gradient(45deg, transparent 50%, var(--text-primary) 50%) calc(100% - 16px) 50% / 5px 5px no-repeat,
-    linear-gradient(135deg, var(--text-primary) 50%, transparent 50%) calc(100% - 11px) 50% / 5px 5px no-repeat,
-    rgba(255, 255, 255, 0.085);
-  color: var(--text-primary);
+    linear-gradient(45deg, transparent 50%, var(--text-primary) 50%) calc(100% - 17px) 50% / 5px 5px no-repeat,
+    linear-gradient(135deg, var(--text-primary) 50%, transparent 50%) calc(100% - 12px) 50% / 5px 5px no-repeat,
+    rgba(255, 255, 255, 0.06);
 }
 
 .toolbar-btn {
+  min-width: 32px;
+  padding: 0 12px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .toolbar-btn:disabled,
-.toolbar-select:disabled {
-  opacity: 0.5;
+.toolbar-select:disabled,
+.pdf-toolbar-controls button:disabled {
+  opacity: 0.46;
   cursor: not-allowed;
   filter: saturate(0.6);
 }
 
 .toolbar-btn.translate-action {
-  min-width: 42px;
-  gap: 6px;
-  background: var(--accent-soft);
-  border-color: rgba(106, 169, 255, 0.24);
+  min-width: 92px;
+}
+
+.toolbar-btn.translate-action.running {
+  border-color: rgba(106, 169, 255, 0.34);
+  background: rgba(106, 169, 255, 0.11);
+}
+
+.toolbar-btn.stop-action {
+  color: #ffb3b3;
+  border-color: rgba(198, 73, 73, 0.22);
+  background: rgba(198, 73, 73, 0.08);
+}
+
+.toolbar-btn.stop-action:hover {
+  border-color: rgba(255, 130, 130, 0.38);
+  background: rgba(198, 73, 73, 0.14);
 }
 
 .toolbar-icon {
@@ -1557,24 +1627,19 @@ watch(translationArtifactActivePage, async () => {
   color: var(--text-secondary);
 }
 
-.toolbar-btn.icon-only {
-  width: 34px;
-  min-width: 34px;
-  padding: 0;
-  display: grid;
-  place-items: center;
-  font-size: 17px;
-  font-weight: 750;
-}
-
 .toolbar-btn.split-toggle {
   color: var(--text-secondary);
 }
 
 .toolbar-btn.split-toggle.active {
   color: var(--text-primary);
-  border-color: rgba(106, 169, 255, 0.36);
-  background: rgba(106, 169, 255, 0.16);
+  border-color: rgba(106, 169, 255, 0.34);
+  background: rgba(106, 169, 255, 0.12);
+}
+
+.toolbar-action-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-chip {
@@ -1616,17 +1681,23 @@ watch(translationArtifactActivePage, async () => {
 .pdf-toolbar-controls {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   color: var(--text-secondary);
   font-size: 12px;
 }
 
+.toolbar-control-group {
+  display: inline-flex;
+  align-items: center;
+  overflow: hidden;
+}
+
 .pdf-toolbar-controls button {
-  min-height: 30px;
-  min-width: 32px;
-  border-radius: 9px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.04);
+  width: 32px;
+  height: 30px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
   color: var(--text-primary);
   cursor: pointer;
   padding: 0;
@@ -1634,22 +1705,14 @@ watch(translationArtifactActivePage, async () => {
   font-weight: 750;
 }
 
-.pdf-toolbar-controls button:disabled {
-  opacity: 0.42;
-  cursor: not-allowed;
-}
-
 .page-meter,
 .zoom-meter {
-  min-width: 46px;
+  min-width: 52px;
   text-align: center;
   white-space: nowrap;
-}
-
-.toolbar-divider {
-  width: 1px;
-  height: 18px;
-  background: var(--line-soft);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .translation-error {
@@ -1664,9 +1727,9 @@ watch(translationArtifactActivePage, async () => {
 
 .reader-tab-bar {
   display: flex;
-  align-items: stretch;
-  gap: 4px;
-  padding: 6px 12px 0;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -1679,22 +1742,44 @@ watch(translationArtifactActivePage, async () => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 200px;
-  padding: 6px 8px 6px 10px;
-  border: 1px solid var(--line-soft);
-  border-bottom: none;
-  border-radius: 8px 8px 0 0;
-  background: rgba(255, 255, 255, 0.03);
+  height: 28px;
+  max-width: 210px;
+  padding: 0 7px 0 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
 }
 
-.reader-tab.active {
-  background: rgba(120, 170, 255, 0.12);
+.reader-tab:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.075);
   color: var(--text-primary);
-  border-color: rgba(120, 170, 255, 0.32);
+}
+
+.reader-tab.active {
+  background: rgba(120, 170, 255, 0.115);
+  color: var(--text-primary);
+  border-color: rgba(120, 170, 255, 0.24);
+}
+
+.reader-current-doc {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.reader-current-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .reader-tab-dot {
@@ -1709,12 +1794,25 @@ watch(translationArtifactActivePage, async () => {
   background: #4caf7d;
 }
 
+.reader-tab-dot.indexed {
+  background: #4caf7d;
+}
+
 .reader-tab-dot.failed {
   background: #c64949;
 }
 
 .reader-tab-dot.processing {
   background: #d6a14a;
+}
+
+.reader-tab-dot.indexing,
+.reader-tab-dot.pending {
+  background: #d6a14a;
+}
+
+.reader-tab-dot.stale {
+  background: #c64949;
 }
 
 .reader-tab-name {
@@ -1728,10 +1826,12 @@ watch(translationArtifactActivePage, async () => {
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1;
-  padding: 0 2px;
-  border-radius: 4px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 5px;
 }
 
 .reader-tab-close:hover {
@@ -2109,6 +2209,12 @@ watch(translationArtifactActivePage, async () => {
 
 .translation-full-state.error .translation-full-title {
   color: #fca5a5;
+}
+.translation-full-state.info .translation-full-logo {
+  border-color: rgba(106, 169, 255, 0.34);
+}
+.translation-full-state.info .translation-full-title {
+  color: var(--text-secondary);
 }
 
 .translation-full-retry {

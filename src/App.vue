@@ -2304,6 +2304,28 @@ function formatPdfTranslationError(message) {
   return '翻译不可用：Google Web / Microsoft(Bing) Web 均未通过网络检测。请检查网络/代理，或切换到 LLM Provider。'
 }
 
+// A scanned / image-only PDF has no text layer, so Babeldoc returns "contains no
+// paragraphs" (code=BabeldocError). That isn't a real, retryable failure —
+// translation simply doesn't apply. Detect it so we can show a calm "not
+// available" notice instead of a scary error, and skip re-running the flow.
+function isScannedTranslationError(message) {
+  return /contains no paragraphs|no paragraphs|BabeldocError/i.test(String(message || ''))
+}
+
+function applyTranslationUnsupported(doc) {
+  if (!doc?.translation) return
+  const translation = doc.translation
+  translation.status = 'unsupported'
+  translation.pdfStatus = 'unsupported'
+  translation.phase = 'unsupported'
+  translation.error = ui.value.scannedPdfTranslationUnsupported
+  translation.progress = 0
+  translation.total = 0
+  translation.failedBlocks = 0
+  // Remember so a later click on Translate doesn't re-run the doomed flow.
+  doc.translationUnsupported = true
+}
+
 // Map a backend index error to a user-facing message. Scanned/image-only PDFs
 // surface the SCANNED_PDF_NO_TEXT sentinel (see pdf_index/mod.rs) which we turn
 // into a localized, friendly explanation instead of a raw Pdfium error.
@@ -2388,6 +2410,16 @@ async function handleTranslationAction(viewerContext = {}) {
     return
   }
 
+  // Scanned / no-text-layer PDF: translation can't work. Show the calm notice in
+  // the translation pane and don't run the flow at all (we learned this from a
+  // prior attempt on this document).
+  if (doc.translationUnsupported) {
+    applyTranslationUnsupported(doc)
+    viewMode.value = 'dual'
+    rightCollapsed.value = true
+    return
+  }
+
   translation.error = ''
   translation.status = 'pending'
   translation.progress = 0
@@ -2467,8 +2499,13 @@ async function handleTranslationAction(viewerContext = {}) {
       scheduleActivePageTranslationLoad(0)
     }
   } catch (err) {
-    translation.status = 'failed'
-    translation.error = formatPdfTranslationError(err?.message || String(err))
+    const raw = err?.message || String(err)
+    if (isScannedTranslationError(raw)) {
+      applyTranslationUnsupported(doc)
+    } else {
+      translation.status = 'failed'
+      translation.error = formatPdfTranslationError(raw)
+    }
   }
 }
 
@@ -2509,6 +2546,9 @@ function applyTranslationJobResult(doc, result) {
   doc.translation.phase = result.phase || doc.translation.phase || ''
   doc.translation.currentPage = Number(result.currentPage || doc.translation.currentPage || 0)
   doc.translation.error = result.error || ''
+  if (doc.translation.status === 'failed' && isScannedTranslationError(doc.translation.error)) {
+    applyTranslationUnsupported(doc)
+  }
 }
 
 function applyPdfTranslationJobResult(doc, result) {
@@ -2545,6 +2585,9 @@ function applyPdfTranslationJobResult(doc, result) {
   }
   doc.translation.cached = Boolean(result.cached)
   doc.translation.error = result.error || ''
+  if (doc.translation.status === 'failed' && isScannedTranslationError(doc.translation.error)) {
+    applyTranslationUnsupported(doc)
+  }
 }
 
 function isTranslationJobRelevant(doc, payload) {
