@@ -2023,24 +2023,30 @@ function evidenceSourceLabel(source) {
 }
 
 .session-tabs::-webkit-scrollbar {
-  height: 6px;
+  height: 8px;
 }
 
 .session-tabs::-webkit-scrollbar-track {
   background: transparent;
 }
 
+/* Slim floating thumb: a 3px transparent border + padding-box clip shrinks the
+   visible bar to ~2px, hidden until the strip is hovered. */
 .session-tabs::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
   border-radius: 999px;
   background: transparent;
+  background-clip: padding-box;
 }
 
 .session-tabs:hover::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.22);
+  background-clip: padding-box;
 }
 
 .session-tabs::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.34);
+  background-clip: padding-box;
 }
 
 .session-tab {
