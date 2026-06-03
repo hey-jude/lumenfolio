@@ -3963,24 +3963,24 @@ onMounted(() => {
     />
 
     <Transition name="notes-drawer">
-      <NotesPane
-        v-if="notesDrawerOpen && !rightCollapsed"
-        class="notes-drawer"
-        :document="selectedDocument"
-        :collapsed="false"
-        :width="330"
-        :notes="selectedDocument.notes || []"
-        :loading="Boolean(selectedDocument.notesLoading) && !selectedDocument.notesLoaded"
-        :active-note-id="activeNoteId"
-        :as-drawer="true"
-        :locale="locale"
-        :ui="ui"
-        @toggle-collapse="toggleNotesDrawer"
-        @set-tab="setRightPaneTab"
-        @note-focus="focusNote"
-        @note-edit="openNoteEditComposer"
-        @note-delete="openNoteDeleteConfirm"
-      />
+      <div v-if="notesDrawerOpen && !rightCollapsed" class="notes-drawer">
+        <NotesPane
+          :document="selectedDocument"
+          :collapsed="false"
+          :width="330"
+          :notes="selectedDocument.notes || []"
+          :loading="Boolean(selectedDocument.notesLoading) && !selectedDocument.notesLoaded"
+          :active-note-id="activeNoteId"
+          :as-drawer="true"
+          :locale="locale"
+          :ui="ui"
+          @toggle-collapse="toggleNotesDrawer"
+          @set-tab="setRightPaneTab"
+          @note-focus="focusNote"
+          @note-edit="openNoteEditComposer"
+          @note-delete="openNoteDeleteConfirm"
+        />
+      </div>
     </Transition>
 
     <NoteComposer
@@ -4464,15 +4464,24 @@ onMounted(() => {
   position: relative;
 }
 
-/* Notes drawer: slides in from the right edge, floating over the Agent pane so
-   the conversation stays visible underneath (does not squeeze the Reader). */
+/* Notes drawer: an absolutely-positioned wrapper that floats over the Agent
+   pane (does NOT squeeze the Reader). Styling the wrapper div here — rather than
+   the NotesPane root — avoids a scoped-CSS specificity tie with NotesPane's own
+   `.notes-shell { position: relative }`, which previously left the pane in the
+   flex flow and pushed the Reader narrower. The NotesPane inside fills it. */
 .notes-drawer {
   position: absolute;
   top: 0;
   right: 0;
   bottom: 0;
+  width: 330px;
   z-index: 40;
   box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28);
+}
+
+.notes-drawer > :deep(.notes-shell) {
+  width: 100% !important;
+  height: 100%;
 }
 
 .notes-drawer-enter-active,
