@@ -2017,11 +2017,31 @@ function evidenceSourceLabel(source) {
   min-width: 0;
   flex: 1;
   overflow-x: auto;
-  scrollbar-width: none;
+  /* Lightweight transparent scrollbar so overflowed session tabs stay reachable.
+     Faint by default (signals "more tabs"), stronger on hover. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
 }
 
 .session-tabs::-webkit-scrollbar {
-  display: none;
+  height: 6px;
+}
+
+.session-tabs::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.session-tabs::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.session-tabs:hover {
+  scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+}
+
+.session-tabs:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.24);
 }
 
 .session-tab {
