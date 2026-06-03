@@ -212,7 +212,10 @@ const canCancelTranslation = computed(() => {
 })
 const canOpenTranslationView = computed(() => {
   const translation = props.document.translation || {}
-  if (['pending', 'queued', 'running', 'partial', 'succeeded', 'failed'].includes(translation.status)) {
+  // 'unsupported' (scanned PDF, no text layer) must keep the pane open so the
+  // "Translation not available" notice is visible — otherwise the view just
+  // collapses on failure and the user has no idea what happened.
+  if (['pending', 'queued', 'running', 'partial', 'succeeded', 'failed', 'unsupported'].includes(translation.status)) {
     return true
   }
   return translation.status === 'canceled' && Boolean(translation.monoPdfPath || translation.dualPdfPath)
