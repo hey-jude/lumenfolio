@@ -370,6 +370,25 @@ async function ensureActiveSession() {
   return session
 }
 
+// Retarget the active session's focus document (e.g. the user navigated to a
+// different PDF and wants the conversation to now center on it). Updates locally
+// then persists; the change is low-stakes if the backend write fails.
+async function handleSetSessionFocus(docId) {
+  const session = activeSession.value
+  if (!session || !docId || docId === 'empty') return
+  if (session.focusDocId === docId) return
+  session.focusDocId = docId
+  const doc = allDocs.value.find((item) => item.id === docId)
+  if (doc) session.focusDocTitle = doc.shortTitle || doc.title || ''
+  try {
+    await invoke('update_chat_session_focus', {
+      input: { id: session.id, focusDocumentId: docId },
+    })
+  } catch (err) {
+    console.warn('Failed to update session focus', err)
+  }
+}
+
 function setActiveSession(id) {
   if (!id || !chatSessions.has(id)) return
   if (!openSessionIds.value.includes(id)) {
@@ -3909,6 +3928,8 @@ onMounted(() => {
     <ChatPane
       :session="activeSession"
       :document="activeFocusDoc"
+      :viewed-doc-id="selectedDocId"
+      :viewed-doc-name="selectedDocument.shortTitle || selectedDocument.title || ''"
       :all-documents="allDocs"
       :collapsed="rightCollapsed"
       :width="rightWidth"
@@ -3937,6 +3958,7 @@ onMounted(() => {
       @toggle-history="sessionHistoryOpen = !sessionHistoryOpen"
       @close-history="sessionHistoryOpen = false"
       @toggle-notes="toggleNotesDrawer"
+      @set-focus-doc="handleSetSessionFocus"
       @send="handleSend"
     />
 

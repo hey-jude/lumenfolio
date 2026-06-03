@@ -34,6 +34,16 @@ const props = defineProps({
     type: Object,
     required: true,
   },
+  // The document the user is currently viewing in the reader. When it differs
+  // from the focus document, the header offers to retarget the session's focus.
+  viewedDocId: {
+    type: String,
+    default: '',
+  },
+  viewedDocName: {
+    type: String,
+    default: '',
+  },
   allDocuments: {
     type: Array,
     default: () => [],
@@ -99,7 +109,16 @@ const emit = defineEmits([
   'toggle-history',
   'close-history',
   'toggle-notes',
+  'set-focus-doc',
 ])
+
+// True when the user is reading a different document than the session focuses on.
+const focusDiffersFromView = computed(() => Boolean(
+  props.viewedDocId
+    && props.document?.id
+    && props.viewedDocId !== props.document.id
+    && props.viewedDocId !== 'empty',
+))
 
 const chatInputEnabled = computed(() => props.document.chatReady && props.modelConfigured)
 const supportsVision = computed(() => props.currentModel?.capabilities?.includes('vision'))
@@ -1252,6 +1271,33 @@ function citationCrossDocName(message, evidence) {
   return doc ? docDisplayName(doc) : ''
 }
 
+// Distinct source documents an answer drew evidence from. Returns [] for a
+// single-document answer (no clutter); for multi-document answers it lists each
+// paper so the user can see the answer spans their library.
+function answerSourceDocs(message) {
+  const ids = [...new Set((message.citations || [])
+    .map((citation) => citation.documentId)
+    .filter(Boolean))]
+  if (ids.length <= 1) return []
+  return ids.map((id) => {
+    const doc = (props.allDocuments || []).find((item) => item.id === id)
+    return {
+      id,
+      name: doc ? docDisplayName(doc) : id,
+      isFocus: id === props.document?.id,
+    }
+  })
+}
+
+// For a trace step that routed to another document via `documentId`, the target
+// document's short name — so the user sees the agent fan out across papers.
+function eventTargetDocName(event) {
+  const docId = event?.tool?.args?.documentId
+  if (!docId || docId === props.document?.id) return ''
+  const doc = (props.allDocuments || []).find((item) => item.id === docId)
+  return doc ? docDisplayName(doc) : docId
+}
+
 function evidenceSourceLabel(source) {
   const labels = {
     selection: props.ui.selectedText,
@@ -1388,7 +1434,16 @@ function evidenceSourceLabel(source) {
           </button>
         </div>
       </div>
-      <div class="chat-subtitle-row">{{ ui.currentDoc }}: {{ document.shortTitle }}</div>
+      <div class="chat-subtitle-row">
+        <span class="chat-focus-label">{{ ui.focusDoc }}: {{ document.shortTitle }}</span>
+        <button
+          v-if="focusDiffersFromView"
+          type="button"
+          class="focus-switch-btn"
+          :title="`${ui.focusOnCurrent}: ${viewedDocName}`"
+          @click="emit('set-focus-doc', viewedDocId)"
+        >{{ ui.focusOnCurrent }}</button>
+      </div>
       <div
         v-if="historyOpen"
         class="session-history-backdrop"
@@ -1583,6 +1638,16 @@ function evidenceSourceLabel(source) {
             <div v-if="message.provider" class="message-provider">{{ message.provider }}</div>
 
             <div v-if="evidenceItems(message).length" class="evidence-group">
+              <div v-if="answerSourceDocs(message).length" class="evidence-sources">
+                <span class="evidence-sources-label">{{ ui.sources }}</span>
+                <span
+                  v-for="src in answerSourceDocs(message)"
+                  :key="`${message.id}-src-${src.id}`"
+                  class="evidence-source-chip"
+                  :class="{ focus: src.isFocus }"
+                  :title="src.name"
+                >{{ src.name }}</span>
+              </div>
               <div class="evidence-strip">
                 <span class="evidence-strip-label">{{ ui.evidence }}</span>
                 <button
@@ -1653,7 +1718,10 @@ function evidenceSourceLabel(source) {
                   <div class="agent-step-marker"></div>
                   <div class="agent-step-body">
                     <div class="agent-step-head">
-                      <span>{{ eventTitle(event) }}</span>
+                      <span>
+                        {{ eventTitle(event) }}
+                        <span v-if="eventTargetDocName(event)" class="agent-step-doc">{{ eventTargetDocName(event) }}</span>
+                      </span>
                       <span>{{ formatTraceStatus(event.status) }}</span>
                     </div>
                     <div class="agent-step-detail">{{ eventSummary(event) }}</div>
@@ -1906,14 +1974,39 @@ function evidenceSourceLabel(source) {
 }
 
 .chat-subtitle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 0 16px 12px;
   border-bottom: 1px solid var(--line-soft);
   color: var(--text-muted);
   font-size: 12px;
   flex-shrink: 0;
+}
+
+.chat-focus-label {
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.focus-switch-btn {
+  flex-shrink: 0;
+  border: 1px solid rgba(106, 169, 255, 0.34);
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: rgba(106, 169, 255, 0.1);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.focus-switch-btn:hover {
+  color: var(--text-primary);
+  background: rgba(106, 169, 255, 0.18);
 }
 
 /* Session tabs ---------------------------------------------------------- */
@@ -2443,6 +2536,42 @@ function evidenceSourceLabel(source) {
   margin-top: 12px;
 }
 
+/* Multi-document "Sources:" line above the evidence strip. */
+.evidence-sources {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.evidence-sources-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.evidence-source-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  font-size: 11px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-source-chip.focus {
+  border-color: rgba(106, 169, 255, 0.34);
+  background: rgba(106, 169, 255, 0.12);
+  color: var(--text-primary);
+}
+
 .evidence-strip {
   display: flex;
   align-items: center;
@@ -2957,6 +3086,19 @@ button.agent-process-head:disabled {
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
+}
+
+/* "in <Doc>" badge on a trace step that searched another document. */
+.agent-step-doc {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(106, 169, 255, 0.14);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
 }
 
 .agent-step-head span:last-child {
