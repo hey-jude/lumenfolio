@@ -112,6 +112,19 @@ const emit = defineEmits([
   'set-focus-doc',
 ])
 
+// A plain mouse wheel only emits vertical deltas, which the horizontally-only
+// session tab strip ignores by default. Translate vertical wheel into
+// horizontal scroll so a mouse (not just a trackpad) can reach overflowed tabs.
+function onSessionTabsWheel(event) {
+  const el = event.currentTarget
+  if (!el || el.scrollWidth <= el.clientWidth) return
+  // Respect genuine horizontal intent (trackpad / shift+wheel); only convert
+  // the vertical component when it dominates.
+  if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+  el.scrollLeft += event.deltaY
+  event.preventDefault()
+}
+
 // True when the user is reading a different document than the session focuses on.
 const focusDiffersFromView = computed(() => Boolean(
   props.viewedDocId
@@ -1354,7 +1367,7 @@ function evidenceSourceLabel(source) {
 
     <template v-else>
       <div class="chat-header">
-        <div class="session-tabs">
+        <div class="session-tabs" @wheel="onSessionTabsWheel">
           <button
             v-for="tab in sessions"
             :key="tab.id"
