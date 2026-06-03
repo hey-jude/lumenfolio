@@ -1814,68 +1814,209 @@ pub fn recall_chat_history(
     Ok(candidates)
 }
 
-/// A compact descriptor of a document for injecting into the planner prompt so the
-/// agent knows which "@-referenced" documents exist and what they cover. Kept small
-/// (title + a truncated top-level outline) to bound prompt token cost.
-pub struct DocumentBrief {
-    pub document_id: String,
-    pub title: String,
-    pub outline: Vec<String>,
+// --- Workspace manifest (multi-document "file tree" for the agent) ----------
+
+/// Soft cap on how many documents are visible to the agent at once (the
+/// `documentId`-routing whitelist). The focus document and any @-referenced
+/// documents are always included; remaining slots are filled by local relevance
+/// to the question. Prevents an enormous library from blowing up the prompt.
+pub const WORKSPACE_MANIFEST_MAX_DOCS: usize = 50;
+/// Beyond the focus + @-referenced docs, how many of the highest-scoring docs
+/// also get their abstract shown (the rest are listed title-only).
+const MANIFEST_ABSTRACT_DOCS_TOP_K: usize = 8;
+/// Abstract truncation (chars) for a detailed manifest entry.
+const MANIFEST_ABSTRACT_CHARS: usize = 300;
+
+struct ManifestRow {
+    id: String,
+    title: String,
+    rel_dir: String,
+    page_count: u32,
+    abstract_text: String,
 }
 
-impl DocumentBrief {
-    /// Render as a single prompt line, e.g.
-    /// `- [doc123] "Attention Is All You Need" — outline: Intro; Model; Results`
-    pub fn to_prompt_line(&self) -> String {
-        if self.outline.is_empty() {
-            format!("- [{}] \"{}\"", self.document_id, self.title)
-        } else {
-            format!(
-                "- [{}] \"{}\" — outline: {}",
-                self.document_id,
-                self.title,
-                self.outline.join("; ")
-            )
+pub struct DocManifestEntry {
+    pub document_id: String,
+    pub title: String,
+    pub rel_dir: String,
+    pub page_count: u32,
+    /// Truncated abstract when this entry is "detailed"; empty otherwise.
+    pub summary: String,
+    pub is_focus: bool,
+    pub is_referenced: bool,
+}
+
+pub struct WorkspaceManifest {
+    pub entries: Vec<DocManifestEntry>,
+    /// The `documentId` whitelist (== entry ids), for the tool-dispatch guard.
+    pub document_ids: Vec<String>,
+}
+
+impl WorkspaceManifest {
+    /// Render the manifest as a prompt block the agent uses to locate documents
+    /// and route `documentId` tool calls. Every doc gets title + dir + page
+    /// count; only the focus, @-referenced, and top-ranked docs get an abstract.
+    pub fn to_prompt_block(&self) -> String {
+        if self.entries.is_empty() {
+            return String::new();
         }
+        let mut out = String::from(
+            "Workspace documents (the user's whole library). To gather evidence from any of them, pass its id as the `documentId` argument on a retrieval tool:\n",
+        );
+        for entry in &self.entries {
+            let mut tags = String::new();
+            if entry.is_focus {
+                tags.push_str(" [CURRENT FOCUS]");
+            }
+            if entry.is_referenced {
+                tags.push_str(" [@referenced]");
+            }
+            let dir = if entry.rel_dir.is_empty() {
+                String::new()
+            } else {
+                format!("{}/ ", entry.rel_dir)
+            };
+            out.push_str(&format!(
+                "- [{}] {}\"{}\" ({}p){}\n",
+                entry.document_id, dir, entry.title, entry.page_count, tags
+            ));
+            if !entry.summary.is_empty() {
+                out.push_str(&format!("    Abstract: {}\n", entry.summary));
+            }
+        }
+        out
     }
 }
 
-/// Build a brief (title + up to `max_outline` top-level section titles) for a single
-/// document. Cheap: one row from `documents` plus a capped read of `structure_tree_nodes`.
-/// Returns Ok with an empty-outline brief if the tree is not yet built.
-pub fn document_brief(
-    conn: &Connection,
-    document_id: &str,
-    max_outline: usize,
-) -> Result<DocumentBrief, String> {
-    let title: String = conn
-        .query_row(
-            "SELECT COALESCE(NULLIF(short_title, ''), title) FROM documents WHERE id = ?1",
-            params![document_id],
-            |row| row.get(0),
-        )
-        .map_err(|err| format!("Failed to load document title: {err}"))?;
+fn manifest_dir_hint(path: &str) -> String {
+    std::path::Path::new(path)
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_string()
+}
 
+fn manifest_summary(text: &str) -> String {
+    let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.chars().count() <= MANIFEST_ABSTRACT_CHARS {
+        cleaned
+    } else {
+        format!(
+            "{}…",
+            cleaned.chars().take(MANIFEST_ABSTRACT_CHARS).collect::<String>()
+        )
+    }
+}
+
+/// Build the workspace manifest: all indexed documents (title + dir + page
+/// count), with abstracts for the focus, @-referenced, and locally-most-relevant
+/// docs. Pure local ranking (question-term overlap with title+abstract) — no LLM.
+pub fn load_workspace_manifest(
+    conn: &Connection,
+    question: &str,
+    focus_document_id: &str,
+    reference_document_ids: &[&str],
+) -> Result<WorkspaceManifest, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT title FROM structure_tree_nodes
-             WHERE document_id = ?1 AND level = 1
-             ORDER BY order_index
-             LIMIT ?2",
+            "SELECT d.id,
+                    COALESCE(NULLIF(d.short_title, ''), d.title),
+                    d.path,
+                    d.page_count,
+                    COALESCE((SELECT group_concat(b.text, ' ')
+                              FROM document_blocks b
+                              WHERE b.document_id = d.id AND b.block_role = 'abstract'), '')
+             FROM documents d
+             WHERE d.index_status = 'indexed'
+             ORDER BY d.last_opened_at DESC",
         )
-        .map_err(|err| format!("Failed to prepare document outline: {err}"))?;
-    let outline = stmt
-        .query_map(params![document_id, max_outline as i64], |row| {
-            row.get::<_, String>(0)
+        .map_err(|err| format!("Failed to prepare workspace manifest query: {err}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let path: String = row.get(2)?;
+            Ok(ManifestRow {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                rel_dir: manifest_dir_hint(&path),
+                page_count: row.get::<_, i64>(3)?.max(0) as u32,
+                abstract_text: row.get(4)?,
+            })
         })
-        .map_err(|err| format!("Failed to read document outline: {err}"))?
+        .map_err(|err| format!("Failed to load workspace manifest: {err}"))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| format!("Failed to collect document outline: {err}"))?;
+        .map_err(|err| format!("Failed to read workspace manifest: {err}"))?;
 
-    Ok(DocumentBrief {
-        document_id: document_id.to_string(),
-        title,
-        outline,
+    let focus = focus_document_id.trim();
+    let referenced: std::collections::HashSet<&str> =
+        reference_document_ids.iter().copied().collect();
+    let terms = query_terms(question);
+    let score_of = |row: &ManifestRow| -> usize {
+        if terms.is_empty() {
+            return 0;
+        }
+        let haystack = format!("{} {}", row.title, row.abstract_text).to_lowercase();
+        terms
+            .iter()
+            .filter(|term| haystack.contains(term.as_str()))
+            .count()
+    };
+
+    // Split into always-included (focus + @) and the locally-ranked rest.
+    let mut priority: Vec<&ManifestRow> = Vec::new();
+    let mut rest: Vec<(&ManifestRow, usize)> = Vec::new();
+    for row in &rows {
+        if row.id == focus || referenced.contains(row.id.as_str()) {
+            priority.push(row);
+        } else {
+            rest.push((row, score_of(row)));
+        }
+    }
+    priority.sort_by_key(|row| usize::from(row.id != focus)); // focus leads
+    rest.sort_by(|a, b| b.1.cmp(&a.1)); // by score desc; recency order is the stable tiebreak
+
+    let mut entries: Vec<DocManifestEntry> = Vec::new();
+    for row in priority {
+        entries.push(DocManifestEntry {
+            document_id: row.id.clone(),
+            title: row.title.clone(),
+            rel_dir: row.rel_dir.clone(),
+            page_count: row.page_count,
+            summary: manifest_summary(&row.abstract_text),
+            is_focus: row.id == focus,
+            is_referenced: referenced.contains(row.id.as_str()),
+        });
+    }
+    let mut detailed_quota = MANIFEST_ABSTRACT_DOCS_TOP_K;
+    for (row, score) in rest {
+        if entries.len() >= WORKSPACE_MANIFEST_MAX_DOCS {
+            break;
+        }
+        let detailed = detailed_quota > 0 && score > 0;
+        if detailed {
+            detailed_quota -= 1;
+        }
+        entries.push(DocManifestEntry {
+            document_id: row.id.clone(),
+            title: row.title.clone(),
+            rel_dir: row.rel_dir.clone(),
+            page_count: row.page_count,
+            summary: if detailed {
+                manifest_summary(&row.abstract_text)
+            } else {
+                String::new()
+            },
+            is_focus: false,
+            is_referenced: false,
+        });
+    }
+    let document_ids = entries
+        .iter()
+        .map(|entry| entry.document_id.clone())
+        .collect();
+    Ok(WorkspaceManifest {
+        entries,
+        document_ids,
     })
 }
 
@@ -7973,25 +8114,52 @@ mod tests {
     }
 
     #[test]
-    fn document_brief_returns_title_and_outline() {
-        let conn = setup_cross_doc_conn();
-        conn.execute(
-            "INSERT INTO documents (id, title, short_title) VALUES ('doc-1', 'Long Title', 'Short')",
-            [],
+    fn workspace_manifest_ranks_and_tags_documents() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE documents (
+               id TEXT PRIMARY KEY,
+               short_title TEXT NOT NULL DEFAULT '',
+               title TEXT NOT NULL DEFAULT '',
+               path TEXT NOT NULL DEFAULT '',
+               page_count INTEGER NOT NULL DEFAULT 0,
+               index_status TEXT NOT NULL DEFAULT 'indexed',
+               last_opened_at INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE document_blocks (
+               id TEXT PRIMARY KEY,
+               document_id TEXT NOT NULL,
+               text TEXT NOT NULL,
+               block_role TEXT NOT NULL DEFAULT 'body'
+             );
+             INSERT INTO documents (id, short_title, title, path, page_count, index_status, last_opened_at) VALUES
+               ('focus', 'Focus', 'Focus Paper', '/lib/a/focus.pdf', 10, 'indexed', 100),
+               ('ref',   'Refd',  'Referenced',  '/lib/b/ref.pdf',   8,  'indexed', 90),
+               ('hit',   'Hitt',  'Relevant',    '/lib/c/hit.pdf',   6,  'indexed', 80),
+               ('miss',  'Misss', 'Unrelated',   '/lib/c/miss.pdf',  4,  'indexed', 70),
+               ('pending','Pend', 'Not Indexed', '/lib/c/pend.pdf',  4,  'pending', 60);
+             INSERT INTO document_blocks (id, document_id, text, block_role) VALUES
+               ('b1', 'hit', 'This paper studies transformer attention mechanisms.', 'abstract'),
+               ('b2', 'miss', 'A cookbook about soup recipes.', 'abstract');",
         )
-        .expect("insert document");
-        conn.execute(
-            "INSERT INTO structure_tree_nodes
-                (id, document_id, title, keywords_json, level, page_start, page_end,
-                 block_start_index, block_end_index, order_index)
-             VALUES ('n1', 'doc-1', 'Introduction', '[]', 1, 1, 1, 0, 0, 1)",
-            [],
-        )
-        .expect("insert node");
-        let brief = document_brief(&conn, "doc-1", 12).expect("brief");
-        assert_eq!(brief.document_id, "doc-1");
-        assert_eq!(brief.title, "Short");
-        assert_eq!(brief.outline, vec!["Introduction".to_string()]);
+        .expect("seed");
+
+        let manifest = load_workspace_manifest(&conn, "transformer attention", "focus", &["ref"])
+            .expect("manifest");
+
+        // Pending (not indexed) doc is excluded.
+        assert!(!manifest.document_ids.iter().any(|id| id == "pending"));
+        // Focus leads and is tagged; @-referenced doc is tagged.
+        assert_eq!(manifest.entries[0].document_id, "focus");
+        assert!(manifest.entries[0].is_focus);
+        assert!(manifest.entries.iter().any(|e| e.document_id == "ref" && e.is_referenced));
+        // The relevant doc outranks the unrelated one and got a summary.
+        let hit = manifest.entries.iter().find(|e| e.document_id == "hit").expect("hit");
+        assert!(hit.summary.contains("attention"));
+        assert_eq!(hit.rel_dir, "c");
+        let prompt = manifest.to_prompt_block();
+        assert!(prompt.contains("[CURRENT FOCUS]"));
+        assert!(prompt.contains("[@referenced]"));
     }
 
     fn setup_chat_history_conn() -> Connection {

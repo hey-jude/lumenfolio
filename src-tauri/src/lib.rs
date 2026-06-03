@@ -2174,9 +2174,38 @@ async fn run_ask_document(
         input.reference_document_ids.as_deref().unwrap_or(&[]),
         document_id,
     );
-    // Borrowed view reused by both the agent run request and the LLM-judge loop.
+    // Borrowed view of the @-referenced docs (priority hint + manifest tagging).
     let reference_document_id_refs: Vec<&str> =
         reference_document_ids.iter().map(String::as_str).collect();
+
+    // Build the workspace manifest once: the agent's "file tree" for multi-document
+    // routing. Its document ids form the tool-dispatch whitelist (focus + @ + the
+    // locally-ranked rest, capped). Failure degrades to focus-only behavior.
+    let workspace_manifest = {
+        let conn = database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        runtime::rag::load_workspace_manifest(
+            &conn,
+            question,
+            document_id,
+            &reference_document_id_refs,
+        )
+        .unwrap_or_else(|err| {
+            log::warn!("Failed to build workspace manifest: {err}");
+            runtime::rag::WorkspaceManifest {
+                entries: Vec::new(),
+                document_ids: Vec::new(),
+            }
+        })
+    };
+    let workspace_manifest_text = workspace_manifest.to_prompt_block();
+    let visible_document_id_refs: Vec<&str> = workspace_manifest
+        .document_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
 
     let selected_provider_id = input.model_provider_id.as_deref().unwrap_or("").trim();
     let provider_result = providers::resolve_chat_provider(
@@ -2281,7 +2310,7 @@ async fn run_ask_document(
             runtime::agent::AgentRunRequest {
                 document_id,
                 session_key: &session_id,
-                reference_document_ids: reference_document_id_refs.clone(),
+                visible_document_ids: visible_document_id_refs.clone(),
                 question,
                 provider_id: Some(selected_provider_id),
                 context_budget,
@@ -2319,7 +2348,8 @@ async fn run_ask_document(
                 app: Some(app),
                 question,
                 document_id,
-                reference_document_ids: &reference_document_id_refs,
+                visible_document_ids: &visible_document_id_refs,
+                workspace_manifest: &workspace_manifest_text,
                 provider,
                 activity_event_id: activity_event_id.as_deref(),
             },
