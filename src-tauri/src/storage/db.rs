@@ -477,6 +477,23 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
 
         CREATE INDEX IF NOT EXISTS idx_notes_document_created
           ON notes(document_id, created_at DESC);
+
+        -- Agent workspace sessions: a session is a first-class conversation that
+        -- is independent of any single document. focus_document_id is the
+        -- (mutable, nullable) document the session currently centers on; it is
+        -- intentionally NOT a cascading foreign key so deleting a document never
+        -- destroys the conversation that referenced it.
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL DEFAULT '',
+          focus_document_id TEXT,
+          referenced_document_ids_json TEXT NOT NULL DEFAULT '[]',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated
+          ON chat_sessions(updated_at DESC);
         ",
     )
     .map_err(|err| format!("Failed to migrate SQLite database: {err}"))?;
@@ -538,6 +555,18 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         "referenced_document_ids_json",
         "ALTER TABLE chat_turns ADD COLUMN referenced_document_ids_json TEXT NOT NULL DEFAULT '[]'",
     )?;
+    ensure_column(
+        conn,
+        "chat_turns",
+        "session_id",
+        "ALTER TABLE chat_turns ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_chat_turns_session_created
+          ON chat_turns(session_id, created_at DESC);",
+    )
+    .map_err(|err| format!("Failed to create chat turn session index: {err}"))?;
+    migrate_chat_turns_to_sessions(conn)?;
     ensure_column(
         conn,
         "document_blocks",
@@ -619,6 +648,43 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|err| format!("Failed to create visual evidence indexes: {err}"))?;
 
+    Ok(())
+}
+
+/// One-time, idempotent migration from per-document chat history to the
+/// session model. Each distinct `document_id` that still has turns with an
+/// empty `session_id` gets exactly one session (deterministic id
+/// `migrated-<document_id>`), and that document's orphaned turns are
+/// back-filled to point at it. Re-running is a no-op because the second pass
+/// finds no rows with `session_id = ''`.
+fn migrate_chat_turns_to_sessions(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO chat_sessions
+            (id, title, focus_document_id, referenced_document_ids_json, created_at, updated_at)
+         SELECT
+            'migrated-' || ct.document_id,
+            COALESCE(
+              NULLIF((SELECT d.short_title FROM documents d WHERE d.id = ct.document_id), ''),
+              (SELECT d.title FROM documents d WHERE d.id = ct.document_id),
+              ''
+            ),
+            ct.document_id,
+            '[]',
+            MIN(ct.created_at),
+            MAX(ct.updated_at)
+         FROM chat_turns ct
+         WHERE ct.session_id = ''
+         GROUP BY ct.document_id",
+        [],
+    )
+    .map_err(|err| format!("Failed to seed migrated chat sessions: {err}"))?;
+    conn.execute(
+        "UPDATE chat_turns
+            SET session_id = 'migrated-' || document_id
+          WHERE session_id = ''",
+        [],
+    )
+    .map_err(|err| format!("Failed to back-fill chat turn session ids: {err}"))?;
     Ok(())
 }
 
