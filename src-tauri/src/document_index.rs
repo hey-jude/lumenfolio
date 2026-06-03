@@ -783,9 +783,9 @@ fn run_document_reindex_job(
     if result.is_ok() {
         // Reindexing invalidates cached working memory for this document's
         // default (per-document) session. Memory is keyed by session id now, so
-        // target the deterministic `migrated-<doc>` key; multi-document sessions
+        // target the deterministic migrated session key; multi-document sessions
         // refresh on the next ask via fresh retrieval.
-        agent_sessions.clear_session(&format!("migrated-{document_id}"));
+        agent_sessions.clear_session(&crate::migrated_session_id(document_id));
     }
 
     match result {
@@ -1180,7 +1180,7 @@ fn repair_document_index_from_cache_job(
     }
     tx.commit()
         .map_err(|err| format!("Failed to commit cached index repair: {err}"))?;
-    agent_sessions.clear_session(&format!("migrated-{document_id}"));
+    agent_sessions.clear_session(&crate::migrated_session_id(document_id));
     Ok(DocumentIndexResult {
         page_count,
         index_version: CURRENT_INDEX_VERSION,

@@ -1110,7 +1110,7 @@ fn mark_document_stale(
     // Invalidate cached working memory for this document's default (per-document)
     // session. Memory is keyed by session id now; multi-document sessions refresh
     // on the next ask via fresh retrieval.
-    agent_sessions.clear_session(&format!("migrated-{document_id}"));
+    agent_sessions.clear_session(&migrated_session_id(&document_id));
     Ok(())
 }
 
@@ -1270,10 +1270,21 @@ fn list_model_providers(
     providers::load_model_provider_outputs(&conn)
 }
 
+/// Deterministic id of a document's fallback ("migrated") session — the one the
+/// migration back-fills and that legacy single-document callers resolve to.
+///
+/// The same convention is encoded as the `'migrated-' || document_id` SQL
+/// expression in `migrate_chat_turns_to_sessions` (storage/db.rs); keep them in
+/// sync. Centralizing the Rust side here keeps the string literal out of the
+/// reindex/clear paths that need it.
+pub(crate) fn migrated_session_id(document_id: &str) -> String {
+    format!("migrated-{document_id}")
+}
+
 /// Resolve the session a request targets. An explicit, non-empty `session_id`
 /// always wins; otherwise we fall back to the deterministic per-document session
-/// `migrated-<document_id>` so legacy single-document callers keep working and
-/// stay consistent with the migration back-fill.
+/// so legacy single-document callers keep working and stay consistent with the
+/// migration back-fill.
 fn resolve_session_id(session_id: Option<&str>, document_id: &str) -> Result<String, String> {
     if let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) {
         return Ok(session_id.to_string());
@@ -1282,7 +1293,7 @@ fn resolve_session_id(session_id: Option<&str>, document_id: &str) -> Result<Str
     if document_id.is_empty() {
         return Err("No session or document selected".to_string());
     }
-    Ok(format!("migrated-{document_id}"))
+    Ok(migrated_session_id(document_id))
 }
 
 #[tauri::command]

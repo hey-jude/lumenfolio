@@ -654,7 +654,8 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
 /// One-time, idempotent migration from per-document chat history to the
 /// session model. Each distinct `document_id` that still has turns with an
 /// empty `session_id` gets exactly one session (deterministic id
-/// `migrated-<document_id>`), and that document's orphaned turns are
+/// `migrated-<document_id>` — the SQL form of `crate::migrated_session_id`;
+/// keep the two in sync), and that document's orphaned turns are
 /// back-filled to point at it. Re-running is a no-op because the second pass
 /// finds no rows with `session_id = ''`.
 fn migrate_chat_turns_to_sessions(conn: &Connection) -> Result<(), String> {

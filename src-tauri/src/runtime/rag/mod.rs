@@ -1899,14 +1899,7 @@ fn manifest_dir_hint(path: &str) -> String {
 
 fn manifest_summary(text: &str) -> String {
     let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.chars().count() <= MANIFEST_ABSTRACT_CHARS {
-        cleaned
-    } else {
-        format!(
-            "{}…",
-            cleaned.chars().take(MANIFEST_ABSTRACT_CHARS).collect::<String>()
-        )
-    }
+    truncate_chars(&cleaned, MANIFEST_ABSTRACT_CHARS)
 }
 
 /// Build the workspace manifest: all indexed documents (title + dir + page
