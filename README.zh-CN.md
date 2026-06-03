@@ -93,6 +93,14 @@ Question
 
 这样，比较与综合就留在同一个证据可追溯的循环里，而不必在多个独立聊天之间来回复制文本。
 
+## 视觉证据与 TSR
+
+论文里的关键证据并不总在正文段落里，很多实验结果、指标对比和方法细节都藏在图、表格和图表中。Lumenfolio 内置了视觉证据链路：识别 PDF 中的视觉区域，渲染表格 / 图像裁剪，并把这些视觉资产纳入 agent 可追溯的证据范围。
+
+对于表格，运行时包含 Table Structure Recognition（TSR）路径：在配置本地 TSR 模型时，可以把表格区域转换成结构化单元格和可检索的 table facts。这样，用户追问某一行、某一列、实验指标或 benchmark 结果时，agent 不只依赖表格附近的正文描述。
+
+当前发布包已经包含视觉 / 表格证据工作流。扫描 / 图片型 PDF 的本地 OCR 已内置于 macOS Apple Silicon 和 Windows 版本；可选的 ONNX TSR 模型尚未默认随发布包内置。
+
 ## 翻译
 
 Lumenfolio 支持阅读中的快速选区翻译，也支持整篇 PDF 的文档级翻译。
@@ -133,7 +141,8 @@ Lumenfolio 的笔记不是脱离原文的普通文本片段，而是绑定到 PD
 - 带 citation 的回答，支持 page/bbox 跳转
 - Chat 侧 evidence chain 与可折叠 agent trace
 - Provider 化聊天和翻译配置
-- 表格 / 视觉证据参与检索
+- 表格 / 视觉证据参与检索，支持视觉裁剪和 TSR-ready 表格证据
+- macOS Apple Silicon 和 Windows 版本支持扫描 / 图片型 PDF 本地 OCR
 - 基于 PDFMathTranslate sidecar 的版面级 PDF 翻译
 
 ## 架构
@@ -173,6 +182,8 @@ Lumenfolio 是一个 Tauri 2 + Vue 3 桌面应用。
 - 带页码 / bbox 的 citation 跳转
 - Chat 侧 evidence chain 与 trace 展示
 - 本地笔记与 PDF 锚点
+- 图、图表、图片和表格区域的视觉证据索引
+- macOS Apple Silicon 和 Windows 发布包支持扫描 / 图片型 PDF OCR
 - PDFMathTranslate sidecar 文档翻译集成
 
 ## 环境要求

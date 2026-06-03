@@ -93,6 +93,14 @@ Reading rarely stays inside a single paper. Lumenfolio lets you pull other index
 
 This keeps comparison and synthesis inside the same evidence-grounded loop instead of forcing you to copy text between separate chats.
 
+## Visual Evidence and TSR
+
+Academic PDFs often hide important evidence in figures, charts, and tables. Lumenfolio includes a visual evidence pipeline that identifies visual assets, renders table/figure crops, and keeps those assets available to the agent as source-grounded evidence.
+
+For tables, the runtime includes a Table Structure Recognition (TSR) path that can turn table regions into structured cells and searchable table facts when a local TSR model is configured. This is designed for questions that depend on rows, columns, metrics, and experiment results rather than surrounding prose alone.
+
+The release builds currently ship the visual/table evidence workflow. Local OCR for scanned/image-only PDFs is bundled on macOS Apple Silicon and Windows; the optional ONNX TSR model is not bundled by default yet.
+
 ## Translation
 
 Lumenfolio supports both quick selection translation and document-level PDF translation.
@@ -132,7 +140,8 @@ The notes workflow is designed for paper reading:
 - Cross-document chat: `@`-mention up to 4 other indexed papers in one question
 - Evidence chain and foldable agent trace in chat
 - Provider-based chat and translation configuration
-- Visual/table-aware retrieval path for richer PDF evidence
+- Visual/table-aware retrieval path with rendered crops and TSR-ready table evidence
+- Local OCR for scanned/image-only PDFs on macOS Apple Silicon and Windows
 - PDFMathTranslate-based sidecar for layout-aware translation
 
 ## Architecture
@@ -172,6 +181,8 @@ Implemented today:
 - Citation-aware answers with page/bbox jump support
 - Evidence chain and agent trace metadata in chat
 - Local notes with PDF anchors
+- Visual evidence indexing for figures, charts, images, and table regions
+- Scanned/image-only PDF OCR in macOS Apple Silicon and Windows release builds
 - PDFMathTranslate sidecar integration for document translation
 
 ## Prerequisites
