@@ -1353,7 +1353,7 @@ function evidenceSourceLabel(source) {
     </button>
 
     <template v-else>
-      <div class="chat-header" data-tauri-drag-region @mousedown="startWindowDrag">
+      <div class="chat-header">
         <div class="session-tabs">
           <button
             v-for="tab in sessions"
@@ -1434,7 +1434,7 @@ function evidenceSourceLabel(source) {
           </button>
         </div>
       </div>
-      <div class="chat-subtitle-row">
+      <div class="chat-subtitle-row" data-tauri-drag-region @mousedown="startWindowDrag">
         <span class="chat-focus-label">{{ ui.focusDoc }}: {{ document.shortTitle }}</span>
         <button
           v-if="focusDiffersFromView"
@@ -2017,10 +2017,9 @@ function evidenceSourceLabel(source) {
   min-width: 0;
   flex: 1;
   overflow-x: auto;
-  /* Lightweight transparent scrollbar so overflowed session tabs stay reachable.
-     Faint by default (signals "more tabs"), stronger on hover. */
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+  /* Cursor-style scrollbar: invisible track, thumb hidden until the strip is
+     hovered, then a subtle rounded bar. The 6px lane is always reserved (track
+     is transparent) so revealing the thumb causes no layout shift. */
 }
 
 .session-tabs::-webkit-scrollbar {
@@ -2033,15 +2032,15 @@ function evidenceSourceLabel(source) {
 
 .session-tabs::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.session-tabs:hover {
-  scrollbar-color: rgba(255, 255, 255, 0.24) transparent;
+  background: transparent;
 }
 
 .session-tabs:hover::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.24);
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.session-tabs::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.34);
 }
 
 .session-tab {
