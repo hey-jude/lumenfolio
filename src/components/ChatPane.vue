@@ -2310,6 +2310,11 @@ function evidenceSourceLabel(source) {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+  /* The tab strip carries an 8px scrollbar lane at its bottom, which biases its
+     visible tabs upward under align-items:center. Give the icon group the same
+     8px bottom reserve so both columns' centers land on one line. Keep in sync
+     with .session-tabs::-webkit-scrollbar height. */
+  margin-bottom: 8px;
 }
 
 .chat-clear-btn {
