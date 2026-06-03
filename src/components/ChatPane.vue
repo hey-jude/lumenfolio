@@ -2029,10 +2029,14 @@ function evidenceSourceLabel(source) {
   gap: 4px;
   min-width: 0;
   flex: 1;
-  overflow-x: auto;
+  /* `scroll` (not `auto`) keeps the 8px scrollbar lane reserved at all times.
+     With a styled (classic) webkit scrollbar, `auto` only reserves the lane
+     when content overflows, which grew the strip's height the moment tabs
+     overflowed and bumped the centered header icons down a couple px. A always
+     reserved lane keeps the row height constant. */
+  overflow-x: scroll;
   /* Cursor-style scrollbar: invisible track, thumb hidden until the strip is
-     hovered, then a subtle rounded bar. The 6px lane is always reserved (track
-     is transparent) so revealing the thumb causes no layout shift. */
+     hovered, then a subtle rounded bar. */
 }
 
 .session-tabs::-webkit-scrollbar {
