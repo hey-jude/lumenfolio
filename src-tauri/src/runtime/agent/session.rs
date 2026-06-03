@@ -6,9 +6,13 @@ use super::memory::{
     SessionMemorySnapshot,
 };
 
-/// Maximum number of per-document sessions we retain in memory.
+/// Maximum number of agent sessions whose working memory we retain.
 /// Older entries are evicted on a least-recently-touched basis so a long-running
-/// process that visits many PDFs cannot leak unbounded memory through this map.
+/// process that opens many sessions cannot leak unbounded memory through this map.
+///
+/// The map is keyed by `session_id` (an agent conversation), NOT by document:
+/// a session is the natural owner of conversational working memory, and a single
+/// document may be the focus of several independent sessions.
 const MAX_TRACKED_DOCUMENTS: usize = 64;
 
 #[derive(Default)]
@@ -115,9 +119,9 @@ impl AgentSessionStore {
         }
     }
 
-    pub fn clear_document(&self, document_id: &str) {
+    pub fn clear_session(&self, session_id: &str) {
         if let Ok(mut inner) = self.inner.lock() {
-            inner.sessions.remove(document_id);
+            inner.sessions.remove(session_id);
         }
     }
 }

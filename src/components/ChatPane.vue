@@ -5,9 +5,44 @@ import { startWindowDrag } from '../windowDrag'
 import { testAttrs } from '../testAttrs'
 
 const props = defineProps({
+  // The active agent session (conversation). Messages live here, not on the
+  // document. May be null before the first session is created.
+  session: {
+    type: Object,
+    default: null,
+  },
+  // Open session tabs: [{ id, title, active }].
+  sessions: {
+    type: Array,
+    default: () => [],
+  },
+  // All sessions for the history dropdown: [{ id, title, focusTitle, turnCount, active }].
+  historyItems: {
+    type: Array,
+    default: () => [],
+  },
+  historyOpen: {
+    type: Boolean,
+    default: false,
+  },
+  notesOpen: {
+    type: Boolean,
+    default: false,
+  },
+  // The session's focus document (retrieval target + readiness + header label).
   document: {
     type: Object,
     required: true,
+  },
+  // The document the user is currently viewing in the reader. When it differs
+  // from the focus document, the header offers to retarget the session's focus.
+  viewedDocId: {
+    type: String,
+    default: '',
+  },
+  viewedDocName: {
+    type: String,
+    default: '',
   },
   allDocuments: {
     type: Array,
@@ -67,16 +102,48 @@ const emit = defineEmits([
   'clear-selection',
   'clear-history',
   'set-tab',
+  'new-session',
+  'select-session',
+  'close-session',
+  'delete-session',
+  'toggle-history',
+  'close-history',
+  'toggle-notes',
+  'set-focus-doc',
 ])
+
+// A plain mouse wheel only emits vertical deltas, which the horizontally-only
+// session tab strip ignores by default. Translate vertical wheel into
+// horizontal scroll so a mouse (not just a trackpad) can reach overflowed tabs.
+function onSessionTabsWheel(event) {
+  const el = event.currentTarget
+  if (!el || el.scrollWidth <= el.clientWidth) return
+  // Respect genuine horizontal intent (trackpad / shift+wheel); only convert
+  // the vertical component when it dominates.
+  if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+  el.scrollLeft += event.deltaY
+  event.preventDefault()
+}
+
+// True when the user is reading a different document than the session focuses on.
+const focusDiffersFromView = computed(() => Boolean(
+  props.viewedDocId
+    && props.document?.id
+    && props.viewedDocId !== props.document.id
+    && props.viewedDocId !== 'empty',
+))
 
 const chatInputEnabled = computed(() => props.document.chatReady && props.modelConfigured)
 const supportsVision = computed(() => props.currentModel?.capabilities?.includes('vision'))
-const visibleMessages = computed(() => (props.document.messages || [])
-  .filter((message) => message && typeof message === 'object')
-  .filter((message) => !String(message.id || '').startsWith(`welcome-${props.document.id}`)))
-const hasChatHistory = computed(() => (props.document.messages || [])
-  .filter((message) => message && typeof message === 'object')
-  .some((message) => !String(message.id || '').startsWith(`welcome-${props.document.id}`)))
+// Messages come from the active session. The welcome placeholder is keyed by
+// session id so it is filtered out of the visible list.
+const sessionMessages = computed(() => (props.session?.messages || [])
+  .filter((message) => message && typeof message === 'object'))
+const welcomePrefix = computed(() => `welcome-${props.session?.id || ''}`)
+const visibleMessages = computed(() => sessionMessages.value
+  .filter((message) => !String(message.id || '').startsWith(welcomePrefix.value)))
+const hasChatHistory = computed(() => sessionMessages.value
+  .some((message) => !String(message.id || '').startsWith(welcomePrefix.value)))
 const pendingImageDataUrl = ref('')
 const pendingImageName = ref('')
 const fileInputRef = ref(null)
@@ -369,7 +436,7 @@ function handleSubmit(event) {
   clearPendingImage()
   clearMentions()
   closeMentionPicker()
-  composerDrafts.delete(props.document.id)
+  composerDrafts.delete(props.session?.id || '')
   autoFollowMessages.value = true
   scrollMessagesToBottom({ force: true })
 }
@@ -573,17 +640,17 @@ watch(() => visibleMessages.value.map((message) => [
   scrollMessagesToBottom({ force: !userScrolledMessages.value, settle: !userScrolledMessages.value })
 }, { flush: 'post' })
 
-watch(() => props.document.id, (newId, oldId) => {
-  // Save the draft of the doc we're leaving, restore the one we're entering.
+watch(() => props.session?.id, (newId, oldId) => {
+  // Save the draft of the session we're leaving, restore the one we're entering.
   if (oldId) captureDraft(oldId)
-  restoreDraft(newId)
+  restoreDraft(newId || '')
   autoFollowMessages.value = true
   userScrolledMessages.value = false
   showJumpToLatest.value = false
   scrollMessagesToBottom({ force: true, settle: true })
 })
 
-watch(() => props.document.chatHistoryLoaded, (loaded) => {
+watch(() => props.session?.chatHistoryLoaded, (loaded) => {
   if (!loaded) return
   scrollMessagesToBottom({ force: !userScrolledMessages.value, settle: !userScrolledMessages.value })
 }, { flush: 'post' })
@@ -1217,6 +1284,33 @@ function citationCrossDocName(message, evidence) {
   return doc ? docDisplayName(doc) : ''
 }
 
+// Distinct source documents an answer drew evidence from. Returns [] for a
+// single-document answer (no clutter); for multi-document answers it lists each
+// paper so the user can see the answer spans their library.
+function answerSourceDocs(message) {
+  const ids = [...new Set((message.citations || [])
+    .map((citation) => citation.documentId)
+    .filter(Boolean))]
+  if (ids.length <= 1) return []
+  return ids.map((id) => {
+    const doc = (props.allDocuments || []).find((item) => item.id === id)
+    return {
+      id,
+      name: doc ? docDisplayName(doc) : id,
+      isFocus: id === props.document?.id,
+    }
+  })
+}
+
+// For a trace step that routed to another document via `documentId`, the target
+// document's short name — so the user sees the agent fan out across papers.
+function eventTargetDocName(event) {
+  const docId = event?.tool?.args?.documentId
+  if (!docId || docId === props.document?.id) return ''
+  const doc = (props.allDocuments || []).find((item) => item.id === docId)
+  return doc ? docDisplayName(doc) : docId
+}
+
 function evidenceSourceLabel(source) {
   const labels = {
     selection: props.ui.selectedText,
@@ -1272,21 +1366,75 @@ function evidenceSourceLabel(source) {
     </button>
 
     <template v-else>
-      <div class="chat-header" data-tauri-drag-region @mousedown="startWindowDrag">
-        <div>
-          <div class="chat-title">{{ ui.chat }}</div>
-          <div class="chat-subtitle">{{ ui.currentDoc }}: {{ document.shortTitle }}</div>
+      <div class="chat-header">
+        <div class="session-tabs" @wheel="onSessionTabsWheel">
+          <button
+            v-for="tab in sessions"
+            :key="tab.id"
+            type="button"
+            class="session-tab"
+            :class="{ active: tab.active }"
+            :title="tab.title"
+            @mousedown.stop
+            @click="emit('select-session', tab.id)"
+          >
+            <span class="session-tab-label">{{ tab.title }}</span>
+            <span
+              class="session-tab-close"
+              role="button"
+              :aria-label="ui.closeTab"
+              @click.stop="emit('close-session', tab.id)"
+            >×</span>
+          </button>
+          <span v-if="!sessions.length" class="session-tab placeholder">{{ ui.newSession }}</span>
         </div>
-        <div class="chat-header-actions">
+        <div class="chat-header-actions" @mousedown.stop>
           <button
             type="button"
-            class="chat-clear-btn"
+            class="chat-icon-btn"
+            :title="ui.newSession"
+            :aria-label="ui.newSession"
+            @click="emit('new-session')"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="chat-icon-btn"
+            :class="{ active: historyOpen }"
+            :title="ui.sessionHistory"
+            :aria-label="ui.sessionHistory"
+            @click="emit('toggle-history')"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.6" />
+              <path d="M12 8v4l3 2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="chat-icon-btn"
+            :class="{ active: notesOpen }"
+            :title="ui.notes"
+            :aria-label="ui.notes"
+            @click="emit('toggle-notes')"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M5 4h11l3 3v13H5V4Z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+              <path d="M8 9h8M8 13h8M8 17h5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            class="chat-icon-btn"
             :disabled="!hasChatHistory"
             :title="ui.clearChatHistory"
             :aria-label="ui.clearChatHistory"
             @click="emit('clear-history')"
           >
-            <svg class="clear-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
               <path
                 d="M4 7h16M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1Zm-3 3 1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M10 11v6M14 11v6"
                 fill="none"
@@ -1297,10 +1445,44 @@ function evidenceSourceLabel(source) {
               />
             </svg>
           </button>
-          <div class="pane-tabs">
-            <button type="button" class="active">{{ ui.chat }}</button>
-            <button type="button" @click="emit('set-tab', 'notes')">{{ ui.notes }}</button>
-          </div>
+        </div>
+      </div>
+      <div class="chat-subtitle-row" data-tauri-drag-region @mousedown="startWindowDrag">
+        <span class="chat-focus-label">{{ ui.focusDoc }}: {{ document.shortTitle }}</span>
+        <button
+          v-if="focusDiffersFromView"
+          type="button"
+          class="focus-switch-btn"
+          :title="`${ui.focusOnCurrent}: ${viewedDocName}`"
+          @click="emit('set-focus-doc', viewedDocId)"
+        >{{ ui.focusOnCurrent }}</button>
+      </div>
+      <div
+        v-if="historyOpen"
+        class="session-history-backdrop"
+        @mousedown.stop="emit('close-history')"
+      />
+      <div v-if="historyOpen" class="session-history" @mousedown.stop>
+        <div class="session-history-title">{{ ui.sessionHistory }}</div>
+        <div class="session-history-list">
+          <button
+            v-for="item in historyItems"
+            :key="item.id"
+            type="button"
+            class="session-history-row"
+            :class="{ active: item.active }"
+            @click="emit('select-session', item.id)"
+          >
+            <span class="session-history-label">{{ item.title }}</span>
+            <span v-if="item.focusTitle" class="session-history-meta">{{ item.focusTitle }}</span>
+            <span
+              class="session-history-del"
+              role="button"
+              :aria-label="ui.deleteSession"
+              @click.stop="emit('delete-session', item.id)"
+            >×</span>
+          </button>
+          <div v-if="!historyItems.length" class="session-history-empty">{{ ui.chatEmptyHint }}</div>
         </div>
       </div>
 
@@ -1469,6 +1651,16 @@ function evidenceSourceLabel(source) {
             <div v-if="message.provider" class="message-provider">{{ message.provider }}</div>
 
             <div v-if="evidenceItems(message).length" class="evidence-group">
+              <div v-if="answerSourceDocs(message).length" class="evidence-sources">
+                <span class="evidence-sources-label">{{ ui.sources }}</span>
+                <span
+                  v-for="src in answerSourceDocs(message)"
+                  :key="`${message.id}-src-${src.id}`"
+                  class="evidence-source-chip"
+                  :class="{ focus: src.isFocus }"
+                  :title="src.name"
+                >{{ src.name }}</span>
+              </div>
               <div class="evidence-strip">
                 <span class="evidence-strip-label">{{ ui.evidence }}</span>
                 <button
@@ -1539,7 +1731,10 @@ function evidenceSourceLabel(source) {
                   <div class="agent-step-marker"></div>
                   <div class="agent-step-body">
                     <div class="agent-step-head">
-                      <span>{{ eventTitle(event) }}</span>
+                      <span>
+                        {{ eventTitle(event) }}
+                        <span v-if="eventTargetDocName(event)" class="agent-step-doc">{{ eventTargetDocName(event) }}</span>
+                      </span>
                       <span>{{ formatTraceStatus(event.status) }}</span>
                     </div>
                     <div class="agent-step-detail">{{ eventSummary(event) }}</div>
@@ -1782,13 +1977,290 @@ function evidenceSourceLabel(source) {
 }
 
 .chat-header {
-  padding: 18px 18px 14px;
-  border-bottom: 1px solid var(--line-soft);
+  position: relative;
+  padding: 12px 14px 10px;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   flex-shrink: 0;
+}
+
+.chat-subtitle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 16px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--text-muted);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.chat-focus-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.focus-switch-btn {
+  flex-shrink: 0;
+  border: 1px solid rgba(106, 169, 255, 0.34);
+  border-radius: 999px;
+  padding: 2px 9px;
+  background: rgba(106, 169, 255, 0.1);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.focus-switch-btn:hover {
+  color: var(--text-primary);
+  background: rgba(106, 169, 255, 0.18);
+}
+
+/* Session tabs ---------------------------------------------------------- */
+.session-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+  /* `scroll` (not `auto`) keeps the 8px scrollbar lane reserved at all times.
+     With a styled (classic) webkit scrollbar, `auto` only reserves the lane
+     when content overflows, which grew the strip's height the moment tabs
+     overflowed and bumped the centered header icons down a couple px. A always
+     reserved lane keeps the row height constant. */
+  overflow-x: scroll;
+  /* Cursor-style scrollbar: invisible track, thumb hidden until the strip is
+     hovered, then a subtle rounded bar. */
+}
+
+.session-tabs::-webkit-scrollbar {
+  height: 8px;
+}
+
+.session-tabs::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Slim floating thumb: a 3px transparent border + padding-box clip shrinks the
+   visible bar to ~2px, hidden until the strip is hovered. */
+.session-tabs::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  background-clip: padding-box;
+}
+
+.session-tabs:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+  background-clip: padding-box;
+}
+
+.session-tabs::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.34);
+  background-clip: padding-box;
+}
+
+.session-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 150px;
+  padding: 4px 8px 4px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.session-tab:hover {
+  color: var(--text-secondary);
+}
+
+.session-tab.active {
+  background: rgba(106, 169, 255, 0.14);
+  border-color: rgba(106, 169, 255, 0.34);
+  color: var(--text-primary);
+}
+
+.session-tab.placeholder {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.session-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.session-tab-close:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Header icon group ----------------------------------------------------- */
+.chat-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.chat-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.chat-icon-btn:hover:not(:disabled) {
+  border-color: rgba(106, 169, 255, 0.34);
+  color: var(--text-primary);
+  background: rgba(106, 169, 255, 0.08);
+}
+
+.chat-icon-btn.active {
+  border-color: rgba(106, 169, 255, 0.45);
+  color: var(--text-primary);
+  background: rgba(106, 169, 255, 0.16);
+}
+
+.chat-icon-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+/* Session history dropdown --------------------------------------------- */
+.session-history-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+}
+
+.session-history {
+  position: absolute;
+  top: 46px;
+  right: 12px;
+  z-index: 31;
+  width: 260px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--bg-panel, #1b1d22);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.session-history-title {
+  padding: 10px 12px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.session-history-list {
+  overflow-y: auto;
+  padding: 0 6px 8px;
+}
+
+.session-history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.session-history-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.session-history-row.active {
+  background: rgba(106, 169, 255, 0.14);
+  color: var(--text-primary);
+}
+
+.session-history-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-history-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-history-del {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+.session-history-del:hover {
+  opacity: 1;
+  color: #ffd2d2;
+  background: rgba(255, 99, 99, 0.1);
+}
+
+.session-history-empty {
+  padding: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .chat-title {
@@ -1838,6 +2310,11 @@ function evidenceSourceLabel(source) {
   align-items: center;
   gap: 10px;
   flex-shrink: 0;
+  /* The tab strip carries an 8px scrollbar lane at its bottom, which biases its
+     visible tabs upward under align-items:center. Give the icon group the same
+     8px bottom reserve so both columns' centers land on one line. Keep in sync
+     with .session-tabs::-webkit-scrollbar height. */
+  margin-bottom: 8px;
 }
 
 .chat-clear-btn {
@@ -2104,6 +2581,42 @@ function evidenceSourceLabel(source) {
 
 .evidence-group {
   margin-top: 12px;
+}
+
+/* Multi-document "Sources:" line above the evidence strip. */
+.evidence-sources {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.evidence-sources-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.evidence-source-chip {
+  padding: 2px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  font-size: 11px;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.evidence-source-chip.focus {
+  border-color: rgba(106, 169, 255, 0.34);
+  background: rgba(106, 169, 255, 0.12);
+  color: var(--text-primary);
 }
 
 .evidence-strip {
@@ -2620,6 +3133,19 @@ button.agent-process-head:disabled {
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
+}
+
+/* "in <Doc>" badge on a trace step that searched another document. */
+.agent-step-doc {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(106, 169, 255, 0.14);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
 }
 
 .agent-step-head span:last-child {

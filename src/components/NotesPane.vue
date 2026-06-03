@@ -12,6 +12,12 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  // When rendered as the floating drawer (over the Agent pane), the header shows
+  // a single close affordance instead of the Chat|Notes tab toggle.
+  asDrawer: {
+    type: Boolean,
+    default: false,
+  },
   width: {
     type: Number,
     default: 420,
@@ -72,7 +78,7 @@ function timeLabel(note) {
 
 <template>
   <aside class="notes-shell" :style="{ width: collapsed ? '44px' : `${width}px` }" :class="{ collapsed }">
-    <button class="collapse-btn" type="button" @click="emit('toggle-collapse')">
+    <button v-if="!asDrawer" class="collapse-btn" type="button" @click="emit('toggle-collapse')">
       {{ collapsed ? '❮' : '❯' }}
     </button>
 
@@ -92,7 +98,15 @@ function timeLabel(note) {
           <div class="notes-title">{{ ui.notes }}</div>
           <div class="notes-subtitle">{{ ui.currentDoc }}: {{ document.shortTitle }}</div>
         </div>
-        <div class="pane-tabs">
+        <button
+          v-if="asDrawer"
+          type="button"
+          class="notes-close-btn"
+          :title="ui.close || ui.collapse"
+          :aria-label="ui.close || ui.collapse"
+          @click="emit('toggle-collapse')"
+        >✕</button>
+        <div v-else class="pane-tabs">
           <button type="button" @click="emit('set-tab', 'chat')">{{ ui.chat }}</button>
           <button type="button" class="active">{{ ui.notes }}</button>
         </div>
@@ -195,6 +209,29 @@ function timeLabel(note) {
   padding: 18px 18px 14px;
   border-bottom: 1px solid var(--line-soft);
   flex-shrink: 0;
+}
+
+.notes-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  flex-shrink: 0;
+  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.notes-close-btn:hover {
+  border-color: rgba(106, 169, 255, 0.34);
+  color: var(--text-primary);
+  background: rgba(106, 169, 255, 0.08);
 }
 
 .notes-title {

@@ -30,8 +30,13 @@ pub(crate) struct LlmJudgeLoopInput<'a> {
     pub(crate) app: Option<&'a tauri::AppHandle>,
     pub(crate) question: &'a str,
     pub(crate) document_id: &'a str,
-    /// "@-referenced" documents the agent may also search (documentId routing whitelist).
-    pub(crate) reference_document_ids: &'a [&'a str],
+    /// Every document the agent may route a `documentId` tool call to this turn
+    /// (focus + all visible workspace docs, capped). The dispatch whitelist.
+    /// @-referenced docs are tagged inside `workspace_manifest`.
+    pub(crate) visible_document_ids: &'a [&'a str],
+    /// Pre-rendered workspace manifest (titles/dirs/abstracts) injected into the
+    /// judge prompt so it can pick which document to search.
+    pub(crate) workspace_manifest: &'a str,
     pub(crate) provider: &'a OpenAiCompatibleProvider,
     pub(crate) activity_event_id: Option<&'a str>,
 }
@@ -78,33 +83,21 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
             .to_string(),
         );
     }
-    // Surface the user's "@-referenced" documents so the judge knows they exist and
-    // can route a tool call to one via the optional `documentId` argument — but only
-    // when the question genuinely needs cross-document evidence (rule in the prompt).
-    if !ctx.reference_document_ids.is_empty() {
-        let briefs = {
-            let conn = ctx
-                .database
-                .conn
-                .lock()
-                .map_err(|_| "SQLite lock was poisoned".to_string())?;
-            ctx.reference_document_ids
-                .iter()
-                .filter_map(|id| runtime::rag::document_brief(&conn, id, 12).ok())
-                .map(|brief| brief.to_prompt_line())
-                .collect::<Vec<_>>()
-        };
-        if !briefs.is_empty() {
-            tool_feedback.push(
-                serde_json::json!({
-                    "observation": format!(
-                        "Referenced documents the user attached (search one by passing its id as `documentId`, only if the question needs cross-document evidence):\n{}",
-                        briefs.join("\n")
-                    )
-                })
-                .to_string(),
-            );
-        }
+    // Give the judge the whole-workspace manifest (titles/dirs/abstracts) so it can
+    // locate the right document and route a tool call to it via the optional
+    // `documentId` argument — but only when the question genuinely needs
+    // cross-document evidence (rule in the prompt). Basic questions stay on the
+    // focus document. The manifest already tags the focus + @-referenced docs.
+    if !ctx.workspace_manifest.trim().is_empty() {
+        tool_feedback.push(
+            serde_json::json!({
+                "observation": format!(
+                    "{}\nUse another document's id as `documentId` ONLY when the question needs cross-document evidence; otherwise stay on the current focus document. Never invent an id — it must be one listed above.",
+                    ctx.workspace_manifest.trim_end()
+                )
+            })
+            .to_string(),
+        );
     }
 
     while remaining_llm_judge_rounds > 0 {
@@ -475,7 +468,7 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
             Ok(runtime::rag::execute_rag_tool_call_for_capabilities(
                 &conn,
                 ctx.document_id,
-                ctx.reference_document_ids,
+                ctx.visible_document_ids,
                 &call.tool,
                 &call.args,
                 fallback_query,
@@ -536,7 +529,7 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                     runtime::rag::execute_rag_tool_call_for_capabilities(
                         &conn,
                         ctx.document_id,
-                        ctx.reference_document_ids,
+                        ctx.visible_document_ids,
                         "read_tree_node_lines",
                         &line_args,
                         fallback_query,
@@ -583,7 +576,7 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
                     runtime::rag::execute_rag_tool_call_for_capabilities(
                         &conn,
                         ctx.document_id,
-                        ctx.reference_document_ids,
+                        ctx.visible_document_ids,
                         "open_section",
                         &open_args,
                         fallback_query,

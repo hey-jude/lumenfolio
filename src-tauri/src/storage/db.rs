@@ -477,6 +477,23 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
 
         CREATE INDEX IF NOT EXISTS idx_notes_document_created
           ON notes(document_id, created_at DESC);
+
+        -- Agent workspace sessions: a session is a first-class conversation that
+        -- is independent of any single document. focus_document_id is the
+        -- (mutable, nullable) document the session currently centers on; it is
+        -- intentionally NOT a cascading foreign key so deleting a document never
+        -- destroys the conversation that referenced it.
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL DEFAULT '',
+          focus_document_id TEXT,
+          referenced_document_ids_json TEXT NOT NULL DEFAULT '[]',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated
+          ON chat_sessions(updated_at DESC);
         ",
     )
     .map_err(|err| format!("Failed to migrate SQLite database: {err}"))?;
@@ -538,6 +555,18 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         "referenced_document_ids_json",
         "ALTER TABLE chat_turns ADD COLUMN referenced_document_ids_json TEXT NOT NULL DEFAULT '[]'",
     )?;
+    ensure_column(
+        conn,
+        "chat_turns",
+        "session_id",
+        "ALTER TABLE chat_turns ADD COLUMN session_id TEXT NOT NULL DEFAULT ''",
+    )?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_chat_turns_session_created
+          ON chat_turns(session_id, created_at DESC);",
+    )
+    .map_err(|err| format!("Failed to create chat turn session index: {err}"))?;
+    migrate_chat_turns_to_sessions(conn)?;
     ensure_column(
         conn,
         "document_blocks",
@@ -619,6 +648,44 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|err| format!("Failed to create visual evidence indexes: {err}"))?;
 
+    Ok(())
+}
+
+/// One-time, idempotent migration from per-document chat history to the
+/// session model. Each distinct `document_id` that still has turns with an
+/// empty `session_id` gets exactly one session (deterministic id
+/// `migrated-<document_id>` — the SQL form of `crate::migrated_session_id`;
+/// keep the two in sync), and that document's orphaned turns are
+/// back-filled to point at it. Re-running is a no-op because the second pass
+/// finds no rows with `session_id = ''`.
+fn migrate_chat_turns_to_sessions(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO chat_sessions
+            (id, title, focus_document_id, referenced_document_ids_json, created_at, updated_at)
+         SELECT
+            'migrated-' || ct.document_id,
+            COALESCE(
+              NULLIF((SELECT d.short_title FROM documents d WHERE d.id = ct.document_id), ''),
+              (SELECT d.title FROM documents d WHERE d.id = ct.document_id),
+              ''
+            ),
+            ct.document_id,
+            '[]',
+            MIN(ct.created_at),
+            MAX(ct.updated_at)
+         FROM chat_turns ct
+         WHERE ct.session_id = ''
+         GROUP BY ct.document_id",
+        [],
+    )
+    .map_err(|err| format!("Failed to seed migrated chat sessions: {err}"))?;
+    conn.execute(
+        "UPDATE chat_turns
+            SET session_id = 'migrated-' || document_id
+          WHERE session_id = ''",
+        [],
+    )
+    .map_err(|err| format!("Failed to back-fill chat turn session ids: {err}"))?;
     Ok(())
 }
 
@@ -1020,5 +1087,85 @@ mod tests {
             .expect("column names")
             .iter()
             .any(|name| name == column)
+    }
+
+    #[test]
+    fn migrate_back_fills_per_document_chat_sessions_idempotently() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        // Simulate an upgrade from a pre-session database: a legacy chat_turns
+        // table (no session_id) plus a minimal documents table so the migration
+        // can resolve titles. `CREATE TABLE IF NOT EXISTS` in migrate_database
+        // leaves these pre-existing tables intact.
+        conn.execute_batch(
+            "
+            CREATE TABLE documents (
+              id TEXT PRIMARY KEY,
+              short_title TEXT NOT NULL DEFAULT '',
+              title TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE chat_turns (
+              id TEXT PRIMARY KEY,
+              document_id TEXT NOT NULL,
+              user_message TEXT NOT NULL,
+              assistant_answer TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            INSERT INTO documents (id, short_title, title) VALUES
+              ('doc-a', 'Alpha', 'Alpha Full Title');
+            INSERT INTO chat_turns (id, document_id, user_message, assistant_answer, created_at, updated_at) VALUES
+              ('t1', 'doc-a', 'q1', 'a1', 10, 11),
+              ('t2', 'doc-a', 'q2', 'a2', 20, 25),
+              ('t3', 'doc-b', 'q3', 'a3', 30, 31);
+            ",
+        )
+        .expect("legacy schema");
+
+        migrate_database(&conn).expect("migrate legacy chat history");
+
+        // Every legacy turn now points at its per-document session.
+        let unmigrated: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_turns WHERE session_id = ''",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count unmigrated");
+        assert_eq!(unmigrated, 0, "all turns should be back-filled");
+
+        let (title_a, focus_a, created_a, updated_a): (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT title, focus_document_id, created_at, updated_at
+                 FROM chat_sessions WHERE id = 'migrated-doc-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .expect("doc-a session");
+        assert_eq!(title_a, "Alpha", "title prefers short_title");
+        assert_eq!(focus_a, "doc-a");
+        assert_eq!(created_a, 10, "created_at is the earliest turn");
+        assert_eq!(updated_a, 25, "updated_at is the latest turn");
+
+        // doc-b has no documents row → title falls back to empty, session still created.
+        let title_b: String = conn
+            .query_row(
+                "SELECT title FROM chat_sessions WHERE id = 'migrated-doc-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("doc-b session");
+        assert_eq!(title_b, "");
+
+        let session_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_sessions", [], |row| row.get(0))
+            .expect("session count");
+        assert_eq!(session_count, 2, "one session per distinct document");
+
+        // Re-running the migration is a no-op: no new sessions, no churn.
+        migrate_chat_turns_to_sessions(&conn).expect("re-run migration");
+        let session_count_again: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_sessions", [], |row| row.get(0))
+            .expect("session count again");
+        assert_eq!(session_count_again, 2, "migration is idempotent");
     }
 }

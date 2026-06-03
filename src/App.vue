@@ -119,8 +119,9 @@ const inlineTranslateOpen = ref(false)
 const leftCollapsed = usePersistedRef('leftCollapsed', false)
 const rightCollapsed = usePersistedRef('rightCollapsed', false)
 const rightWidth = usePersistedRef('rightWidth', 500, { debounceMs: 300 })
-// Right pane shows either chat or notes; remembered across restarts.
-const rightPaneTab = usePersistedRef('rightPaneTab', 'chat')
+// Notes is a floating drawer that slides in over the Agent pane (not a mutually
+// exclusive tab), so the conversation stays visible underneath. Default closed.
+const notesDrawerOpen = ref(false)
 const activeNoteId = ref('')
 // Note composer state for create/edit.
 const noteComposer = ref({ open: false, mode: 'create', quoteText: '', content: '', noteId: '', selection: null })
@@ -153,7 +154,7 @@ const settingsError = ref('')
 const clearChatConfirmOpen = ref(false)
 const clearChatStatus = ref('idle')
 const clearChatError = ref('')
-const clearChatTargetDocId = ref('')
+const clearChatTargetSessionId = ref('')
 const clearChatTargetTitle = ref('')
 const removeWorkspaceRootConfirmOpen = ref(false)
 const removeWorkspaceRootStatus = ref('idle')
@@ -207,6 +208,324 @@ const clearedActivityEventIds = new Map()
 const assistantStreamTargets = new Map()
 const visualIndexRuns = new Set()
 let assistantStreamDrainTimer = null
+
+// ---------------------------------------------------------------------------
+// Agent workspace sessions (Cursor-style)
+//
+// A session is a first-class conversation that is INDEPENDENT of the selected
+// document. Chat messages live on the session (not on the document), so
+// switching documents in the left pane never swaps or loses the conversation.
+// Each session has a focus document (its default retrieval target) and is
+// persisted in SQLite via the chat_sessions backend commands.
+// ---------------------------------------------------------------------------
+const chatSessions = reactive(new Map()) // id -> session object
+const openSessionIds = usePersistedRef('openSessionIds', []) // tab order (ids)
+const activeSessionId = usePersistedRef('activeSessionId', '')
+const sessionsLoaded = ref(false)
+const sessionHistoryOpen = ref(false)
+
+// All sessions, most-recently-updated first (drives the 🕐 history list).
+const sessionList = computed(() => Array.from(chatSessions.values())
+  .slice()
+  .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)))
+// Sessions currently shown as tabs (filtered to ones that still exist).
+const openSessions = computed(() => openSessionIds.value
+  .map((id) => chatSessions.get(id))
+  .filter(Boolean))
+const activeSession = computed(() => (
+  activeSessionId.value ? chatSessions.get(activeSessionId.value) || null : null
+))
+// The document a session's retrieval defaults to. Falls back to the viewed
+// document so an as-yet-unfocused session still has somewhere to ask.
+const activeFocusDoc = computed(() => {
+  const session = activeSession.value
+  if (session?.focusDocId) {
+    const doc = allDocs.value.find((item) => item.id === session.focusDocId)
+    if (doc) return doc
+  }
+  return selectedDocument.value
+})
+
+// Human label for a tab/history row: the LLM-generated title once present,
+// otherwise a live truncation of the first question (the hybrid strategy), and
+// finally a generic placeholder for an empty session.
+function sessionTabTitle(session) {
+  if (!session) return ui.value.newSession
+  if (session.title) return session.title
+  const firstUser = (session.messages || []).find((message) => message.role === 'user')
+  const text = firstUser ? messageDisplayText(firstUser).trim() : ''
+  if (text) return text.length > 20 ? `${text.slice(0, 20)}…` : text
+  return ui.value.newSession
+}
+
+// Tab descriptors for ChatPane (kept out of the template for clarity).
+const sessionTabs = computed(() => openSessions.value.map((session) => ({
+  id: session.id,
+  title: sessionTabTitle(session),
+  active: session.id === activeSessionId.value,
+})))
+// History rows (all sessions) for the dropdown.
+const sessionHistoryItems = computed(() => sessionList.value.map((session) => ({
+  id: session.id,
+  title: sessionTabTitle(session),
+  focusTitle: session.focusDocTitle || '',
+  turnCount: session.turnCount || 0,
+  active: session.id === activeSessionId.value,
+})))
+
+// Merge a backend ChatSessionOutput into the local map, preserving runtime-only
+// fields (messages, load flags) on an existing session.
+function upsertSessionFromBackend(row) {
+  if (!row || !row.id) return null
+  const existing = chatSessions.get(row.id)
+  if (existing) {
+    if (row.title) {
+      existing.title = row.title
+      existing.titleGenerated = true
+    }
+    existing.focusDocId = row.focusDocumentId || existing.focusDocId
+    existing.focusDocTitle = row.focusDocumentTitle || existing.focusDocTitle
+    existing.referencedDocIds = row.referencedDocumentIds || existing.referencedDocIds
+    if (typeof row.turnCount === 'number') existing.turnCount = row.turnCount
+    existing.updatedAt = row.updatedAt || existing.updatedAt
+    return existing
+  }
+  const session = {
+    id: row.id,
+    title: row.title || '',
+    titleGenerated: Boolean(row.title),
+    titleGenerating: false,
+    focusDocId: row.focusDocumentId || '',
+    focusDocTitle: row.focusDocumentTitle || '',
+    referencedDocIds: Array.isArray(row.referencedDocumentIds) ? row.referencedDocumentIds : [],
+    messages: [],
+    chatHistoryLoaded: false,
+    chatHistoryLoading: null,
+    chatHistoryClearGeneration: 0,
+    turnCount: row.turnCount || 0,
+    createdAt: row.createdAt || 0,
+    updatedAt: row.updatedAt || 0,
+  }
+  chatSessions.set(row.id, session)
+  return session
+}
+
+async function loadSessionList() {
+  try {
+    const rows = await invoke('list_chat_sessions')
+    if (Array.isArray(rows)) rows.forEach(upsertSessionFromBackend)
+  } catch (err) {
+    console.warn('Failed to load chat sessions', err)
+  } finally {
+    sessionsLoaded.value = true
+    reconcileSessionTabs()
+  }
+}
+
+// Keep persisted tab/active state honest: drop ids that no longer exist and pick
+// a sane active session when the persisted one is gone.
+function reconcileSessionTabs() {
+  let validOpen = openSessionIds.value.filter((id) => chatSessions.has(id))
+  // First run after the migration: no tabs were ever persisted but sessions
+  // exist (migrated per-document chats). Open the most recent so the user lands
+  // on a populated conversation instead of a blank pane.
+  if (!validOpen.length && sessionList.value.length) {
+    validOpen = [sessionList.value[0].id]
+  }
+  if (validOpen.length !== openSessionIds.value.length
+    || validOpen.some((id, i) => id !== openSessionIds.value[i])) {
+    openSessionIds.value = validOpen
+  }
+  if (activeSessionId.value && !chatSessions.has(activeSessionId.value)) {
+    activeSessionId.value = validOpen[0] || ''
+  }
+  if (!activeSessionId.value && validOpen.length) activeSessionId.value = validOpen[0]
+  const session = activeSession.value
+  if (session) void ensureSessionHistory(session)
+}
+
+async function createSession(focusDocId = '') {
+  try {
+    const focus = focusDocId && focusDocId !== 'empty' ? focusDocId : ''
+    const row = await invoke('create_chat_session', {
+      input: { focusDocumentId: focus || null, title: '' },
+    })
+    return upsertSessionFromBackend(row)
+  } catch (err) {
+    console.warn('Failed to create chat session', err)
+    return null
+  }
+}
+
+// Return the active session, creating one (focused on the current document) if
+// none is active yet. This is the lazy-create path used on first send.
+async function ensureActiveSession() {
+  if (activeSession.value) return activeSession.value
+  const session = await createSession(selectedDocId.value)
+  if (!session) return null
+  if (!openSessionIds.value.includes(session.id)) {
+    openSessionIds.value = [...openSessionIds.value, session.id]
+  }
+  activeSessionId.value = session.id
+  return session
+}
+
+// Retarget the active session's focus document (e.g. the user navigated to a
+// different PDF and wants the conversation to now center on it). Updates locally
+// then persists; the change is low-stakes if the backend write fails.
+async function handleSetSessionFocus(docId) {
+  const session = activeSession.value
+  if (!session || !docId || docId === 'empty') return
+  if (session.focusDocId === docId) return
+  session.focusDocId = docId
+  const doc = allDocs.value.find((item) => item.id === docId)
+  if (doc) session.focusDocTitle = doc.shortTitle || doc.title || ''
+  try {
+    await invoke('update_chat_session_focus', {
+      input: { id: session.id, focusDocumentId: docId },
+    })
+  } catch (err) {
+    console.warn('Failed to update session focus', err)
+  }
+}
+
+function setActiveSession(id) {
+  if (!id || !chatSessions.has(id)) return
+  if (!openSessionIds.value.includes(id)) {
+    openSessionIds.value = [...openSessionIds.value, id]
+  }
+  activeSessionId.value = id
+  sessionHistoryOpen.value = false
+  const session = chatSessions.get(id)
+  if (session) void ensureSessionHistory(session)
+}
+
+async function handleNewSession() {
+  const session = await createSession(selectedDocId.value)
+  if (!session) return
+  openSessionIds.value = [...openSessionIds.value.filter((id) => id !== session.id), session.id]
+  activeSessionId.value = session.id
+  sessionHistoryOpen.value = false
+}
+
+function closeSessionTab(id) {
+  const index = openSessionIds.value.indexOf(id)
+  if (index === -1) return
+  const next = openSessionIds.value.filter((item) => item !== id)
+  openSessionIds.value = next
+  if (activeSessionId.value === id) {
+    activeSessionId.value = next[index] || next[index - 1] || ''
+    const session = activeSession.value
+    if (session) void ensureSessionHistory(session)
+  }
+}
+
+async function deleteSessionById(id) {
+  if (!id) return
+  try {
+    await invoke('delete_chat_session', { input: { id } })
+  } catch (err) {
+    console.warn('Failed to delete chat session', err)
+    return
+  }
+  chatSessions.delete(id)
+  closeSessionTab(id)
+  if (activeSessionId.value === id) activeSessionId.value = ''
+}
+
+// Load persisted turns for a session once (idempotent, mirrors the old
+// per-document loader but keyed by session_id).
+async function ensureSessionHistory(session) {
+  if (!session || !session.id || session.chatHistoryLoaded) return
+  if (session.chatHistoryLoading) return session.chatHistoryLoading
+  const clearGeneration = Number(session.chatHistoryClearGeneration || 0)
+  session.chatHistoryLoading = (async () => {
+    try {
+      const history = await invoke('load_chat_turns', {
+        input: { sessionId: session.id, limit: 60 },
+      })
+      if (Number(session.chatHistoryClearGeneration || 0) !== clearGeneration) return
+      session.chatHistoryLoaded = true
+      if (!Array.isArray(history) || !history.length) return
+      const historyMessages = history.map((message) => ({
+        id: message.id,
+        sessionId: session.id,
+        turnId: message.turnId || '',
+        role: message.role,
+        content: { en: message.content || '', zh: message.content || '' },
+        provider: message.provider || '',
+        reasoningContent: message.reasoningContent || '',
+        citations: message.citations || [],
+        claims: message.claims || [],
+        retrievalTrace: message.retrievalTrace || null,
+        activityEvents: message.retrievalTrace?.events || [],
+        imageDataUrl: message.imageDataUrl || null,
+        mentionedDocumentIds: message.referencedDocumentIds || [],
+        status: 'succeeded',
+        canContinueRetrieval: false,
+        continuationRequest: null,
+        persisted: true,
+      }))
+      mergeSessionHistoryMessages(session, historyMessages)
+      if (session.id === activeSessionId.value) {
+        activeCitationId.value = session.messages.flatMap((message) => message.citations || [])[0]?.id || ''
+      }
+    } catch (err) {
+      session.chatHistoryLoaded = false
+      console.warn('Failed to load session history', err)
+    } finally {
+      session.chatHistoryLoading = null
+    }
+  })()
+  return session.chatHistoryLoading
+}
+
+function mergeSessionHistoryMessages(session, historyMessages) {
+  const existingMessages = Array.isArray(session.messages) ? session.messages : []
+  const welcomePrefix = `welcome-${session.id}`
+  const onlyWelcome = existingMessages.length === 0
+    || existingMessages.every((message) => String(message.id || '').startsWith(welcomePrefix))
+  if (onlyWelcome) {
+    session.messages = historyMessages
+    return
+  }
+  const existingIds = new Set(existingMessages.map((message) => message.id))
+  const existingFingerprints = new Set(existingMessages.map(messageFingerprint))
+  const missingHistory = historyMessages.filter((message) => (
+    !existingIds.has(message.id) && !existingFingerprints.has(messageFingerprint(message))
+  ))
+  session.messages = [...missingHistory, ...existingMessages]
+}
+
+// Hybrid title: after the first answer lands, ask the LLM for a <=12-char title
+// and replace the temporary truncation. Best-effort; never blocks the answer.
+async function maybeGenerateSessionTitle(session) {
+  if (!session || session.titleGenerated || session.titleGenerating) return
+  const hasUser = (session.messages || []).some((message) => message.role === 'user')
+  const hasAnswer = (session.messages || []).some(
+    (message) => message.role === 'assistant' && message.status === 'succeeded',
+  )
+  if (!hasUser || !hasAnswer) return
+  session.titleGenerating = true
+  try {
+    const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
+    const title = await invoke('generate_session_title', {
+      input: {
+        sessionId: session.id,
+        modelProviderId: providerId || null,
+        modelKey: modelKey || null,
+      },
+    })
+    if (title) {
+      session.title = title
+      session.titleGenerated = true
+    }
+  } catch (err) {
+    console.warn('Failed to generate session title', err)
+  } finally {
+    session.titleGenerating = false
+  }
+}
 
 function chatStreamDebugEnabled() {
   return typeof window !== 'undefined'
@@ -382,7 +701,7 @@ watch(selectedDocument, (doc) => {
   viewMode.value = 'original'
   activePage.value = doc.currentPage || doc.pages[0]?.page || 1
   activeBlockId.value = doc.quoteBlockId || doc.pages[0]?.blocks?.[0]?.id || ''
-  activeCitationId.value = doc.messages?.flatMap((message) => message.citations || [])[0]?.id || ''
+  activeCitationId.value = activeSession.value?.messages?.flatMap((message) => message.citations || [])[0]?.id || ''
   activeHighlight.value = null
   hoveredLinkedBlock.value = null
   lastSelection.value = null
@@ -1141,9 +1460,14 @@ function nextLocalId(prefix) {
 }
 
 async function handleSend(payload, selection = null) {
-  const doc = selectedDocument.value
-  if (doc?.source === 'local' && !doc.chatHistoryLoaded) {
-    await loadChatHistoryForDocument(doc.id)
+  const session = await ensureActiveSession()
+  if (!session) return
+  // The focus document is the session's default retrieval target; readiness and
+  // citations are scoped to it.
+  const doc = activeFocusDoc.value
+  if (!doc || doc.id === 'empty') return
+  if (!session.chatHistoryLoaded) {
+    await ensureSessionHistory(session)
   }
   const payloadObject = typeof payload === 'string' ? null : payload
   const messageText = typeof payload === 'string' ? payload : String(payload?.text || '')
@@ -1183,8 +1507,9 @@ async function handleSend(payload, selection = null) {
     questionLength: messageText.trim().length,
     hasImage: Boolean(imageDataUrl),
   })
-  doc.messages.push({
+  session.messages.push({
     id: userMessageId,
+    sessionId: session.id,
     role: 'user',
     content: {
       en: messageText,
@@ -1194,8 +1519,9 @@ async function handleSend(payload, selection = null) {
     imageDataUrl: imageDataUrl || null,
     mentionedDocumentIds: referenceDocumentIds,
   })
-  doc.messages.push({
+  session.messages.push({
     id: assistantMessageId,
+    sessionId: session.id,
     role: 'assistant',
     content: {
       en: '',
@@ -1210,6 +1536,7 @@ async function handleSend(payload, selection = null) {
     maxRetrievalSteps,
     retrievalAttemptOffset,
   })
+  session.updatedAt = Math.floor(Date.now() / 1000)
   if (citations.length && selectedDocument.value.id === doc.id) {
     const firstCitation = citations[0]
     activeCitationId.value = firstCitation.id
@@ -1223,6 +1550,7 @@ async function handleSend(payload, selection = null) {
     await invoke('ask_document_stream', {
       input: {
         documentId: doc.id,
+        sessionId: session.id,
         question: messageText.trim() || ui.value.imageOnlyPrompt,
         locale: locale.value,
         modelProviderId: chatModelConfigured.value ? providerId : null,
@@ -1247,7 +1575,7 @@ async function handleSend(payload, selection = null) {
       },
     })
   } catch (err) {
-    const assistantMessage = doc.messages.find((message) => message.id === assistantMessageId)
+    const assistantMessage = session.messages.find((message) => message.id === assistantMessageId)
     if (!assistantMessage) return
     const error = err?.message || String(err)
     assistantMessage.content = {
@@ -1259,9 +1587,11 @@ async function handleSend(payload, selection = null) {
 }
 
 function findMessageByActivityEventId(eventId) {
-  return allDocs.value
-    .flatMap((doc) => doc.messages || [])
-    .find((item) => item.activityEventId === eventId)
+  for (const session of chatSessions.values()) {
+    const found = (session.messages || []).find((item) => item.activityEventId === eventId)
+    if (found) return found
+  }
+  return null
 }
 
 function messageDisplayText(message) {
@@ -1398,6 +1728,11 @@ function applyAskDocumentMetadata(message, result) {
   message.canContinueRetrieval = false
   message.continuationRequest = null
   message.status = 'succeeded'
+  // First successful answer in a session: condense it into a tab title.
+  if (message.sessionId) {
+    const session = chatSessions.get(message.sessionId)
+    if (session) void maybeGenerateSessionTitle(session)
+  }
 }
 
 function applyAskDocumentResult(eventId, result) {
@@ -1407,10 +1742,10 @@ function applyAskDocumentResult(eventId, result) {
     hasMessage: Boolean(findMessageByActivityEventId(eventId)),
   })
   if (clearedActivityEventIds.has(eventId)) {
-    const documentId = clearedActivityEventIds.get(eventId)
+    const sessionId = clearedActivityEventIds.get(eventId)
     clearAssistantStreamState(eventId)
     clearedActivityEventIds.delete(eventId)
-    invoke('clear_chat_turns', { input: { documentId, turnIds: [eventId] } }).catch((err) => {
+    invoke('clear_chat_turns', { input: { sessionId, turnIds: [eventId] } }).catch((err) => {
       console.warn(ui.value.clearChatHistoryFailed, err)
     })
     return
@@ -1420,57 +1755,13 @@ function applyAskDocumentResult(eventId, result) {
   markAssistantStreamDone(eventId, result)
 }
 
-async function loadChatHistoryForDocument(docId) {
-  const doc = allDocs.value.find((item) => item.id === docId)
-  if (!doc || doc.id === 'empty' || doc.chatHistoryLoaded) return
-  if (doc.chatHistoryLoading) return doc.chatHistoryLoading
-  const clearGeneration = Number(doc.chatHistoryClearGeneration || 0)
-  doc.chatHistoryLoading = (async () => {
-    try {
-      const history = await invoke('load_chat_turns', {
-        input: {
-          documentId: doc.id,
-          limit: 60,
-        },
-      })
-      if (Number(doc.chatHistoryClearGeneration || 0) !== clearGeneration) return
-      doc.chatHistoryLoaded = true
-      if (!Array.isArray(history) || !history.length) return
-      const historyMessages = history.map((message) => ({
-        id: message.id,
-        turnId: message.turnId || '',
-        role: message.role,
-        content: {
-          en: message.content || '',
-          zh: message.content || '',
-        },
-        provider: message.provider || '',
-        reasoningContent: message.reasoningContent || '',
-        citations: message.citations || [],
-        claims: message.claims || [],
-        retrievalTrace: message.retrievalTrace || null,
-        activityEvents: message.retrievalTrace?.events || [],
-        imageDataUrl: message.imageDataUrl || null,
-        // Persisted @-mention provenance (user turns only) so reloaded history still
-        // shows which papers a question referenced.
-        mentionedDocumentIds: message.referencedDocumentIds || [],
-        status: 'succeeded',
-        canContinueRetrieval: false,
-        continuationRequest: null,
-        persisted: true,
-      }))
-      mergeChatHistoryMessages(doc, historyMessages)
-      if (selectedDocId.value === doc.id) {
-        activeCitationId.value = doc.messages.flatMap((message) => message.citations || [])[0]?.id || ''
-      }
-    } catch (err) {
-      doc.chatHistoryLoaded = false
-      console.warn('Failed to load chat history', err)
-    } finally {
-      doc.chatHistoryLoading = null
-    }
-  })()
-  return doc.chatHistoryLoading
+// Chat history is now owned by the active session, not the document. The many
+// existing call sites (doc select, post-reindex refresh) funnel through here;
+// we simply ensure the active session's turns are loaded. The docId argument is
+// retained for call-site compatibility but no longer scopes the load.
+async function loadChatHistoryForDocument(_docId) {
+  const session = activeSession.value
+  if (session) return ensureSessionHistory(session)
 }
 
 async function loadNotesForDocument(docId) {
@@ -1493,8 +1784,12 @@ async function loadNotesForDocument(docId) {
 }
 
 function setRightPaneTab(tab) {
-  rightPaneTab.value = tab === 'notes' ? 'notes' : 'chat'
-  if (rightCollapsed.value) rightCollapsed.value = false
+  notesDrawerOpen.value = tab === 'notes'
+  if (notesDrawerOpen.value && rightCollapsed.value) rightCollapsed.value = false
+}
+
+function toggleNotesDrawer() {
+  setRightPaneTab(notesDrawerOpen.value ? 'chat' : 'notes')
 }
 
 function openNoteComposer(selection) {
@@ -1632,23 +1927,6 @@ function focusNote(note) {
   }
 }
 
-function mergeChatHistoryMessages(doc, historyMessages) {
-  const existingMessages = Array.isArray(doc.messages) ? doc.messages : []
-  const onlyWelcome = existingMessages.length === 0
-    || existingMessages.every((message) => String(message.id || '').startsWith(`welcome-${doc.id}`))
-  if (onlyWelcome) {
-    doc.messages = historyMessages
-    return
-  }
-
-  const existingIds = new Set(existingMessages.map((message) => message.id))
-  const existingFingerprints = new Set(existingMessages.map(messageFingerprint))
-  const missingHistory = historyMessages.filter((message) => (
-    !existingIds.has(message.id) && !existingFingerprints.has(messageFingerprint(message))
-  ))
-  doc.messages = [...missingHistory, ...existingMessages]
-}
-
 function isChatMessage(message) {
   return Boolean(message && typeof message === 'object')
 }
@@ -1683,19 +1961,19 @@ function chatTurnIdFromMessage(message) {
 }
 
 function openClearChatHistoryConfirm() {
-  const doc = selectedDocument.value
-  if (!doc || doc.id === 'empty') return
+  const session = activeSession.value
+  if (!session) return
   clearChatError.value = ''
   clearChatStatus.value = 'idle'
-  clearChatTargetDocId.value = doc.id
-  clearChatTargetTitle.value = doc.shortTitle || doc.title || ''
+  clearChatTargetSessionId.value = session.id
+  clearChatTargetTitle.value = sessionTabTitle(session)
   clearChatConfirmOpen.value = true
 }
 
 function closeClearChatHistoryConfirm() {
   clearChatConfirmOpen.value = false
   clearChatError.value = ''
-  clearChatTargetDocId.value = ''
+  clearChatTargetSessionId.value = ''
   clearChatTargetTitle.value = ''
 }
 
@@ -1703,7 +1981,7 @@ function resetClearChatConfirm() {
   clearChatConfirmOpen.value = false
   clearChatStatus.value = 'idle'
   clearChatError.value = ''
-  clearChatTargetDocId.value = ''
+  clearChatTargetSessionId.value = ''
   clearChatTargetTitle.value = ''
 }
 
@@ -1781,10 +2059,10 @@ function confirmRemoveWorkspaceRoot() {
   })()
 }
 
-function clearChatTurnsWithTimeout(documentId, turnIds) {
+function clearChatTurnsWithTimeout(sessionId, turnIds) {
   const clearPromise = invoke('clear_chat_turns', {
     input: {
-      documentId,
+      sessionId,
       turnIds,
     },
   })
@@ -1805,19 +2083,19 @@ function clearChatTurnsWithTimeout(documentId, turnIds) {
     })
 }
 
-async function finishClearChatPersistence(doc, previousMessages, clearedEventIds, turnIds, clearWelcomeId) {
+async function finishClearChatPersistence(session, previousMessages, clearedEventIds, turnIds, clearWelcomeId) {
   try {
-    await clearChatTurnsWithTimeout(doc.id, turnIds)
+    await clearChatTurnsWithTimeout(session.id, turnIds)
   } catch (err) {
     if (err?.name === 'ClearChatHistoryTimeout') {
       console.warn(ui.value.clearChatHistoryFailed, err)
       return
     }
-    const stillShowingClearPlaceholder = doc.messages?.length === 1 && doc.messages[0]?.id === clearWelcomeId
-    if (stillShowingClearPlaceholder) doc.messages = previousMessages
+    const stillShowingClearPlaceholder = session.messages?.length === 1 && session.messages[0]?.id === clearWelcomeId
+    if (stillShowingClearPlaceholder) session.messages = previousMessages
     clearedEventIds.forEach((eventId) => clearedActivityEventIds.delete(eventId))
-    clearChatTargetDocId.value = doc.id
-    clearChatTargetTitle.value = doc.shortTitle || doc.title || ''
+    clearChatTargetSessionId.value = session.id
+    clearChatTargetTitle.value = sessionTabTitle(session)
     clearChatStatus.value = 'failed'
     clearChatError.value = err?.message || String(err)
     clearChatConfirmOpen.value = true
@@ -1825,35 +2103,35 @@ async function finishClearChatPersistence(doc, previousMessages, clearedEventIds
 }
 
 function confirmClearChatHistory() {
-  const doc = allDocs.value.find((item) => item.id === clearChatTargetDocId.value)
-  if (!doc || doc.id === 'empty') {
+  const session = chatSessions.get(clearChatTargetSessionId.value)
+  if (!session) {
     closeClearChatHistoryConfirm()
     return
   }
   if (clearChatStatus.value === 'clearing') return
   clearChatStatus.value = 'clearing'
   clearChatError.value = ''
-  doc.chatHistoryClearGeneration = Number(doc.chatHistoryClearGeneration || 0) + 1
-  const previousMessages = Array.isArray(doc.messages) ? doc.messages.filter(isChatMessage) : []
+  session.chatHistoryClearGeneration = Number(session.chatHistoryClearGeneration || 0) + 1
+  const previousMessages = Array.isArray(session.messages) ? session.messages.filter(isChatMessage) : []
   const clearedEventIds = previousMessages
     .map((message) => message.activityEventId)
     .filter(Boolean)
   const turnIds = [...new Set(previousMessages.map(chatTurnIdFromMessage).filter(Boolean))]
   clearedEventIds.forEach((eventId) => {
-    clearedActivityEventIds.set(eventId, doc.id)
+    clearedActivityEventIds.set(eventId, session.id)
     clearAssistantStreamState(eventId)
   })
-  doc.messages = [createWelcomeMessage(doc.id)]
-  const clearWelcomeId = doc.messages[0]?.id || ''
-  doc.chatHistoryLoaded = true
-  doc.chatHistoryLoading = null
-  if (selectedDocId.value === doc.id) {
+  session.messages = [createWelcomeMessage(session.id)]
+  const clearWelcomeId = session.messages[0]?.id || ''
+  session.chatHistoryLoaded = true
+  session.chatHistoryLoading = null
+  if (activeSessionId.value === session.id) {
     activeCitationId.value = ''
     activeBlockId.value = ''
     activeHighlight.value = null
   }
   resetClearChatConfirm()
-  void finishClearChatPersistence(doc, previousMessages, clearedEventIds, turnIds, clearWelcomeId)
+  void finishClearChatPersistence(session, previousMessages, clearedEventIds, turnIds, clearWelcomeId)
 }
 
 function applyAskDocumentError(eventId, errorMessage) {
@@ -2637,7 +2915,7 @@ function handleAskSelection(selection) {
   if (!selected) return
   handleSelection(selected)
   lastSelection.value = selected
-  rightPaneTab.value = 'chat'
+  notesDrawerOpen.value = false
   if (rightCollapsed.value) rightCollapsed.value = false
   nextTick(() => {
     chatFocusRequest.value += 1
@@ -2702,8 +2980,11 @@ function handleNoteSelection(selection) {
 }
 
 function handleRealign() {
-  selectedDocument.value.messages.push({
+  const session = activeSession.value
+  if (!session) return
+  session.messages.push({
     id: nextLocalId('system'),
+    sessionId: session.id,
     role: 'assistant',
     content: {
       en: messages.en.realignDone,
@@ -3453,6 +3734,7 @@ onMounted(() => {
     markStartup('app-first-frame')
     loadTranslationSettings()
     loadLastWorkspaceAfterFirstPaint()
+    loadSessionList()
     scheduleIdleTask(() => loadModelProviders(), 1200)
     scheduleIdleTask(() => probePdfTranslationRuntime(), 2000)
   })
@@ -3608,7 +3890,7 @@ onMounted(() => {
       :active-page="activePage"
       :active-block-id="activeBlockId"
       :active-highlight="activeHighlight"
-      :note-highlights="rightPaneTab === 'notes' ? (selectedDocument.notes || []) : []"
+      :note-highlights="notesDrawerOpen ? (selectedDocument.notes || []) : []"
       :hovered-linked-block="hoveredLinkedBlock"
       :active-translation="activeTranslation"
       :page-translation="selectedDocument.translation.pages?.[activePage] || null"
@@ -3644,8 +3926,10 @@ onMounted(() => {
     <div v-if="!rightCollapsed" class="drag-handle" @mousedown.prevent="startResize" />
 
     <ChatPane
-      v-show="rightPaneTab !== 'notes'"
-      :document="selectedDocument"
+      :session="activeSession"
+      :document="activeFocusDoc"
+      :viewed-doc-id="selectedDocId"
+      :viewed-doc-name="selectedDocument.shortTitle || selectedDocument.title || ''"
       :all-documents="allDocs"
       :collapsed="rightCollapsed"
       :width="rightWidth"
@@ -3656,6 +3940,10 @@ onMounted(() => {
       :model-configured="chatModelConfigured"
       :pending-selection="lastSelection"
       :focus-request="chatFocusRequest"
+      :sessions="sessionTabs"
+      :history-items="sessionHistoryItems"
+      :history-open="sessionHistoryOpen"
+      :notes-open="notesDrawerOpen"
       :locale="locale"
       :ui="ui"
       @toggle-collapse="toggleCollapse"
@@ -3663,26 +3951,37 @@ onMounted(() => {
       @update:model-id="selectedChatModelId = $event"
       @clear-selection="clearPendingSelection"
       @clear-history="openClearChatHistoryConfirm"
-      @set-tab="setRightPaneTab"
+      @new-session="handleNewSession"
+      @select-session="setActiveSession"
+      @close-session="closeSessionTab"
+      @delete-session="deleteSessionById"
+      @toggle-history="sessionHistoryOpen = !sessionHistoryOpen"
+      @close-history="sessionHistoryOpen = false"
+      @toggle-notes="toggleNotesDrawer"
+      @set-focus-doc="handleSetSessionFocus"
       @send="handleSend"
     />
 
-    <NotesPane
-      v-if="rightPaneTab === 'notes'"
-      :document="selectedDocument"
-      :collapsed="rightCollapsed"
-      :width="rightWidth"
-      :notes="selectedDocument.notes || []"
-      :loading="Boolean(selectedDocument.notesLoading) && !selectedDocument.notesLoaded"
-      :active-note-id="activeNoteId"
-      :locale="locale"
-      :ui="ui"
-      @toggle-collapse="toggleCollapse"
-      @set-tab="setRightPaneTab"
-      @note-focus="focusNote"
-      @note-edit="openNoteEditComposer"
-      @note-delete="openNoteDeleteConfirm"
-    />
+    <Transition name="notes-drawer">
+      <div v-if="notesDrawerOpen && !rightCollapsed" class="notes-drawer">
+        <NotesPane
+          :document="selectedDocument"
+          :collapsed="false"
+          :width="330"
+          :notes="selectedDocument.notes || []"
+          :loading="Boolean(selectedDocument.notesLoading) && !selectedDocument.notesLoaded"
+          :active-note-id="activeNoteId"
+          :as-drawer="true"
+          :locale="locale"
+          :ui="ui"
+          @toggle-collapse="toggleNotesDrawer"
+          @set-tab="setRightPaneTab"
+          @note-focus="focusNote"
+          @note-edit="openNoteEditComposer"
+          @note-delete="openNoteDeleteConfirm"
+        />
+      </div>
+    </Transition>
 
     <NoteComposer
       :show="noteComposer.open"
@@ -4161,6 +4460,39 @@ onMounted(() => {
   background: var(--bg-app);
   display: flex;
   overflow: hidden;
+  /* Positioning context for the floating Notes drawer. */
+  position: relative;
+}
+
+/* Notes drawer: an absolutely-positioned wrapper that floats over the Agent
+   pane (does NOT squeeze the Reader). Styling the wrapper div here — rather than
+   the NotesPane root — avoids a scoped-CSS specificity tie with NotesPane's own
+   `.notes-shell { position: relative }`, which previously left the pane in the
+   flex flow and pushed the Reader narrower. The NotesPane inside fills it. */
+.notes-drawer {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 330px;
+  z-index: 40;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28);
+}
+
+.notes-drawer > :deep(.notes-shell) {
+  width: 100% !important;
+  height: 100%;
+}
+
+.notes-drawer-enter-active,
+.notes-drawer-leave-active {
+  transition: transform 0.22s ease, opacity 0.22s ease;
+}
+
+.notes-drawer-enter-from,
+.notes-drawer-leave-to {
+  transform: translateX(100%);
+  opacity: 0.4;
 }
 
 .async-panel-loading {
