@@ -16,13 +16,18 @@ use std::collections::BTreeSet;
 use crate::runtime::rag::Citation;
 
 /// Mutable "already looked at" record for a single agent turn.
+///
+/// Coverage is keyed by `(document_id, …)` so a multi-document turn reports
+/// honestly per source ("Doc A: pages 1-2; Doc B: pages 5") instead of merging
+/// everything into one pile — which would let "A is covered but B was never
+/// searched" pass as sufficient. Single-document turns render exactly as before.
 #[derive(Debug, Default, Clone)]
 pub struct RetrievalLedger {
     tool_signatures: BTreeSet<String>,
-    pages: BTreeSet<u32>,
-    sections: BTreeSet<String>,
-    tables: BTreeSet<String>,
-    visuals: BTreeSet<String>,
+    pages: BTreeSet<(String, u32)>,
+    sections: BTreeSet<(String, String)>,
+    tables: BTreeSet<(String, String)>,
+    visuals: BTreeSet<(String, String)>,
 }
 
 impl RetrievalLedger {
@@ -61,7 +66,8 @@ impl RetrievalLedger {
     /// report "I already looked at pages 1-2, the Method section, Table 3".
     pub fn record_coverage(&mut self, citations: &[Citation]) {
         for citation in citations {
-            self.pages.insert(citation.page);
+            let doc = citation.document_id.clone();
+            self.pages.insert((doc.clone(), citation.page));
             if let Some(section) = citation
                 .section_title
                 .as_deref()
@@ -74,14 +80,14 @@ impl RetrievalLedger {
                 match citation.source.as_str() {
                     "open_table" | "open_table_context" | "table_fact" | "inspect_tables"
                     | "table_anchor" => {
-                        self.tables.insert(section.to_string());
+                        self.tables.insert((doc, section.to_string()));
                     }
                     "open_visual" | "visual_asset" | "visual_anchor" | "inspect_objects"
                     | "caption" | "analyze_visual" | "analyze_page" => {
-                        self.visuals.insert(section.to_string());
+                        self.visuals.insert((doc, section.to_string()));
                     }
                     _ => {
-                        self.sections.insert(section.to_string());
+                        self.sections.insert((doc, section.to_string()));
                     }
                 }
             }
@@ -98,23 +104,56 @@ impl RetrievalLedger {
 
     /// Human-readable "already looked at" summary for honest insufficiency
     /// messages and judge feedback. Returns `None` when nothing was covered.
+    ///
+    /// One document → flat `pages …; sections: …` (unchanged). Multiple documents
+    /// → per-document blocks `[docId] pages …; … | [docId2] …` so the judge can
+    /// tell which sources are still unexamined.
     pub fn coverage_summary(&self) -> Option<String> {
         if self.is_empty() {
             return None;
         }
-        let mut parts: Vec<String> = Vec::new();
-        if !self.pages.is_empty() {
-            let pages = self
-                .pages
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            parts.push(format!("pages {pages}"));
+        let docs: BTreeSet<&str> = self
+            .pages
+            .iter()
+            .map(|(doc, _)| doc.as_str())
+            .chain(self.sections.iter().map(|(doc, _)| doc.as_str()))
+            .chain(self.tables.iter().map(|(doc, _)| doc.as_str()))
+            .chain(self.visuals.iter().map(|(doc, _)| doc.as_str()))
+            .collect();
+        if docs.len() <= 1 {
+            return self.summary_for_doc(None);
         }
-        Self::push_named(&mut parts, "sections", &self.sections);
-        Self::push_named(&mut parts, "tables", &self.tables);
-        Self::push_named(&mut parts, "visuals", &self.visuals);
+        let blocks: Vec<String> = docs
+            .iter()
+            .filter_map(|doc| {
+                self.summary_for_doc(Some(doc))
+                    .map(|summary| format!("[{doc}] {summary}"))
+            })
+            .collect();
+        if blocks.is_empty() {
+            None
+        } else {
+            Some(blocks.join(" | "))
+        }
+    }
+
+    /// Build the flat `pages …; sections: …` summary, optionally restricted to a
+    /// single document. `None` includes every document (used when only one exists).
+    fn summary_for_doc(&self, doc: Option<&str>) -> Option<String> {
+        let matches = |entry_doc: &str| doc.map_or(true, |want| entry_doc == want);
+        let mut parts: Vec<String> = Vec::new();
+        let pages = self
+            .pages
+            .iter()
+            .filter(|(entry_doc, _)| matches(entry_doc))
+            .map(|(_, page)| page.to_string())
+            .collect::<Vec<_>>();
+        if !pages.is_empty() {
+            parts.push(format!("pages {}", pages.join(", ")));
+        }
+        Self::push_named(&mut parts, "sections", &self.sections, doc);
+        Self::push_named(&mut parts, "tables", &self.tables, doc);
+        Self::push_named(&mut parts, "visuals", &self.visuals, doc);
         if parts.is_empty() {
             None
         } else {
@@ -122,19 +161,24 @@ impl RetrievalLedger {
         }
     }
 
-    fn push_named(parts: &mut Vec<String>, label: &str, values: &BTreeSet<String>) {
-        if values.is_empty() {
+    fn push_named(
+        parts: &mut Vec<String>,
+        label: &str,
+        values: &BTreeSet<(String, String)>,
+        doc: Option<&str>,
+    ) {
+        let names = values
+            .iter()
+            .filter(|(entry_doc, _)| doc.map_or(true, |want| entry_doc == want))
+            .map(|(_, name)| name.as_str())
+            .collect::<Vec<_>>();
+        if names.is_empty() {
             return;
         }
         // Cap to keep the summary short and stable.
-        let listed = values
-            .iter()
-            .take(6)
-            .map(|value| value.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let suffix = if values.len() > 6 {
-            format!(" (+{} more)", values.len() - 6)
+        let listed = names.iter().take(6).copied().collect::<Vec<_>>().join(", ");
+        let suffix = if names.len() > 6 {
+            format!(" (+{} more)", names.len() - 6)
         } else {
             String::new()
         };
@@ -147,6 +191,10 @@ mod tests {
     use super::*;
 
     fn citation(source: &str, page: u32, section: Option<&str>) -> Citation {
+        citation_in("doc", source, page, section)
+    }
+
+    fn citation_in(document_id: &str, source: &str, page: u32, section: Option<&str>) -> Citation {
         Citation {
             id: String::new(),
             label: String::new(),
@@ -155,7 +203,7 @@ mod tests {
             section_title: section.map(str::to_string),
             quote: "q".to_string(),
             bbox_list: serde_json::json!([]),
-            document_id: "doc".to_string(),
+            document_id: document_id.to_string(),
             source: source.to_string(),
         }
     }
@@ -208,6 +256,23 @@ mod tests {
         assert!(summary.contains("sections: Introduction"), "summary={summary}");
         assert!(summary.contains("tables: Table 3"), "summary={summary}");
         assert!(summary.contains("visuals: Figure 1"), "summary={summary}");
+    }
+
+    #[test]
+    fn coverage_groups_by_document_when_multiple_docs() {
+        let mut ledger = RetrievalLedger::new();
+        ledger.record_coverage(&[
+            citation_in("paperA", "open_pages", 1, Some("Intro")),
+            citation_in("paperA", "open_pages", 2, None),
+            citation_in("paperB", "open_pages", 5, Some("Method")),
+        ]);
+        let summary = ledger.coverage_summary().expect("non-empty coverage");
+        // Per-document blocks, each tagged with its document id.
+        assert!(summary.contains("[paperA] pages 1, 2"), "summary={summary}");
+        assert!(summary.contains("sections: Intro"), "summary={summary}");
+        assert!(summary.contains("[paperB] pages 5"), "summary={summary}");
+        assert!(summary.contains("sections: Method"), "summary={summary}");
+        assert!(summary.contains(" | "), "blocks should be separated; summary={summary}");
     }
 
     #[test]
