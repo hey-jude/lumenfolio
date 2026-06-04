@@ -53,7 +53,6 @@ const props = defineProps({
 const emit = defineEmits([
   'update:filter',
   'select-doc',
-  'set-locale',
   'add-folder',
   'rescan',
   'reindex-doc',
@@ -359,24 +358,6 @@ function triggerDeleteRoot(root, event = null) {
         <div class="brand-copy">
           <div class="sidebar-title">Lumenfolio</div>
         </div>
-      </div>
-      <div class="locale-switch">
-        <button
-          type="button"
-          class="locale-btn"
-          :class="{ active: locale === 'en' }"
-          @click="emit('set-locale', 'en')"
-        >
-          {{ ui.localeEnglish }}
-        </button>
-        <button
-          type="button"
-          class="locale-btn"
-          :class="{ active: locale === 'zh' }"
-          @click="emit('set-locale', 'zh')"
-        >
-          {{ ui.localeChinese }}
-        </button>
       </div>
     </div>
 
@@ -761,8 +742,7 @@ function triggerDeleteRoot(root, event = null) {
   flex: 1;
 }
 
-.brand-block,
-.locale-switch {
+.brand-block {
   position: relative;
   z-index: 1;
 }
@@ -831,31 +811,6 @@ function triggerDeleteRoot(root, event = null) {
   opacity: 0;
 }
 
-.locale-switch {
-  display: inline-flex;
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  flex-shrink: 0;
-}
-
-.locale-btn {
-  min-width: 44px;
-  min-height: 28px;
-  border-radius: 999px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.locale-btn.active {
-  background: rgba(255, 255, 255, 0.09);
-  color: var(--text-primary);
-}
 
 .search-box {
   display: flex;

@@ -3898,7 +3898,6 @@ onMounted(() => {
       :drop-target-root-id="workspaceDropTargetRootId"
       @update:filter="filter = $event"
       @select-doc="selectDoc"
-      @set-locale="locale = $event"
       @add-folder="chooseWorkspace"
       @rescan="rescanWorkspace"
       @reindex-doc="reindexSelectedDocument"
@@ -4181,6 +4180,15 @@ onMounted(() => {
             <button
               type="button"
               class="settings-nav-item"
+              :class="{ active: settingsSection === 'general' }"
+              @click="switchSettingsSection('general')"
+            >
+              <span>{{ ui.generalNav }}</span>
+              <small>{{ ui.generalNavHint }}</small>
+            </button>
+            <button
+              type="button"
+              class="settings-nav-item"
               :class="{ active: settingsSection === 'chat' }"
               @click="switchSettingsSection('chat')"
             >
@@ -4197,6 +4205,25 @@ onMounted(() => {
               <small>{{ ui.translationNavHint }}</small>
             </button>
           </nav>
+
+          <div v-if="settingsSection === 'general'" class="settings-panel">
+            <div class="settings-section-title full">{{ ui.interfaceLanguage }}</div>
+            <div class="settings-note">{{ ui.interfaceLanguageHint }}</div>
+            <div class="settings-locale-switch">
+              <button
+                type="button"
+                class="settings-locale-btn"
+                :class="{ active: locale === 'en' }"
+                @click="locale = 'en'"
+              >English</button>
+              <button
+                type="button"
+                class="settings-locale-btn"
+                :class="{ active: locale === 'zh' }"
+                @click="locale = 'zh'"
+              >中文</button>
+            </div>
+          </div>
 
           <div v-if="settingsSection === 'chat'" class="settings-panel provider-settings-panel">
             <aside class="provider-list">
@@ -5120,6 +5147,40 @@ onMounted(() => {
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.45;
+}
+
+/* Interface-language segmented control (moved out of the sidebar header). */
+.settings-locale-switch {
+  display: inline-flex;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 3px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.settings-locale-btn {
+  min-width: 72px;
+  min-height: 30px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.settings-locale-btn:hover {
+  color: var(--text-secondary);
+}
+
+.settings-locale-btn.active {
+  background: rgba(106, 169, 255, 0.16);
+  color: var(--text-primary);
 }
 
 .settings-inline-actions {
