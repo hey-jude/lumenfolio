@@ -2145,8 +2145,8 @@ defineExpose({
 }
 
 .pdf-scroll::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 
 .pdf-scroll::-webkit-scrollbar-track {
@@ -2154,7 +2154,9 @@ defineExpose({
 }
 
 .pdf-scroll::-webkit-scrollbar-thumb {
-  border: 2px solid transparent;
+  /* 2.5px transparent border + padding-box clip → a slim ~3px visible thumb on
+     a transparent track; hidden until hover/scroll. */
+  border: 2.5px solid transparent;
   border-radius: 999px;
   background: transparent;
   background-clip: padding-box;
