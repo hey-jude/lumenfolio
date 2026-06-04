@@ -370,23 +370,6 @@ const translationArtifactLabel = computed(() => {
   }
   return translation.phase || pageTranslationStatus.value
 })
-const translationHeaderSummary = computed(() => {
-  const translation = props.document.translation || {}
-  if (translationArtifactPath.value && !['pending', 'queued', 'running', 'partial'].includes(translation.status)) {
-    return translationArtifactLabel.value
-  }
-  if (translationArtifactIsPartial.value) {
-    return `${translationArtifactLabel.value} · ${translationPhaseLabel.value}`
-  }
-  if (['pending', 'queued', 'running', 'partial'].includes(translation.status)) {
-    return `${translationPhaseLabel.value} · ${documentProgressSummary.value}`
-  }
-  if (translation.status === 'failed') return props.ui.statusFailed
-  return translationArtifactPath.value ? translationArtifactLabel.value : pageTranslationStatus.value
-})
-const showTranslationHeaderProgress = computed(() => (
-  ['pending', 'queued', 'running', 'partial'].includes(props.document.translation.status)
-))
 const translationArtifactDocument = computed(() => ({
   ...props.document,
   id: translationArtifactDocumentId.value,
@@ -409,12 +392,6 @@ const paneScrollLinkLabel = computed(() => {
     return props.locale === 'zh' ? '解除双栏滚动锁定' : 'Unlock pane scrolling'
   }
   return props.locale === 'zh' ? '锁定双栏滚动' : 'Lock pane scrolling'
-})
-const paneScrollStatusLabel = computed(() => {
-  if (!canLinkPaneScroll.value) return ''
-  return paneScrollLinked.value
-    ? (props.locale === 'zh' ? '滚动已锁定' : 'scroll locked')
-    : (props.locale === 'zh' ? '滚动未锁定' : 'scroll unlocked')
 })
 const hasLoadedTranslationPages = computed(() => (
   translatedPageList.value.some((page) => isTranslationPageLoaded(page.translation))
@@ -1148,10 +1125,6 @@ watch(translationArtifactActivePage, async () => {
             v-show="!(viewMode === 'translated' && canOpenTranslationView)"
             class="viewer-card pdf-compare-pane local-pdf-source"
           >
-            <div v-if="viewMode === 'dual' && canOpenTranslationView" class="viewer-card-header">
-              <span>{{ ui.originalPdf }}</span>
-              <span>{{ paneScrollStatusLabel }}</span>
-            </div>
             <PdfViewer
               ref="pdfViewerRef"
               :key="`source-pdf:${document.id}`"
@@ -1200,39 +1173,18 @@ watch(translationArtifactActivePage, async () => {
               v-bind="testAttrs('pane-scroll-link-toggle', { linked: paneScrollLinked ? 'true' : 'false' })"
               @click="togglePaneScrollLink"
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  class="chain-left"
-                  d="M9.5 7.5H7.8a4.2 4.2 0 0 0 0 8.4h2.1"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                />
-                <path
-                  class="chain-right"
-                  d="M14.5 15.9h1.7a4.2 4.2 0 0 0 0-8.4h-2.1"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                />
-                <path
-                  class="chain-join"
-                  d="M9.2 12h5.6"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                />
-                <path
-                  class="chain-break"
-                  d="M6.8 5.2 5.7 3.4M17.2 18.8l1.1 1.8M12 4.2V2.4M12 21.6v-1.8"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  stroke-linecap="round"
-                />
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M9 17H7A5 5 0 0 1 7 7h2" />
+                <path d="M15 7h2a5 5 0 0 1 0 10h-2" />
+                <line v-if="paneScrollLinked" x1="8" y1="12" x2="16" y2="12" />
               </svg>
             </button>
           </div>
@@ -1242,21 +1194,6 @@ watch(translationArtifactActivePage, async () => {
             class="viewer-card translated-reader"
             :class="{ 'translation-wide-pane': viewMode === 'translated' }"
           >
-            <div class="viewer-card-header">
-              <span>{{ ui.translatedPdf }}</span>
-              <span class="translation-header-actions">
-                <span v-bind="testAttrs('translation-artifact-label')">
-                  {{ translationHeaderSummary }}
-                </span>
-              </span>
-              <span
-                v-if="showTranslationHeaderProgress"
-                class="translation-header-progress"
-                aria-hidden="true"
-              >
-                <span :style="{ width: `${translationProgressPercent}%` }"></span>
-              </span>
-            </div>
             <PdfViewer
               v-if="translationArtifactPath"
               ref="translationPdfViewerRef"
@@ -1940,37 +1877,6 @@ watch(translationArtifactActivePage, async () => {
   font-size: 12px;
 }
 
-.translation-header-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  max-width: 60%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.translation-header-progress {
-  position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: -1px;
-  height: 2px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.translation-header-progress span {
-  display: block;
-  height: 100%;
-  min-width: 3%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #63e6be, #6aa9ff);
-  transition: width 180ms ease;
-}
-
 .real-pdf-viewer {
   min-width: 0;
 }
@@ -2057,14 +1963,6 @@ watch(translationArtifactActivePage, async () => {
 .pane-link-button:disabled {
   opacity: 0.38;
   cursor: not-allowed;
-}
-
-.pane-link-button.linked .chain-break {
-  opacity: 0;
-}
-
-.pane-link-button:not(.linked) .chain-join {
-  opacity: 0;
 }
 
 .pdf-compare-pane,
