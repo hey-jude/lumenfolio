@@ -2147,8 +2147,8 @@ defineExpose({
 }
 
 .pdf-scroll::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 .pdf-scroll::-webkit-scrollbar-track {
@@ -2156,19 +2156,16 @@ defineExpose({
 }
 
 .pdf-scroll::-webkit-scrollbar-thumb {
-  /* 2.5px transparent border + padding-box clip → a slim ~3px visible thumb on
-     a transparent track; hidden until hover/scroll. */
-  border: 2.5px solid transparent;
+  /* Narrow lane + thumb that fills it (transparent track, hover-revealed).
+     Avoids the border/background-clip trick, which renders inconsistently. */
   border-radius: 999px;
-  background: transparent;
-  background-clip: padding-box;
+  background-color: transparent;
   transition: background-color 0.18s ease;
 }
 
 .pdf-scroll:hover::-webkit-scrollbar-thumb,
 .pdf-scroll.is-scrolling::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.22);
-  background-clip: padding-box;
+  background-color: rgba(255, 255, 255, 0.22);
 }
 
 .pdf-pages {

@@ -833,9 +833,11 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 /* Slim, transparent scrollbar (hover-revealed). No scrollbar-width here — that
-   would make WebKit ignore these ::-webkit-scrollbar rules. */
+   would make WebKit ignore these ::-webkit-scrollbar rules. A narrow lane with a
+   thumb that fills it is used instead of the border/background-clip trick, which
+   renders inconsistently on ::-webkit-scrollbar-thumb. */
 .tree-area::-webkit-scrollbar {
-  width: 8px;
+  width: 6px;
 }
 
 .tree-area::-webkit-scrollbar-track {
@@ -843,15 +845,12 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 .tree-area::-webkit-scrollbar-thumb {
-  border: 2.5px solid transparent;
   border-radius: 999px;
-  background: transparent;
-  background-clip: padding-box;
+  background-color: transparent;
 }
 
 .tree-area:hover::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.22);
-  background-clip: padding-box;
+  background-color: rgba(255, 255, 255, 0.2);
 }
 
 .folder-group + .folder-group {

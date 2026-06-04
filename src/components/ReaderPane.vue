@@ -1997,8 +1997,8 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .translation-page::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 .translation-page::-webkit-scrollbar-track {
@@ -2006,16 +2006,13 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .translation-page::-webkit-scrollbar-thumb {
-  border: 2px solid transparent;
   border-radius: 999px;
-  background: transparent;
-  background-clip: padding-box;
+  background-color: transparent;
 }
 
 .translation-page:hover::-webkit-scrollbar-thumb,
 .translation-page.is-scrolling::-webkit-scrollbar-thumb {
-  background: rgba(29, 33, 38, 0.24);
-  background-clip: padding-box;
+  background-color: rgba(29, 33, 38, 0.24);
 }
 
 .translation-page.wide {
