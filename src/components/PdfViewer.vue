@@ -2134,7 +2134,44 @@ defineExpose({
                 <template v-if="translationMeta"> · {{ translationMeta }}</template>
               </div>
             </div>
-            <button type="button" :title="ui.close" :aria-label="ui.close" @click="emit('close-translation')">×</button>
+            <div class="translation-popover-head-actions">
+              <button
+                v-if="activeTranslation.status !== 'running'"
+                type="button"
+                class="popover-icon-btn"
+                :title="activeTranslation.status === 'failed' ? ui.retry : ui.retranslate"
+                :aria-label="activeTranslation.status === 'failed' ? ui.retry : ui.retranslate"
+                @click="emit('retry-translation')"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                  <path d="M21 3v6h-6" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="popover-icon-btn"
+                :title="copyButtonLabel"
+                :aria-label="copyButtonLabel"
+                :disabled="activeTranslation.status !== 'succeeded'"
+                @click="copyActiveTranslation"
+              >
+                <svg v-if="copyStatus === 'copied'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M20 6 9 17l-5-5" />
+                </svg>
+                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="9" y="9" width="11" height="11" rx="2" />
+                  <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="popover-icon-btn"
+                :title="ui.close"
+                :aria-label="ui.close"
+                @click="emit('close-translation')"
+              >×</button>
+            </div>
           </div>
 
           <div v-if="activeTranslation.status === 'failed'" class="translation-popover-error">
@@ -2147,28 +2184,6 @@ defineExpose({
                 ? ui.translationPending
                 : activeTranslation.translatedText
             }}
-          </div>
-
-          <details v-if="activeTranslation.source?.text" class="translation-source">
-            <summary>{{ ui.showSource }}</summary>
-            <div>{{ activeTranslation.source.text }}</div>
-          </details>
-
-          <div class="translation-popover-actions">
-            <button
-              v-if="activeTranslation.status !== 'running'"
-              type="button"
-              @click="emit('retry-translation')"
-            >
-              {{ activeTranslation.status === 'failed' ? ui.retry : ui.retranslate }}
-            </button>
-            <button
-              type="button"
-              :disabled="activeTranslation.status !== 'succeeded'"
-              @click="copyActiveTranslation"
-            >
-              {{ copyButtonLabel }}
-            </button>
           </div>
         </aside>
       </div>
@@ -2517,22 +2532,43 @@ defineExpose({
   white-space: nowrap;
 }
 
-.translation-popover-head button,
-.translation-popover-actions button {
-  min-height: 30px;
-  border-radius: 9px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-primary);
-  cursor: pointer;
-  padding: 0 10px;
+.translation-popover-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
-.translation-popover-head button {
-  min-width: 30px;
+.popover-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   padding: 0;
-  border-radius: 999px;
-  flex: 0 0 auto;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.popover-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.popover-icon-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+
+.popover-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .translation-popover-body,
@@ -2570,27 +2606,6 @@ defineExpose({
   background-color: rgba(255, 255, 255, 0.22);
 }
 
-.translation-source {
-  flex: 0 0 auto;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
-  padding-top: 8px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.translation-source summary {
-  cursor: pointer;
-  color: var(--text-secondary);
-}
-
-.translation-source div {
-  max-height: 110px;
-  overflow: auto;
-  margin-top: 8px;
-  white-space: pre-wrap;
-  line-height: 1.55;
-}
-
 .translation-popover-error {
   color: #ffb3b3;
 }
@@ -2602,16 +2617,5 @@ defineExpose({
   line-height: 1.45;
 }
 
-.translation-popover-actions {
-  flex: 0 0 auto;
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.translation-popover-actions button:disabled {
-  opacity: 0.48;
-  cursor: not-allowed;
-}
 
 </style>
