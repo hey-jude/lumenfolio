@@ -4211,8 +4211,8 @@ onMounted(() => {
             <label class="settings-field full">
               <span>{{ ui.interfaceLanguage }}</span>
               <select v-model="locale">
-                <option value="en">English</option>
-                <option value="zh">中文</option>
+                <option value="en">{{ ui.languageNameEnglish }}</option>
+                <option value="zh">{{ ui.languageNameChinese }}</option>
               </select>
             </label>
             <div class="settings-note full">{{ ui.interfaceLanguageHint }}</div>
