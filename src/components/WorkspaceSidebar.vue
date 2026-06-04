@@ -854,13 +854,13 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 .folder-group + .folder-group {
-  margin-top: 6px;
+  margin-top: 0px;
 }
 
 .folder-group {
   position: relative;
   border-radius: 14px;
-  padding: 6px 4px 4px;
+  padding: 0px 4px 0px;
   margin-top: -6px;
   transition: background 140ms ease, box-shadow 140ms ease;
 }
