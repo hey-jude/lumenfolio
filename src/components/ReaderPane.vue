@@ -1988,8 +1988,8 @@ watch(translationArtifactActivePage, async () => {
   margin: 6px 8px 8px;
   padding: 0;
   overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
+  /* No scrollbar-width/scrollbar-color: those make WebKit ignore the
+     ::-webkit-scrollbar rules below and use a native scrollbar instead. */
   border-radius: 6px;
   background: #f4f1e8;
   color: #1d2126;
@@ -2015,11 +2015,7 @@ watch(translationArtifactActivePage, async () => {
 .translation-page:hover::-webkit-scrollbar-thumb,
 .translation-page.is-scrolling::-webkit-scrollbar-thumb {
   background: rgba(29, 33, 38, 0.24);
-}
-
-.translation-page:hover,
-.translation-page.is-scrolling {
-  scrollbar-color: rgba(29, 33, 38, 0.24) transparent;
+  background-clip: padding-box;
 }
 
 .translation-page.wide {

@@ -2137,8 +2137,10 @@ defineExpose({
   min-height: 0;
   overflow: auto;
   padding: 18px 18px 28px;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
+  /* NOTE: do NOT set scrollbar-width/scrollbar-color here — when those standard
+     properties are present, WebKit (WKWebView) ignores the ::-webkit-scrollbar
+     rules below entirely and falls back to a native scrollbar. We rely on the
+     ::-webkit-scrollbar styling for the slim, transparent look. */
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 120px),
     var(--bg-app);
@@ -2166,11 +2168,7 @@ defineExpose({
 .pdf-scroll:hover::-webkit-scrollbar-thumb,
 .pdf-scroll.is-scrolling::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.22);
-}
-
-.pdf-scroll:hover,
-.pdf-scroll.is-scrolling {
-  scrollbar-color: rgba(255, 255, 255, 0.22) transparent;
+  background-clip: padding-box;
 }
 
 .pdf-pages {
