@@ -4419,7 +4419,7 @@ onMounted(() => {
             </section>
           </div>
 
-          <div v-else class="settings-panel settings-body">
+          <div v-if="settingsSection === 'translation'" class="settings-panel settings-body">
             <div class="settings-section-title full">{{ ui.translationProviderSection }}</div>
             <label class="settings-field full">
               <span>{{ ui.translationProviderMode }}</span>
