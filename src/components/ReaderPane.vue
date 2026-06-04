@@ -1531,8 +1531,10 @@ watch(translationArtifactActivePage, async () => {
 .toolbar-control-group {
   height: 32px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.085);
-  background: rgba(255, 255, 255, 0.035);
+  /* Ghost toolbar: no borders/boxes by default — controls read as icons/labels
+     and only show a subtle highlight on hover (or when active). */
+  border: none;
+  background: transparent;
   color: var(--text-primary);
   white-space: nowrap;
   flex-shrink: 0;
@@ -1544,7 +1546,7 @@ watch(translationArtifactActivePage, async () => {
   background:
     linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%) calc(100% - 17px) 50% / 5px 5px no-repeat,
     linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%) calc(100% - 12px) 50% / 5px 5px no-repeat,
-    rgba(255, 255, 255, 0.035);
+    transparent;
   color: var(--text-primary);
   cursor: pointer;
   outline: none;
@@ -1558,8 +1560,7 @@ watch(translationArtifactActivePage, async () => {
 .toolbar-select:hover,
 .toolbar-btn:hover,
 .pdf-toolbar-controls button:hover {
-  border-color: rgba(125, 174, 255, 0.28);
-  background-color: rgba(255, 255, 255, 0.06);
+  background-color: rgba(255, 255, 255, 0.08);
 }
 
 .toolbar-select:focus-visible,
@@ -1576,7 +1577,7 @@ watch(translationArtifactActivePage, async () => {
   background:
     linear-gradient(45deg, transparent 50%, var(--text-primary) 50%) calc(100% - 17px) 50% / 5px 5px no-repeat,
     linear-gradient(135deg, var(--text-primary) 50%, transparent 50%) calc(100% - 12px) 50% / 5px 5px no-repeat,
-    rgba(255, 255, 255, 0.06);
+    rgba(255, 255, 255, 0.08);
 }
 
 .toolbar-btn {
@@ -1604,19 +1605,16 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .toolbar-btn.translate-action.running {
-  border-color: rgba(106, 169, 255, 0.34);
-  background: rgba(106, 169, 255, 0.11);
+  background: rgba(106, 169, 255, 0.14);
 }
 
 .toolbar-btn.stop-action {
   color: #ffb3b3;
-  border-color: rgba(198, 73, 73, 0.22);
-  background: rgba(198, 73, 73, 0.08);
+  background: rgba(198, 73, 73, 0.12);
 }
 
 .toolbar-btn.stop-action:hover {
-  border-color: rgba(255, 130, 130, 0.38);
-  background: rgba(198, 73, 73, 0.14);
+  background: rgba(198, 73, 73, 0.2);
 }
 
 .toolbar-icon {
@@ -1636,8 +1634,7 @@ watch(translationArtifactActivePage, async () => {
 
 .toolbar-btn.split-toggle.active {
   color: var(--text-primary);
-  border-color: rgba(106, 169, 255, 0.34);
-  background: rgba(106, 169, 255, 0.12);
+  background: rgba(106, 169, 255, 0.16);
 }
 
 .toolbar-action-label {
