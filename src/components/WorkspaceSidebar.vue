@@ -832,6 +832,28 @@ function triggerDeleteRoot(root, event = null) {
   padding-right: 4px;
 }
 
+/* Slim, transparent scrollbar (hover-revealed). No scrollbar-width here — that
+   would make WebKit ignore these ::-webkit-scrollbar rules. */
+.tree-area::-webkit-scrollbar {
+  width: 8px;
+}
+
+.tree-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tree-area::-webkit-scrollbar-thumb {
+  border: 2.5px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  background-clip: padding-box;
+}
+
+.tree-area:hover::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.22);
+  background-clip: padding-box;
+}
+
 .folder-group + .folder-group {
   margin-top: 18px;
 }
