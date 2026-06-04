@@ -3898,7 +3898,6 @@ onMounted(() => {
       :drop-target-root-id="workspaceDropTargetRootId"
       @update:filter="filter = $event"
       @select-doc="selectDoc"
-      @set-locale="locale = $event"
       @add-folder="chooseWorkspace"
       @rescan="rescanWorkspace"
       @reindex-doc="reindexSelectedDocument"
@@ -4181,6 +4180,15 @@ onMounted(() => {
             <button
               type="button"
               class="settings-nav-item"
+              :class="{ active: settingsSection === 'general' }"
+              @click="switchSettingsSection('general')"
+            >
+              <span>{{ ui.generalNav }}</span>
+              <small>{{ ui.generalNavHint }}</small>
+            </button>
+            <button
+              type="button"
+              class="settings-nav-item"
               :class="{ active: settingsSection === 'chat' }"
               @click="switchSettingsSection('chat')"
             >
@@ -4197,6 +4205,18 @@ onMounted(() => {
               <small>{{ ui.translationNavHint }}</small>
             </button>
           </nav>
+
+          <div v-if="settingsSection === 'general'" class="settings-panel settings-body">
+            <div class="settings-section-title full">{{ ui.generalNav }}</div>
+            <label class="settings-field full">
+              <span>{{ ui.interfaceLanguage }}</span>
+              <select v-model="locale">
+                <option value="en">{{ ui.languageNameEnglish }}</option>
+                <option value="zh">{{ ui.languageNameChinese }}</option>
+              </select>
+            </label>
+            <div class="settings-note full">{{ ui.interfaceLanguageHint }}</div>
+          </div>
 
           <div v-if="settingsSection === 'chat'" class="settings-panel provider-settings-panel">
             <aside class="provider-list">
@@ -4392,7 +4412,7 @@ onMounted(() => {
             </section>
           </div>
 
-          <div v-else class="settings-panel settings-body">
+          <div v-if="settingsSection === 'translation'" class="settings-panel settings-body">
             <div class="settings-section-title full">{{ ui.translationProviderSection }}</div>
             <label class="settings-field full">
               <span>{{ ui.translationProviderMode }}</span>

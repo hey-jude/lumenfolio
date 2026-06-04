@@ -53,7 +53,6 @@ const props = defineProps({
 const emit = defineEmits([
   'update:filter',
   'select-doc',
-  'set-locale',
   'add-folder',
   'rescan',
   'reindex-doc',
@@ -360,24 +359,6 @@ function triggerDeleteRoot(root, event = null) {
           <div class="sidebar-title">Lumenfolio</div>
         </div>
       </div>
-      <div class="locale-switch">
-        <button
-          type="button"
-          class="locale-btn"
-          :class="{ active: locale === 'en' }"
-          @click="emit('set-locale', 'en')"
-        >
-          {{ ui.localeEnglish }}
-        </button>
-        <button
-          type="button"
-          class="locale-btn"
-          :class="{ active: locale === 'zh' }"
-          @click="emit('set-locale', 'zh')"
-        >
-          {{ ui.localeChinese }}
-        </button>
-      </div>
     </div>
 
     <label class="search-box">
@@ -463,18 +444,6 @@ function triggerDeleteRoot(root, event = null) {
       </div>
     </div>
 
-    <div v-if="selectedRoot?.recents?.length" class="recent-area">
-      <div class="recent-title">{{ ui.recent }}</div>
-      <button
-        v-for="docId in selectedRoot.recents"
-        :key="docId"
-        class="recent-row"
-        @click="emit('select-doc', docId)"
-      >
-        {{ allDocs.find((doc) => doc.id === docId)?.shortTitle }}
-      </button>
-    </div>
-
     <div v-if="scanError" class="scan-error">{{ scanError }}</div>
 
     <div class="sidebar-footer">
@@ -534,13 +503,15 @@ function triggerDeleteRoot(root, event = null) {
 
 .sidebar-window-bar {
   position: relative;
-  min-height: 56px;
+  /* Just enough to clear the macOS traffic lights (≈y20–34); was 56+14≈70px,
+     which left a large empty gap above the brand. */
+  min-height: 40px;
   width: 100%;
   flex-shrink: 0;
   display: flex;
   align-items: flex-start;
   justify-content: flex-end;
-  padding-top: 14px;
+  padding-top: 0;
 }
 
 .sidebar.collapsed .sidebar-window-bar {
@@ -761,8 +732,7 @@ function triggerDeleteRoot(root, event = null) {
   flex: 1;
 }
 
-.brand-block,
-.locale-switch {
+.brand-block {
   position: relative;
   z-index: 1;
 }
@@ -831,31 +801,6 @@ function triggerDeleteRoot(root, event = null) {
   opacity: 0;
 }
 
-.locale-switch {
-  display: inline-flex;
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  flex-shrink: 0;
-}
-
-.locale-btn {
-  min-width: 44px;
-  min-height: 28px;
-  border-radius: 999px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.locale-btn.active {
-  background: rgba(255, 255, 255, 0.09);
-  color: var(--text-primary);
-}
 
 .search-box {
   display: flex;
@@ -878,10 +823,6 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 .search-icon,
-.recent-title {
-  color: var(--text-secondary);
-}
-
 .tree-area {
   flex: 1;
   min-width: 0;
@@ -891,14 +832,35 @@ function triggerDeleteRoot(root, event = null) {
   padding-right: 4px;
 }
 
+/* Slim, transparent scrollbar (hover-revealed). No scrollbar-width here — that
+   would make WebKit ignore these ::-webkit-scrollbar rules. A narrow lane with a
+   thumb that fills it is used instead of the border/background-clip trick, which
+   renders inconsistently on ::-webkit-scrollbar-thumb. */
+.tree-area::-webkit-scrollbar {
+  width: 6px;
+}
+
+.tree-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.tree-area::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background-color: transparent;
+}
+
+.tree-area:hover::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
 .folder-group + .folder-group {
-  margin-top: 18px;
+  margin-top: 0px;
 }
 
 .folder-group {
   position: relative;
   border-radius: 14px;
-  padding: 6px 4px 4px;
+  padding: 0px 4px 0px;
   margin-top: -6px;
   transition: background 140ms ease, box-shadow 140ms ease;
 }
@@ -912,14 +874,6 @@ function triggerDeleteRoot(root, event = null) {
 
 .folder-group.drop-target .folder-title {
   color: var(--text-primary);
-}
-
-.recent-title {
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin-bottom: 8px;
 }
 
 .workspace-title-row {
@@ -1013,7 +967,6 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 .doc-row,
-.recent-row,
 .footer-btn {
   width: 100%;
   background: transparent;
@@ -1122,11 +1075,6 @@ function triggerDeleteRoot(root, event = null) {
   transition: width 180ms ease;
 }
 
-.recent-area {
-  border-top: 1px solid var(--line-soft);
-  padding-top: 12px;
-}
-
 .empty-tree,
 .scan-error {
   border: 1px solid var(--line-soft);
@@ -1141,16 +1089,6 @@ function triggerDeleteRoot(root, event = null) {
   color: #ffb3b3;
   border-color: rgba(198, 73, 73, 0.28);
   background: rgba(198, 73, 73, 0.1);
-}
-
-.recent-row {
-  padding: 8px 0;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.recent-row:hover {
-  color: var(--text-primary);
 }
 
 .sidebar-footer {

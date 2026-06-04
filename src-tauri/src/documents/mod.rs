@@ -186,7 +186,17 @@ pub(crate) fn persist_workspace_scan(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, unixepoch(), unixepoch(),
                      unixepoch())
              ON CONFLICT(id) DO UPDATE SET
-               workspace_root_id = excluded.workspace_root_id,
+               -- Nested workspace folders share files (e.g. ~/Documents contains
+               -- ~/Documents/.../test_pdf). The MORE SPECIFIC (deeper) folder
+               -- owns the file: only reassign to the scanning root when its path
+               -- is deeper (longer) than the doc's current root, so a shallower
+               -- folder added later can't steal docs from a deeper one.
+               workspace_root_id = CASE
+                 WHEN length(COALESCE((SELECT path FROM workspace_roots WHERE id = documents.workspace_root_id), ''))
+                      < length(COALESCE((SELECT path FROM workspace_roots WHERE id = excluded.workspace_root_id), ''))
+                   THEN excluded.workspace_root_id
+                 ELSE documents.workspace_root_id
+               END,
                path = excluded.path,
                title = excluded.title,
                short_title = excluded.short_title,
@@ -398,7 +408,17 @@ pub(crate) fn additive_upsert_documents(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, unixepoch(), unixepoch(),
                      unixepoch())
              ON CONFLICT(id) DO UPDATE SET
-               workspace_root_id = excluded.workspace_root_id,
+               -- Nested workspace folders share files (e.g. ~/Documents contains
+               -- ~/Documents/.../test_pdf). The MORE SPECIFIC (deeper) folder
+               -- owns the file: only reassign to the scanning root when its path
+               -- is deeper (longer) than the doc's current root, so a shallower
+               -- folder added later can't steal docs from a deeper one.
+               workspace_root_id = CASE
+                 WHEN length(COALESCE((SELECT path FROM workspace_roots WHERE id = documents.workspace_root_id), ''))
+                      < length(COALESCE((SELECT path FROM workspace_roots WHERE id = excluded.workspace_root_id), ''))
+                   THEN excluded.workspace_root_id
+                 ELSE documents.workspace_root_id
+               END,
                path = excluded.path,
                title = excluded.title,
                short_title = excluded.short_title,

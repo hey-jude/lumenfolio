@@ -1011,7 +1011,7 @@ fn load_last_workspace(
         .map_err(|_| "SQLite lock was poisoned".to_string())?;
 
     let mut stmt = conn
-        .prepare("SELECT id, path FROM workspace_roots ORDER BY last_opened_at DESC")
+        .prepare("SELECT id, path FROM workspace_roots ORDER BY created_at ASC, rowid ASC")
         .map_err(|err| format!("Failed to load workspaces: {err}"))?;
     let roots = stmt
         .query_map([], |row| {

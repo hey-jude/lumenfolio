@@ -221,7 +221,16 @@ const canOpenTranslationView = computed(() => {
   return translation.status === 'canceled' && Boolean(translation.monoPdfPath || translation.dualPdfPath)
 })
 const canOperateTranslation = computed(() => props.document.chatReady && (isLocalPdf.value || (props.document.pages?.length || 0) > 0))
-const showTranslationAction = computed(() => props.document.translation.status !== 'succeeded')
+// Contextual tooltip for the single translate/view toggle (the ◧ button):
+// before translating it reads "Translate"; once translated it toggles
+// Original/Dual; while running it shows the status.
+const translationToggleLabel = computed(() => {
+  if (props.document.translation.status === 'succeeded') {
+    return props.viewMode === 'dual' ? props.ui.original : props.ui.dual
+  }
+  if (canCancelTranslation.value) return translationStatusLabel.value
+  return translationActionLabel.value
+})
 const showIndexStatus = computed(() => props.document.indexStatus && props.document.indexStatus !== 'indexed')
 const isLocalPdf = computed(() => props.document.source === 'local')
 const pageTranslationStatus = computed(() => props.pageTranslation?.status || props.document.translation.status || 'idle')
@@ -361,23 +370,6 @@ const translationArtifactLabel = computed(() => {
   }
   return translation.phase || pageTranslationStatus.value
 })
-const translationHeaderSummary = computed(() => {
-  const translation = props.document.translation || {}
-  if (translationArtifactPath.value && !['pending', 'queued', 'running', 'partial'].includes(translation.status)) {
-    return translationArtifactLabel.value
-  }
-  if (translationArtifactIsPartial.value) {
-    return `${translationArtifactLabel.value} · ${translationPhaseLabel.value}`
-  }
-  if (['pending', 'queued', 'running', 'partial'].includes(translation.status)) {
-    return `${translationPhaseLabel.value} · ${documentProgressSummary.value}`
-  }
-  if (translation.status === 'failed') return props.ui.statusFailed
-  return translationArtifactPath.value ? translationArtifactLabel.value : pageTranslationStatus.value
-})
-const showTranslationHeaderProgress = computed(() => (
-  ['pending', 'queued', 'running', 'partial'].includes(props.document.translation.status)
-))
 const translationArtifactDocument = computed(() => ({
   ...props.document,
   id: translationArtifactDocumentId.value,
@@ -400,12 +392,6 @@ const paneScrollLinkLabel = computed(() => {
     return props.locale === 'zh' ? '解除双栏滚动锁定' : 'Unlock pane scrolling'
   }
   return props.locale === 'zh' ? '锁定双栏滚动' : 'Lock pane scrolling'
-})
-const paneScrollStatusLabel = computed(() => {
-  if (!canLinkPaneScroll.value) return ''
-  return paneScrollLinked.value
-    ? (props.locale === 'zh' ? '滚动已锁定' : 'scroll locked')
-    : (props.locale === 'zh' ? '滚动未锁定' : 'scroll unlocked')
 })
 const hasLoadedTranslationPages = computed(() => (
   translatedPageList.value.some((page) => isTranslationPageLoaded(page.translation))
@@ -498,10 +484,6 @@ const activePageData = computed(() => (
 function localizedLabel(value) {
   if (!value || typeof value !== 'object') return value
   return value[props.locale] || value.en || Object.values(value)[0]
-}
-
-function languageCode(value) {
-  return String(value || '').toUpperCase()
 }
 
 function updatePdfViewerState(state, source = 'source') {
@@ -857,9 +839,14 @@ function zoomPdf(delta) {
   }
 }
 
-function toggleDualView() {
-  if (!canOpenTranslationView.value || !canOperateTranslation.value) return
-  emit('set-view-mode', props.viewMode === 'dual' ? 'original' : 'dual')
+// Let a plain mouse wheel scroll the horizontal document-tab strip (it only
+// scrolls horizontally, which vertical wheels otherwise ignore).
+function onReaderTabsWheel(event) {
+  const el = event.currentTarget
+  if (!el || el.scrollWidth <= el.clientWidth) return
+  if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+  el.scrollLeft += event.deltaY
+  event.preventDefault()
 }
 
 function translationPagePlaceholderLabel(translation) {
@@ -985,9 +972,22 @@ watch(translationArtifactActivePage, async () => {
 
 <template>
   <section class="reader-pane">
-    <div class="reader-chrome" data-tauri-drag-region @mousedown="startWindowDrag">
-      <div class="reader-chrome-primary">
-        <div v-if="tabs.length > 1" class="reader-tab-bar" v-bind="testAttrs('reader-tab-bar')">
+    <div class="reader-chrome">
+      <!-- Row 1: thin title bar = window drag region + the active document name. -->
+      <div class="reader-titlebar" data-tauri-drag-region @mousedown="startWindowDrag">
+        <span class="reader-titlebar-name" :title="document.title || document.shortTitle">
+          {{ document.shortTitle || document.title || 'PDF' }}
+        </span>
+      </div>
+
+      <!-- Row 2: document tabs (left) + translation/page/zoom controls (right). -->
+      <div class="reader-tabrow">
+        <div
+          v-if="tabs.length > 1"
+          class="reader-tab-bar"
+          @wheel="onReaderTabsWheel"
+          v-bind="testAttrs('reader-tab-bar')"
+        >
           <div
             v-for="tab in tabs"
             :key="tab.id"
@@ -1009,14 +1009,9 @@ watch(translationArtifactActivePage, async () => {
             >×</button>
           </div>
         </div>
-        <div v-else class="reader-current-doc" :title="document.title || document.shortTitle">
-          <span class="reader-tab-dot" :class="document.indexStatus"></span>
-          <span class="reader-current-name">{{ document.shortTitle || document.title || 'PDF' }}</span>
-        </div>
-      </div>
+        <div v-else class="reader-tab-spacer"></div>
 
-      <div class="reader-chrome-secondary">
-        <div class="toolbar-left">
+        <div class="reader-tab-controls">
           <select
             class="toolbar-select"
             :value="translationLang"
@@ -1024,23 +1019,9 @@ watch(translationArtifactActivePage, async () => {
             @change="emit('update:translationLang', $event.target.value)"
           >
             <option v-for="item in translationLanguages" :key="item.value" :value="item.value">
-              {{ languageCode(item.value) }}
+              {{ localizedLabel(item.label) }}
             </option>
           </select>
-
-          <button
-            v-if="showTranslationAction"
-            class="toolbar-btn translate-action"
-            :class="{ running: canCancelTranslation }"
-            :disabled="!canOperateTranslation"
-            :title="translationActionLabel"
-            :aria-label="translationActionLabel"
-            v-bind="testAttrs('translation-action')"
-            @click="emit('translation-action', translationViewportContext())"
-          >
-            <span class="toolbar-action-label">{{ canCancelTranslation ? translationStatusLabel : translationActionLabel }}</span>
-            <span v-if="canCancelTranslation" class="compact-progress">{{ translationProgressPercent }}%</span>
-          </button>
 
           <button
             v-if="canCancelTranslation"
@@ -1055,19 +1036,17 @@ watch(translationArtifactActivePage, async () => {
 
           <button
             class="toolbar-btn split-toggle"
-            :class="{ active: viewMode === 'dual' }"
-            :disabled="!canOpenTranslationView || !canOperateTranslation"
-            :title="viewMode === 'dual' ? ui.original : ui.dual"
-            :aria-label="viewMode === 'dual' ? ui.original : ui.dual"
+            :class="{ active: viewMode === 'dual', running: canCancelTranslation }"
+            :disabled="!canOperateTranslation"
+            :title="translationToggleLabel"
+            :aria-label="translationToggleLabel"
             v-bind="testAttrs('view-mode-dual')"
-            @click="toggleDualView"
+            @click="emit('translation-action', translationViewportContext())"
           >
             <span class="toolbar-icon">◧</span>
-            <span class="toolbar-action-label">{{ viewMode === 'dual' ? ui.original : ui.dual }}</span>
+            <span v-if="canCancelTranslation" class="compact-progress">{{ translationProgressPercent }}%</span>
           </button>
-        </div>
 
-        <div class="toolbar-right">
           <template v-if="isLocalPdf">
             <span v-if="showIndexStatus" class="status-chip" :class="document.indexStatus">
               {{ indexStatusLabel }}
@@ -1146,10 +1125,6 @@ watch(translationArtifactActivePage, async () => {
             v-show="!(viewMode === 'translated' && canOpenTranslationView)"
             class="viewer-card pdf-compare-pane local-pdf-source"
           >
-            <div v-if="viewMode === 'dual' && canOpenTranslationView" class="viewer-card-header">
-              <span>{{ ui.originalPdf }}</span>
-              <span>{{ paneScrollStatusLabel }}</span>
-            </div>
             <PdfViewer
               ref="pdfViewerRef"
               :key="`source-pdf:${document.id}`"
@@ -1198,39 +1173,18 @@ watch(translationArtifactActivePage, async () => {
               v-bind="testAttrs('pane-scroll-link-toggle', { linked: paneScrollLinked ? 'true' : 'false' })"
               @click="togglePaneScrollLink"
             >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path
-                  class="chain-left"
-                  d="M9.5 7.5H7.8a4.2 4.2 0 0 0 0 8.4h2.1"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                />
-                <path
-                  class="chain-right"
-                  d="M14.5 15.9h1.7a4.2 4.2 0 0 0 0-8.4h-2.1"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                />
-                <path
-                  class="chain-join"
-                  d="M9.2 12h5.6"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                  stroke-linecap="round"
-                />
-                <path
-                  class="chain-break"
-                  d="M6.8 5.2 5.7 3.4M17.2 18.8l1.1 1.8M12 4.2V2.4M12 21.6v-1.8"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.8"
-                  stroke-linecap="round"
-                />
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M9 17H7A5 5 0 0 1 7 7h2" />
+                <path d="M15 7h2a5 5 0 0 1 0 10h-2" />
+                <line v-if="paneScrollLinked" x1="8" y1="12" x2="16" y2="12" />
               </svg>
             </button>
           </div>
@@ -1240,21 +1194,6 @@ watch(translationArtifactActivePage, async () => {
             class="viewer-card translated-reader"
             :class="{ 'translation-wide-pane': viewMode === 'translated' }"
           >
-            <div class="viewer-card-header">
-              <span>{{ ui.translatedPdf }}</span>
-              <span class="translation-header-actions">
-                <span v-bind="testAttrs('translation-artifact-label')">
-                  {{ translationHeaderSummary }}
-                </span>
-              </span>
-              <span
-                v-if="showTranslationHeaderProgress"
-                class="translation-header-progress"
-                aria-hidden="true"
-              >
-                <span :style="{ width: `${translationProgressPercent}%` }"></span>
-              </span>
-            </div>
             <PdfViewer
               v-if="translationArtifactPath"
               ref="translationPdfViewerRef"
@@ -1485,45 +1424,53 @@ watch(translationArtifactActivePage, async () => {
 
 .reader-chrome {
   display: grid;
-  grid-template-rows: 38px 42px;
+  grid-template-rows: 30px 42px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.075);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.012)),
     var(--bg-app);
 }
 
-.reader-chrome-primary,
-.reader-chrome-secondary {
-  min-width: 0;
-  display: grid;
+/* Row 1: thin centered title bar (window drag handle + active doc name). */
+.reader-titlebar {
+  display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 14px 0 12px;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
 }
 
-.reader-chrome-primary {
-  grid-template-columns: minmax(0, 1fr);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+.reader-titlebar-name {
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.reader-chrome-secondary {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.toolbar-left,
-.toolbar-right {
+/* Row 2: tabs (left, flex) + controls (right). Not a drag region, so tabs
+   scroll and controls stay clickable. */
+.reader-tabrow {
   min-width: 0;
   display: flex;
   align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+}
+
+.reader-tab-spacer {
+  flex: 1;
+}
+
+.reader-tab-controls {
+  display: flex;
+  align-items: center;
   gap: 8px;
-}
-
-.toolbar-left {
-  overflow: hidden;
-}
-
-.toolbar-right {
-  justify-content: flex-end;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .toolbar-select,
@@ -1531,52 +1478,57 @@ watch(translationArtifactActivePage, async () => {
 .toolbar-control-group {
   height: 32px;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.085);
-  background: rgba(255, 255, 255, 0.035);
+  /* Ghost toolbar: no borders/boxes by default — controls read as icons/labels
+     and only show a subtle highlight on hover (or when active). */
+  border: none;
+  background: transparent;
   color: var(--text-primary);
   white-space: nowrap;
   flex-shrink: 0;
 }
 
 .toolbar-select {
-  width: 72px;
+  /* Text-only, no dropdown caret; width hugs the selected language name. */
+  width: auto;
+  max-width: 150px;
   appearance: none;
-  background:
-    linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%) calc(100% - 17px) 50% / 5px 5px no-repeat,
-    linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%) calc(100% - 12px) 50% / 5px 5px no-repeat,
-    rgba(255, 255, 255, 0.035);
+  background: transparent;
   color: var(--text-primary);
   cursor: pointer;
   outline: none;
-  padding: 0 28px 0 13px;
+  padding: 0 10px;
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 600;
   letter-spacing: 0;
-  text-align: center;
+  text-align: left;
+  text-overflow: ellipsis;
 }
 
 .toolbar-select:hover,
 .toolbar-btn:hover,
 .pdf-toolbar-controls button:hover {
-  border-color: rgba(125, 174, 255, 0.28);
-  background-color: rgba(255, 255, 255, 0.06);
+  background-color: rgba(255, 255, 255, 0.08);
 }
 
-.toolbar-select:focus-visible,
-.toolbar-btn:focus-visible,
-.pdf-toolbar-controls button:focus-visible,
+/* Keyboard focus ring for the tabs only. The ghost toolbar controls use a calm
+   background highlight instead — a native <select> keeps focus after a click, so
+   a hard blue ring would linger and look harsh. */
 .reader-tab:focus-visible,
 .reader-tab-close:focus-visible {
   outline: 2px solid rgba(106, 169, 255, 0.62);
   outline-offset: 2px;
 }
 
+.toolbar-select:focus-visible,
+.toolbar-btn:focus-visible,
+.pdf-toolbar-controls button:focus-visible {
+  outline: none;
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
 .toolbar-select:hover,
 .toolbar-select:focus-visible {
-  background:
-    linear-gradient(45deg, transparent 50%, var(--text-primary) 50%) calc(100% - 17px) 50% / 5px 5px no-repeat,
-    linear-gradient(135deg, var(--text-primary) 50%, transparent 50%) calc(100% - 12px) 50% / 5px 5px no-repeat,
-    rgba(255, 255, 255, 0.06);
+  background-color: rgba(255, 255, 255, 0.08);
 }
 
 .toolbar-btn {
@@ -1599,24 +1551,17 @@ watch(translationArtifactActivePage, async () => {
   filter: saturate(0.6);
 }
 
-.toolbar-btn.translate-action {
-  min-width: 92px;
-}
-
-.toolbar-btn.translate-action.running {
-  border-color: rgba(106, 169, 255, 0.34);
-  background: rgba(106, 169, 255, 0.11);
+.toolbar-btn.split-toggle.running {
+  background: rgba(106, 169, 255, 0.14);
 }
 
 .toolbar-btn.stop-action {
   color: #ffb3b3;
-  border-color: rgba(198, 73, 73, 0.22);
-  background: rgba(198, 73, 73, 0.08);
+  background: rgba(198, 73, 73, 0.12);
 }
 
 .toolbar-btn.stop-action:hover {
-  border-color: rgba(255, 130, 130, 0.38);
-  background: rgba(198, 73, 73, 0.14);
+  background: rgba(198, 73, 73, 0.2);
 }
 
 .toolbar-icon {
@@ -1636,13 +1581,7 @@ watch(translationArtifactActivePage, async () => {
 
 .toolbar-btn.split-toggle.active {
   color: var(--text-primary);
-  border-color: rgba(106, 169, 255, 0.34);
-  background: rgba(106, 169, 255, 0.12);
-}
-
-.toolbar-action-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  background: rgba(106, 169, 255, 0.16);
 }
 
 .status-chip {
@@ -1731,7 +1670,8 @@ watch(translationArtifactActivePage, async () => {
 .reader-tab-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 0;
+  flex: 1;
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
@@ -1745,16 +1685,28 @@ watch(translationArtifactActivePage, async () => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
-  max-width: 210px;
-  padding: 0 7px 0 10px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.025);
-  color: var(--text-secondary);
+  height: 30px;
+  max-width: 200px;
+  padding: 0 8px 0 12px;
+  /* Cursor-style: flat tabs packed tight, separated by a very light divider. */
+  border: none;
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.reader-tab:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+}
+
+.reader-tab:last-child {
+  border-right: none;
 }
 
 .reader-tab:hover {
@@ -1764,26 +1716,11 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .reader-tab.active {
-  background: rgba(120, 170, 255, 0.115);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text-primary);
-  border-color: rgba(120, 170, 255, 0.24);
+  box-shadow: inset 0 -2px 0 rgba(120, 170, 255, 0.75);
 }
 
-.reader-current-doc {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.reader-current-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 .reader-tab-dot {
   width: 7px;
@@ -1940,37 +1877,6 @@ watch(translationArtifactActivePage, async () => {
   font-size: 12px;
 }
 
-.translation-header-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  max-width: 60%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.translation-header-progress {
-  position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: -1px;
-  height: 2px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.translation-header-progress span {
-  display: block;
-  height: 100%;
-  min-width: 3%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #63e6be, #6aa9ff);
-  transition: width 180ms ease;
-}
-
 .real-pdf-viewer {
   min-width: 0;
 }
@@ -2059,14 +1965,6 @@ watch(translationArtifactActivePage, async () => {
   cursor: not-allowed;
 }
 
-.pane-link-button.linked .chain-break {
-  opacity: 0;
-}
-
-.pane-link-button:not(.linked) .chain-join {
-  opacity: 0;
-}
-
 .pdf-compare-pane,
 .translated-reader {
   min-height: 0;
@@ -2090,8 +1988,8 @@ watch(translationArtifactActivePage, async () => {
   margin: 6px 8px 8px;
   padding: 0;
   overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
+  /* No scrollbar-width/scrollbar-color: those make WebKit ignore the
+     ::-webkit-scrollbar rules below and use a native scrollbar instead. */
   border-radius: 6px;
   background: #f4f1e8;
   color: #1d2126;
@@ -2099,8 +1997,8 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .translation-page::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 .translation-page::-webkit-scrollbar-track {
@@ -2108,20 +2006,13 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .translation-page::-webkit-scrollbar-thumb {
-  border: 2px solid transparent;
   border-radius: 999px;
-  background: transparent;
-  background-clip: padding-box;
+  background-color: transparent;
 }
 
 .translation-page:hover::-webkit-scrollbar-thumb,
 .translation-page.is-scrolling::-webkit-scrollbar-thumb {
-  background: rgba(29, 33, 38, 0.24);
-}
-
-.translation-page:hover,
-.translation-page.is-scrolling {
-  scrollbar-color: rgba(29, 33, 38, 0.24) transparent;
+  background-color: rgba(29, 33, 38, 0.24);
 }
 
 .translation-page.wide {
