@@ -2471,6 +2471,30 @@ defineExpose({
   white-space: pre-wrap;
 }
 
+/* Slim, transparent, hover-revealed scrollbar — consistent with the rest of the
+   app. No scrollbar-width (it makes WebKit ignore these ::-webkit-scrollbar
+   rules and fall back to the native wide bar). */
+.translation-popover-body::-webkit-scrollbar,
+.translation-popover-error::-webkit-scrollbar {
+  width: 6px;
+}
+
+.translation-popover-body::-webkit-scrollbar-track,
+.translation-popover-error::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.translation-popover-body::-webkit-scrollbar-thumb,
+.translation-popover-error::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background-color: transparent;
+}
+
+.translation-popover-body:hover::-webkit-scrollbar-thumb,
+.translation-popover-error:hover::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.22);
+}
+
 .translation-source {
   flex: 0 0 auto;
   border-top: 1px solid rgba(255, 255, 255, 0.07);
