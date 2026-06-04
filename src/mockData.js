@@ -282,9 +282,21 @@ export const mockWorkspace = {
 
 export const translationLanguages = [
   { value: 'zh', label: { en: 'Chinese', zh: '中文' } },
-  { value: 'en', label: { en: 'English', zh: '英文' } },
-  { value: 'ja', label: { en: 'Japanese', zh: '日文' } },
-  { value: 'ko', label: { en: 'Korean', zh: '韩文' } },
+  { value: 'zh-TW', label: { en: 'Chinese (Trad.)', zh: '繁体中文' } },
+  { value: 'en', label: { en: 'English', zh: '英语' } },
+  { value: 'ja', label: { en: 'Japanese', zh: '日语' } },
+  { value: 'ko', label: { en: 'Korean', zh: '韩语' } },
+  { value: 'fr', label: { en: 'French', zh: '法语' } },
+  { value: 'de', label: { en: 'German', zh: '德语' } },
+  { value: 'es', label: { en: 'Spanish', zh: '西班牙语' } },
+  { value: 'pt', label: { en: 'Portuguese', zh: '葡萄牙语' } },
+  { value: 'it', label: { en: 'Italian', zh: '意大利语' } },
+  { value: 'ru', label: { en: 'Russian', zh: '俄语' } },
+  { value: 'ar', label: { en: 'Arabic', zh: '阿拉伯语' } },
+  { value: 'hi', label: { en: 'Hindi', zh: '印地语' } },
+  { value: 'th', label: { en: 'Thai', zh: '泰语' } },
+  { value: 'vi', label: { en: 'Vietnamese', zh: '越南语' } },
+  { value: 'id', label: { en: 'Indonesian', zh: '印尼语' } },
 ]
 
 export const chatModels = [

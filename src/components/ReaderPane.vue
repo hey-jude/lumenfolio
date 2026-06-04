@@ -509,10 +509,6 @@ function localizedLabel(value) {
   return value[props.locale] || value.en || Object.values(value)[0]
 }
 
-function languageCode(value) {
-  return String(value || '').toUpperCase()
-}
-
 function updatePdfViewerState(state, source = 'source') {
   if (source !== 'source') {
     translationPdfViewerState.value = {
@@ -1046,7 +1042,7 @@ watch(translationArtifactActivePage, async () => {
             @change="emit('update:translationLang', $event.target.value)"
           >
             <option v-for="item in translationLanguages" :key="item.value" :value="item.value">
-              {{ languageCode(item.value) }}
+              {{ localizedLabel(item.label) }}
             </option>
           </select>
 
@@ -1555,7 +1551,7 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .toolbar-select {
-  width: 72px;
+  width: 150px;
   appearance: none;
   background:
     linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%) calc(100% - 17px) 50% / 5px 5px no-repeat,
@@ -1564,11 +1560,12 @@ watch(translationArtifactActivePage, async () => {
   color: var(--text-primary);
   cursor: pointer;
   outline: none;
-  padding: 0 28px 0 13px;
+  padding: 0 24px 0 12px;
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 600;
   letter-spacing: 0;
-  text-align: center;
+  text-align: left;
+  text-overflow: ellipsis;
 }
 
 .toolbar-select:hover,
