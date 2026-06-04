@@ -6,6 +6,80 @@ use crate::{
     ReasoningDeltaEventOutput, StreamedChatText,
 };
 
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+/// Splits inline `<think>…</think>` reasoning out of the assistant `content`
+/// stream, for providers (Qwen, GLM, many OpenAI-compatible endpoints) that
+/// embed reasoning in the content instead of a separate `reasoning_content`
+/// field. Stateful across deltas: a tag can be split across chunk boundaries, so
+/// a partial tag prefix is held back until it completes.
+#[derive(Default)]
+struct ThinkSplitter {
+    inside_think: bool,
+    pending: String,
+}
+
+impl ThinkSplitter {
+    /// Route one content delta into (answer_text, reasoning_text).
+    fn feed(&mut self, delta: &str) -> (String, String) {
+        let mut buf = std::mem::take(&mut self.pending);
+        buf.push_str(delta);
+        let mut answer = String::new();
+        let mut reasoning = String::new();
+        loop {
+            let needle = if self.inside_think { THINK_CLOSE } else { THINK_OPEN };
+            if let Some(pos) = buf.find(needle) {
+                let before = &buf[..pos];
+                if self.inside_think {
+                    reasoning.push_str(before);
+                } else {
+                    answer.push_str(before);
+                }
+                buf.drain(..pos + needle.len());
+                self.inside_think = !self.inside_think;
+            } else {
+                // No complete tag; hold back any trailing partial-tag prefix.
+                let hold = partial_tag_suffix_len(&buf, needle);
+                let split_at = buf.len() - hold;
+                let emit = &buf[..split_at];
+                if self.inside_think {
+                    reasoning.push_str(emit);
+                } else {
+                    answer.push_str(emit);
+                }
+                self.pending = buf[split_at..].to_string();
+                break;
+            }
+        }
+        (answer, reasoning)
+    }
+
+    /// Emit any held-back text at end of stream as literal content.
+    fn flush(&mut self) -> (String, String) {
+        let pending = std::mem::take(&mut self.pending);
+        if pending.is_empty() {
+            (String::new(), String::new())
+        } else if self.inside_think {
+            (String::new(), pending)
+        } else {
+            (pending, String::new())
+        }
+    }
+}
+
+/// Byte length of the longest suffix of `buf` that is a proper prefix of
+/// `needle` — text held back in case the next delta completes the tag.
+fn partial_tag_suffix_len(buf: &str, needle: &str) -> usize {
+    let max = buf.len().min(needle.len().saturating_sub(1));
+    for k in (1..=max).rev() {
+        if buf.ends_with(&needle[..k]) {
+            return k;
+        }
+    }
+    0
+}
+
 pub(crate) async fn read_openai_answer_stream(
     mut response: reqwest::Response,
     app: &tauri::AppHandle,
@@ -14,6 +88,7 @@ pub(crate) async fn read_openai_answer_stream(
     let mut buffer = Vec::new();
     let mut answer = String::new();
     let mut reasoning_content = String::new();
+    let mut splitter = ThinkSplitter::default();
     let mut chunk_count = 0usize;
     let mut total_bytes = 0usize;
     while let Some(chunk) = response
@@ -37,6 +112,7 @@ pub(crate) async fn read_openai_answer_stream(
             &mut buffer,
             &mut answer,
             &mut reasoning_content,
+            &mut splitter,
             app,
             answer_event_id,
         )?;
@@ -55,6 +131,7 @@ pub(crate) async fn read_openai_answer_stream(
         &mut buffer,
         &mut answer,
         &mut reasoning_content,
+        &mut splitter,
         app,
         answer_event_id,
     )?;
@@ -62,9 +139,20 @@ pub(crate) async fn read_openai_answer_stream(
         &mut buffer,
         &mut answer,
         &mut reasoning_content,
+        &mut splitter,
         app,
         answer_event_id,
     )?;
+    // Emit any text held back as a possible (but never-completed) partial tag.
+    let (answer_tail, reasoning_tail) = splitter.flush();
+    if !answer_tail.is_empty() {
+        answer.push_str(&answer_tail);
+        emit_answer_delta(app, answer_event_id, answer_tail);
+    }
+    if !reasoning_tail.is_empty() {
+        reasoning_content.push_str(&reasoning_tail);
+        emit_reasoning_delta(app, answer_event_id, reasoning_tail);
+    }
     log::info!(
         "chat stream read complete event_id={} chunks={} total_bytes={} answer_chars={} reasoning_chars={}",
         answer_event_id.unwrap_or("-"),
@@ -83,6 +171,7 @@ fn drain_openai_sse_buffer(
     buffer: &mut Vec<u8>,
     answer: &mut String,
     reasoning_content: &mut String,
+    splitter: &mut ThinkSplitter,
     app: &tauri::AppHandle,
     answer_event_id: Option<&str>,
 ) -> Result<(), String> {
@@ -97,7 +186,14 @@ fn drain_openai_sse_buffer(
             frame_bytes.len(),
             truncate_for_error(frame, 120)
         );
-        handle_openai_sse_frame(frame, answer, reasoning_content, app, answer_event_id)?;
+        handle_openai_sse_frame(
+            frame,
+            answer,
+            reasoning_content,
+            splitter,
+            app,
+            answer_event_id,
+        )?;
     }
     Ok(())
 }
@@ -126,6 +222,7 @@ fn handle_openai_sse_frame(
     frame: &str,
     answer: &mut String,
     reasoning_content: &mut String,
+    splitter: &mut ThinkSplitter,
     app: &tauri::AppHandle,
     answer_event_id: Option<&str>,
 ) -> Result<(), String> {
@@ -135,6 +232,7 @@ fn handle_openai_sse_frame(
         frame,
         answer,
         reasoning_content,
+        splitter,
         &mut emit_delta,
         &mut emit_reasoning_delta,
     )
@@ -144,6 +242,7 @@ fn handle_openai_sse_frame_with_sink<F, G>(
     frame: &str,
     answer: &mut String,
     reasoning_content: &mut String,
+    splitter: &mut ThinkSplitter,
     on_delta: &mut F,
     on_reasoning_delta: &mut G,
 ) -> Result<(), String>
@@ -172,8 +271,17 @@ where
                     on_reasoning_delta(reasoning_delta);
                 }
                 if let Some(answer_delta) = delta.content.filter(|value| !value.is_empty()) {
-                    answer.push_str(&answer_delta);
-                    on_delta(answer_delta);
+                    // Pull any inline <think>…</think> out into the reasoning sink
+                    // so the tags/reasoning never land in the visible answer.
+                    let (answer_part, reasoning_part) = splitter.feed(&answer_delta);
+                    if !reasoning_part.is_empty() {
+                        reasoning_content.push_str(&reasoning_part);
+                        on_reasoning_delta(reasoning_part);
+                    }
+                    if !answer_part.is_empty() {
+                        answer.push_str(&answer_part);
+                        on_delta(answer_part);
+                    }
                 }
             }
         }
@@ -185,6 +293,7 @@ fn drain_openai_stream_tail(
     buffer: &mut Vec<u8>,
     answer: &mut String,
     reasoning_content: &mut String,
+    splitter: &mut ThinkSplitter,
     app: &tauri::AppHandle,
     answer_event_id: Option<&str>,
 ) -> Result<(), String> {
@@ -198,7 +307,14 @@ fn drain_openai_stream_tail(
     if tail.starts_with("data:") {
         let frame = tail.to_string();
         buffer.clear();
-        return handle_openai_sse_frame(&frame, answer, reasoning_content, app, answer_event_id);
+        return handle_openai_sse_frame(
+            &frame,
+            answer,
+            reasoning_content,
+            splitter,
+            app,
+            answer_event_id,
+        );
     }
     if let Ok(response) = serde_json::from_str::<OpenAiChatResponse>(tail) {
         log::warn!(
@@ -213,8 +329,16 @@ fn drain_openai_stream_tail(
             .map(|choice| extract_chat_response_text(&choice.message.content))
             .unwrap_or_default();
         if !text.is_empty() {
-            answer.push_str(&text);
-            emit_answer_delta(app, answer_event_id, text);
+            // Same inline-<think> split for the non-SSE fallback body.
+            let (answer_part, reasoning_part) = splitter.feed(&text);
+            if !reasoning_part.is_empty() {
+                reasoning_content.push_str(&reasoning_part);
+                emit_reasoning_delta(app, answer_event_id, reasoning_part);
+            }
+            if !answer_part.is_empty() {
+                answer.push_str(&answer_part);
+                emit_answer_delta(app, answer_event_id, answer_part);
+            }
         }
         buffer.clear();
         return Ok(());
@@ -306,6 +430,7 @@ mod tests {
             frame,
             &mut answer,
             &mut reasoning_content,
+            &mut ThinkSplitter::default(),
             &mut |delta| {
                 deltas.push(delta);
             },
@@ -336,6 +461,7 @@ mod tests {
             frame,
             &mut answer,
             &mut reasoning_content,
+            &mut ThinkSplitter::default(),
             &mut |delta| {
                 deltas.push(delta);
             },
@@ -349,5 +475,42 @@ mod tests {
         assert_eq!(reasoning_content, "先分析");
         assert_eq!(deltas, vec!["答案".to_string()]);
         assert_eq!(reasoning_deltas, vec!["先分析".to_string()]);
+    }
+
+    #[test]
+    fn inline_think_block_is_routed_to_reasoning() {
+        let mut splitter = ThinkSplitter::default();
+        let (answer, reasoning) = splitter.feed("<think>let me reason</think>The answer.");
+        assert_eq!(answer, "The answer.");
+        assert_eq!(reasoning, "let me reason");
+        assert!(!splitter.inside_think);
+    }
+
+    #[test]
+    fn inline_think_tags_split_across_deltas() {
+        // The tag itself, and the boundaries, arrive in separate streamed chunks.
+        let mut splitter = ThinkSplitter::default();
+        let mut answer = String::new();
+        let mut reasoning = String::new();
+        for chunk in ["Hello <thi", "nk>reason ", "here</thi", "nk> world"] {
+            let (a, r) = splitter.feed(chunk);
+            answer.push_str(&a);
+            reasoning.push_str(&r);
+        }
+        let (a, r) = splitter.flush();
+        answer.push_str(&a);
+        reasoning.push_str(&r);
+        assert_eq!(answer, "Hello  world");
+        assert_eq!(reasoning, "reason here");
+    }
+
+    #[test]
+    fn non_think_angle_brackets_pass_through() {
+        // A stray "<" that is not a <think> tag must not be swallowed.
+        let mut splitter = ThinkSplitter::default();
+        let (answer, reasoning) = splitter.feed("a < b and c <tag> d");
+        let (tail_a, _) = splitter.flush();
+        assert_eq!(format!("{answer}{tail_a}"), "a < b and c <tag> d");
+        assert_eq!(reasoning, "");
     }
 }
