@@ -854,7 +854,7 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 .folder-group + .folder-group {
-  margin-top: 18px;
+  margin-top: 6px;
 }
 
 .folder-group {
