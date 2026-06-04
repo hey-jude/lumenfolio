@@ -2127,7 +2127,7 @@ defineExpose({
           @click.stop
         >
           <div class="translation-popover-head">
-            <div>
+            <div class="translation-popover-heading">
               <div class="translation-popover-title">{{ ui.translationResult }}</div>
               <div class="translation-popover-subtitle">
                 {{ ui.page }} {{ activeTranslation.source?.page || activePage }}
@@ -2486,22 +2486,35 @@ defineExpose({
 
 .translation-popover-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+/* Title + subtitle on one line ("Translation   Page 1 · Provider: …"). */
+.translation-popover-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
 }
 
 .translation-popover-title {
   color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
+  flex-shrink: 0;
 }
 
 .translation-popover-subtitle {
-  margin-top: 4px;
+  min-width: 0;
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .translation-popover-head button,
