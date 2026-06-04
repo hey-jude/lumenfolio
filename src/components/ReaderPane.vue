@@ -1551,16 +1551,15 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .toolbar-select {
-  width: 150px;
+  /* Text-only, no dropdown caret; width hugs the selected language name. */
+  width: auto;
+  max-width: 150px;
   appearance: none;
-  background:
-    linear-gradient(45deg, transparent 50%, var(--text-secondary) 50%) calc(100% - 17px) 50% / 5px 5px no-repeat,
-    linear-gradient(135deg, var(--text-secondary) 50%, transparent 50%) calc(100% - 12px) 50% / 5px 5px no-repeat,
-    transparent;
+  background: transparent;
   color: var(--text-primary);
   cursor: pointer;
   outline: none;
-  padding: 0 24px 0 12px;
+  padding: 0 10px;
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0;
@@ -1592,10 +1591,7 @@ watch(translationArtifactActivePage, async () => {
 
 .toolbar-select:hover,
 .toolbar-select:focus-visible {
-  background:
-    linear-gradient(45deg, transparent 50%, var(--text-primary) 50%) calc(100% - 17px) 50% / 5px 5px no-repeat,
-    linear-gradient(135deg, var(--text-primary) 50%, transparent 50%) calc(100% - 12px) 50% / 5px 5px no-repeat,
-    rgba(255, 255, 255, 0.08);
+  background-color: rgba(255, 255, 255, 0.08);
 }
 
 .toolbar-btn {
