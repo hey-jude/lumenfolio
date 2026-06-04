@@ -866,6 +866,16 @@ function zoomPdf(delta) {
   }
 }
 
+// Let a plain mouse wheel scroll the horizontal document-tab strip (it only
+// scrolls horizontally, which vertical wheels otherwise ignore).
+function onReaderTabsWheel(event) {
+  const el = event.currentTarget
+  if (!el || el.scrollWidth <= el.clientWidth) return
+  if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
+  el.scrollLeft += event.deltaY
+  event.preventDefault()
+}
+
 function translationPagePlaceholderLabel(translation) {
   if (translation?.status === 'failed') return translation.error || props.ui.translationFailed
   if (props.document.translation.status === 'succeeded') return props.ui.translationPageLoading
@@ -989,9 +999,22 @@ watch(translationArtifactActivePage, async () => {
 
 <template>
   <section class="reader-pane">
-    <div class="reader-chrome" data-tauri-drag-region @mousedown="startWindowDrag">
-      <div class="reader-chrome-primary">
-        <div v-if="tabs.length > 1" class="reader-tab-bar" v-bind="testAttrs('reader-tab-bar')">
+    <div class="reader-chrome">
+      <!-- Row 1: thin title bar = window drag region + the active document name. -->
+      <div class="reader-titlebar" data-tauri-drag-region @mousedown="startWindowDrag">
+        <span class="reader-titlebar-name" :title="document.title || document.shortTitle">
+          {{ document.shortTitle || document.title || 'PDF' }}
+        </span>
+      </div>
+
+      <!-- Row 2: document tabs (left) + translation/page/zoom controls (right). -->
+      <div class="reader-tabrow">
+        <div
+          v-if="tabs.length > 1"
+          class="reader-tab-bar"
+          @wheel="onReaderTabsWheel"
+          v-bind="testAttrs('reader-tab-bar')"
+        >
           <div
             v-for="tab in tabs"
             :key="tab.id"
@@ -1013,14 +1036,9 @@ watch(translationArtifactActivePage, async () => {
             >×</button>
           </div>
         </div>
-        <div v-else class="reader-current-doc" :title="document.title || document.shortTitle">
-          <span class="reader-tab-dot" :class="document.indexStatus"></span>
-          <span class="reader-current-name">{{ document.shortTitle || document.title || 'PDF' }}</span>
-        </div>
-      </div>
+        <div v-else class="reader-tab-spacer"></div>
 
-      <div class="reader-chrome-secondary">
-        <div class="toolbar-left">
+        <div class="reader-tab-controls">
           <select
             class="toolbar-select"
             :value="translationLang"
@@ -1055,9 +1073,7 @@ watch(translationArtifactActivePage, async () => {
             <span class="toolbar-icon">◧</span>
             <span v-if="canCancelTranslation" class="compact-progress">{{ translationProgressPercent }}%</span>
           </button>
-        </div>
 
-        <div class="toolbar-right">
           <template v-if="isLocalPdf">
             <span v-if="showIndexStatus" class="status-chip" :class="document.indexStatus">
               {{ indexStatusLabel }}
@@ -1475,45 +1491,53 @@ watch(translationArtifactActivePage, async () => {
 
 .reader-chrome {
   display: grid;
-  grid-template-rows: 38px 42px;
+  grid-template-rows: 30px 42px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.075);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.012)),
     var(--bg-app);
 }
 
-.reader-chrome-primary,
-.reader-chrome-secondary {
-  min-width: 0;
-  display: grid;
+/* Row 1: thin centered title bar (window drag handle + active doc name). */
+.reader-titlebar {
+  display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 0 14px 0 12px;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
 }
 
-.reader-chrome-primary {
-  grid-template-columns: minmax(0, 1fr);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+.reader-titlebar-name {
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
 }
 
-.reader-chrome-secondary {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.toolbar-left,
-.toolbar-right {
+/* Row 2: tabs (left, flex) + controls (right). Not a drag region, so tabs
+   scroll and controls stay clickable. */
+.reader-tabrow {
   min-width: 0;
   display: flex;
   align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+}
+
+.reader-tab-spacer {
+  flex: 1;
+}
+
+.reader-tab-controls {
+  display: flex;
+  align-items: center;
   gap: 8px;
-}
-
-.toolbar-left {
-  overflow: hidden;
-}
-
-.toolbar-right {
-  justify-content: flex-end;
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .toolbar-select,
@@ -1709,7 +1733,8 @@ watch(translationArtifactActivePage, async () => {
 .reader-tab-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 0;
+  flex: 1;
   min-width: 0;
   overflow-x: auto;
   scrollbar-width: none;
@@ -1723,16 +1748,28 @@ watch(translationArtifactActivePage, async () => {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
-  max-width: 210px;
-  padding: 0 7px 0 10px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.025);
-  color: var(--text-secondary);
+  height: 30px;
+  max-width: 200px;
+  padding: 0 8px 0 12px;
+  /* Cursor-style: flat tabs packed tight, separated by a very light divider. */
+  border: none;
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.reader-tab:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+}
+
+.reader-tab:last-child {
+  border-right: none;
 }
 
 .reader-tab:hover {
@@ -1742,26 +1779,11 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .reader-tab.active {
-  background: rgba(120, 170, 255, 0.115);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text-primary);
-  border-color: rgba(120, 170, 255, 0.24);
+  box-shadow: inset 0 -2px 0 rgba(120, 170, 255, 0.75);
 }
 
-.reader-current-doc {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.reader-current-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 .reader-tab-dot {
   width: 7px;
