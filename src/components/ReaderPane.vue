@@ -1038,7 +1038,12 @@ watch(translationArtifactActivePage, async () => {
             v-bind="testAttrs('translation-action')"
             @click="emit('translation-action', translationViewportContext())"
           >
-            <span class="toolbar-action-label">{{ canCancelTranslation ? translationStatusLabel : translationActionLabel }}</span>
+            <svg class="toolbar-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                fill="currentColor"
+                d="M12.87 15.07l-2.54-2.51.03-.03c1.74-1.94 2.98-4.17 3.71-6.53H17V4h-7V2H8v2H1v1.99h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"
+              />
+            </svg>
             <span v-if="canCancelTranslation" class="compact-progress">{{ translationProgressPercent }}%</span>
           </button>
 
@@ -1063,7 +1068,6 @@ watch(translationArtifactActivePage, async () => {
             @click="toggleDualView"
           >
             <span class="toolbar-icon">◧</span>
-            <span class="toolbar-action-label">{{ viewMode === 'dual' ? ui.original : ui.dual }}</span>
           </button>
         </div>
 
@@ -1601,7 +1605,14 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .toolbar-btn.translate-action {
-  min-width: 92px;
+  min-width: 32px;
+  padding: 0 9px;
+}
+
+.toolbar-glyph {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
 }
 
 .toolbar-btn.translate-action.running {
@@ -1635,11 +1646,6 @@ watch(translationArtifactActivePage, async () => {
 .toolbar-btn.split-toggle.active {
   color: var(--text-primary);
   background: rgba(106, 169, 255, 0.16);
-}
-
-.toolbar-action-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .status-chip {
