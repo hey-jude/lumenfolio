@@ -221,7 +221,16 @@ const canOpenTranslationView = computed(() => {
   return translation.status === 'canceled' && Boolean(translation.monoPdfPath || translation.dualPdfPath)
 })
 const canOperateTranslation = computed(() => props.document.chatReady && (isLocalPdf.value || (props.document.pages?.length || 0) > 0))
-const showTranslationAction = computed(() => props.document.translation.status !== 'succeeded')
+// Contextual tooltip for the single translate/view toggle (the ◧ button):
+// before translating it reads "Translate"; once translated it toggles
+// Original/Dual; while running it shows the status.
+const translationToggleLabel = computed(() => {
+  if (props.document.translation.status === 'succeeded') {
+    return props.viewMode === 'dual' ? props.ui.original : props.ui.dual
+  }
+  if (canCancelTranslation.value) return translationStatusLabel.value
+  return translationActionLabel.value
+})
 const showIndexStatus = computed(() => props.document.indexStatus && props.document.indexStatus !== 'indexed')
 const isLocalPdf = computed(() => props.document.source === 'local')
 const pageTranslationStatus = computed(() => props.pageTranslation?.status || props.document.translation.status || 'idle')
@@ -857,11 +866,6 @@ function zoomPdf(delta) {
   }
 }
 
-function toggleDualView() {
-  if (!canOpenTranslationView.value || !canOperateTranslation.value) return
-  emit('set-view-mode', props.viewMode === 'dual' ? 'original' : 'dual')
-}
-
 function translationPagePlaceholderLabel(translation) {
   if (translation?.status === 'failed') return translation.error || props.ui.translationFailed
   if (props.document.translation.status === 'succeeded') return props.ui.translationPageLoading
@@ -1029,36 +1033,6 @@ watch(translationArtifactActivePage, async () => {
           </select>
 
           <button
-            v-if="showTranslationAction"
-            class="toolbar-btn translate-action"
-            :class="{ running: canCancelTranslation }"
-            :disabled="!canOperateTranslation"
-            :title="translationActionLabel"
-            :aria-label="translationActionLabel"
-            v-bind="testAttrs('translation-action')"
-            @click="emit('translation-action', translationViewportContext())"
-          >
-            <svg
-              class="toolbar-glyph"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="m5 8 6 6" />
-              <path d="m4 14 6-6 2-3" />
-              <path d="M2 5h12" />
-              <path d="M7 2h1" />
-              <path d="m22 22-5-10-5 10" />
-              <path d="M14 18h6" />
-            </svg>
-            <span v-if="canCancelTranslation" class="compact-progress">{{ translationProgressPercent }}%</span>
-          </button>
-
-          <button
             v-if="canCancelTranslation"
             class="toolbar-btn stop-action"
             :title="ui.cancel"
@@ -1071,14 +1045,15 @@ watch(translationArtifactActivePage, async () => {
 
           <button
             class="toolbar-btn split-toggle"
-            :class="{ active: viewMode === 'dual' }"
-            :disabled="!canOpenTranslationView || !canOperateTranslation"
-            :title="viewMode === 'dual' ? ui.original : ui.dual"
-            :aria-label="viewMode === 'dual' ? ui.original : ui.dual"
+            :class="{ active: viewMode === 'dual', running: canCancelTranslation }"
+            :disabled="!canOperateTranslation"
+            :title="translationToggleLabel"
+            :aria-label="translationToggleLabel"
             v-bind="testAttrs('view-mode-dual')"
-            @click="toggleDualView"
+            @click="emit('translation-action', translationViewportContext())"
           >
             <span class="toolbar-icon">◧</span>
+            <span v-if="canCancelTranslation" class="compact-progress">{{ translationProgressPercent }}%</span>
           </button>
         </div>
 
@@ -1615,18 +1590,7 @@ watch(translationArtifactActivePage, async () => {
   filter: saturate(0.6);
 }
 
-.toolbar-btn.translate-action {
-  min-width: 32px;
-  padding: 0 9px;
-}
-
-.toolbar-glyph {
-  width: 16px;
-  height: 16px;
-  flex-shrink: 0;
-}
-
-.toolbar-btn.translate-action.running {
+.toolbar-btn.split-toggle.running {
   background: rgba(106, 169, 255, 0.14);
 }
 
