@@ -29,6 +29,11 @@ const ASSIST_RAIL_GAP = 10
 const ASSIST_RAIL_MARGIN = 12
 const TRANSLATION_POPOVER_WIDTH = 340
 const TRANSLATION_POPOVER_MAX_HEIGHT = 320
+// When the popover matches the selection width (below/above placement), keep it
+// within a readable range so a one-word selection isn't a sliver and a long
+// paragraph doesn't overflow the pane.
+const TRANSLATION_POPOVER_MIN_WIDTH = 240
+const TRANSLATION_POPOVER_MAX_MATCH_WIDTH = 600
 const SELECTION_TOOLBAR_WIDTH = 120
 const SELECTION_TOOLBAR_HEIGHT = 40
 const SELECTION_TOOLBAR_GAP = 10
@@ -273,26 +278,60 @@ const translationPopoverStyle = computed(() => {
   const bounds = getBlockBounds(
     bboxListToRects(translation.source.page, translation.source.bboxList || []),
   )
-  const pageLeft = pageEl.offsetLeft
-  const pageTop = pageEl.offsetTop
   const visibleBounds = getVisibleBoundsInPages()
-  const preferredLeft = pageLeft + bounds.x + bounds.width + 14
-  const pinnedRightLeft = Math.max(
-    visibleBounds.left,
-    visibleBounds.right - TRANSLATION_POPOVER_WIDTH,
-  )
-  const left = preferredLeft + TRANSLATION_POPOVER_WIDTH <= visibleBounds.right
-    ? preferredLeft
-    : pinnedRightLeft
-  const top = clamp(
-    pageTop + bounds.y,
-    visibleBounds.top,
-    Math.max(visibleBounds.top, visibleBounds.bottom - TRANSLATION_POPOVER_MAX_HEIGHT),
-  )
+  const leftAbs = pageEl.offsetLeft + bounds.x
+  const rightAbs = leftAbs + bounds.width
+  const topAbs = pageEl.offsetTop + bounds.y
+  const bottomAbs = topAbs + bounds.height
+  // Follow the selection toolbar's placement so the popover appears where the
+  // buttons were.
+  const placement = computeSelectionPlacement(bounds, pageEl)
 
+  if (placement === 'right') {
+    // To the right of the selection, keeping the default popover width.
+    const preferredLeft = rightAbs + 14
+    const pinnedRightLeft = Math.max(visibleBounds.left, visibleBounds.right - TRANSLATION_POPOVER_WIDTH)
+    const left = preferredLeft + TRANSLATION_POPOVER_WIDTH <= visibleBounds.right
+      ? preferredLeft
+      : pinnedRightLeft
+    const top = clamp(
+      topAbs,
+      visibleBounds.top,
+      Math.max(visibleBounds.top, visibleBounds.bottom - TRANSLATION_POPOVER_MAX_HEIGHT),
+    )
+    return { left: `${left}px`, top: `${top}px` }
+  }
+
+  // Below / above: match the selection's width (clamped to a readable range).
+  const maxMatchWidth = Math.min(
+    TRANSLATION_POPOVER_MAX_MATCH_WIDTH,
+    visibleBounds.right - visibleBounds.left - 24,
+  )
+  const width = clamp(
+    bounds.width,
+    TRANSLATION_POPOVER_MIN_WIDTH,
+    Math.max(TRANSLATION_POPOVER_MIN_WIDTH, maxMatchWidth),
+  )
+  const left = clamp(leftAbs, visibleBounds.left, Math.max(visibleBounds.left, visibleBounds.right - width))
+
+  if (placement === 'above') {
+    // Anchor the popover's bottom just above the selection; translateY(-100%)
+    // lets it grow upward without needing to know its (dynamic) height.
+    return {
+      left: `${left}px`,
+      top: `${topAbs - SELECTION_TOOLBAR_GAP}px`,
+      width: `${width}px`,
+      maxWidth: 'none',
+      transform: 'translateY(-100%)',
+    }
+  }
+
+  // below
   return {
     left: `${left}px`,
-    top: `${top}px`,
+    top: `${bottomAbs + SELECTION_TOOLBAR_GAP}px`,
+    width: `${width}px`,
+    maxWidth: 'none',
   }
 })
 const assistRailHitZoneStyle = computed(() => {
@@ -1090,26 +1129,49 @@ function handleGlobalKeyDown(event) {
   }
 }
 
+// Where to place the selection toolbar / translation popover relative to the
+// selection: below by default, above when there isn't room below, and to the
+// right only when neither vertical direction fits. Measured against the toolbar
+// height so the toolbar and the popover always agree on the placement.
+function computeSelectionPlacement(bounds, pageEl) {
+  const visibleBounds = getVisibleBoundsInPages()
+  const topAbs = pageEl.offsetTop + bounds.y
+  const bottomAbs = topAbs + bounds.height
+  const belowFits = bottomAbs + SELECTION_TOOLBAR_GAP + SELECTION_TOOLBAR_HEIGHT <= visibleBounds.bottom
+  const aboveFits = topAbs - SELECTION_TOOLBAR_GAP - SELECTION_TOOLBAR_HEIGHT >= visibleBounds.top
+  if (belowFits) return 'below'
+  if (aboveFits) return 'above'
+  return 'right'
+}
+
 function positionSelectionToolbar(page, pageEl) {
   const visibleBounds = getVisibleBoundsInPages()
-  const selectionBounds = getBlockBounds(selectionRects.value || [])
-  if (!selectionBounds.width && !selectionBounds.height) return
-  const selectionLeft = selectionBounds.x
-  const selectionTop = selectionBounds.y
-  const selectionBottom = selectionBounds.y + selectionBounds.height
-  const centerLeft = pageEl.offsetLeft + selectionLeft + selectionBounds.width / 2 - SELECTION_TOOLBAR_WIDTH / 2
-  const aboveTop = pageEl.offsetTop + selectionTop - SELECTION_TOOLBAR_HEIGHT - SELECTION_TOOLBAR_GAP
-  const belowTop = pageEl.offsetTop + selectionBottom + SELECTION_TOOLBAR_GAP
-  const hasSpaceAbove = aboveTop >= visibleBounds.top
-  const hasSpaceBelow = belowTop + SELECTION_TOOLBAR_HEIGHT <= visibleBounds.bottom
-  const preferredTop = hasSpaceAbove || !hasSpaceBelow ? aboveTop : belowTop
+  const bounds = getBlockBounds(selectionRects.value || [])
+  if (!bounds.width && !bounds.height) return
+  const leftAbs = pageEl.offsetLeft + bounds.x
+  const rightAbs = leftAbs + bounds.width
+  const topAbs = pageEl.offsetTop + bounds.y
+  const bottomAbs = topAbs + bounds.height
+  const placement = computeSelectionPlacement(bounds, pageEl)
+
+  let left
+  let top
+  if (placement === 'right') {
+    left = rightAbs + SELECTION_TOOLBAR_GAP
+    top = topAbs + bounds.height / 2 - SELECTION_TOOLBAR_HEIGHT / 2
+  } else {
+    left = leftAbs + bounds.width / 2 - SELECTION_TOOLBAR_WIDTH / 2
+    top = placement === 'above'
+      ? topAbs - SELECTION_TOOLBAR_HEIGHT - SELECTION_TOOLBAR_GAP
+      : bottomAbs + SELECTION_TOOLBAR_GAP
+  }
   const maxLeft = Math.max(visibleBounds.left, visibleBounds.right - SELECTION_TOOLBAR_WIDTH)
   const maxTop = Math.max(visibleBounds.top, visibleBounds.bottom - SELECTION_TOOLBAR_HEIGHT)
 
   selectionPage.value = page
   toolbarPosition.value = {
-    left: clamp(centerLeft, visibleBounds.left, maxLeft),
-    top: clamp(preferredTop, visibleBounds.top, maxTop),
+    left: clamp(left, visibleBounds.left, maxLeft),
+    top: clamp(top, visibleBounds.top, maxTop),
   }
 }
 
