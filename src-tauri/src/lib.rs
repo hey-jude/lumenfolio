@@ -689,6 +689,24 @@ fn choose_workspace() -> Result<Option<String>, String> {
         .map(|path| path.to_string_lossy().to_string()))
 }
 
+/// Native multi-select file picker for adding PDFs to a folder. Returns the
+/// chosen file paths (empty if the dialog was cancelled), which the frontend
+/// feeds into the same `import_workspace_paths` flow as a drag-and-drop.
+#[tauri::command]
+fn choose_pdf_files() -> Result<Vec<String>, String> {
+    Ok(rfd::FileDialog::new()
+        .set_title("Add PDFs")
+        .add_filter("PDF", &["pdf"])
+        .pick_files()
+        .map(|paths| {
+            paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 #[tauri::command]
 fn open_path_in_file_manager(path: String) -> Result<(), String> {
     let trimmed = path.trim();
@@ -4263,6 +4281,7 @@ pub fn run() {
         .manage(AgentSessionState::default())
         .invoke_handler(tauri::generate_handler![
             choose_workspace,
+            choose_pdf_files,
             open_path_in_file_manager,
             pdf_layout_dump::dump_pdf_layout,
             scan_workspace_pdfs,

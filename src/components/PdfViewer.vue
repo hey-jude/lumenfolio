@@ -29,6 +29,11 @@ const ASSIST_RAIL_GAP = 10
 const ASSIST_RAIL_MARGIN = 12
 const TRANSLATION_POPOVER_WIDTH = 340
 const TRANSLATION_POPOVER_MAX_HEIGHT = 320
+// When the popover matches the selection width (below/above placement), keep it
+// within a readable range so a one-word selection isn't a sliver and a long
+// paragraph doesn't overflow the pane.
+const TRANSLATION_POPOVER_MIN_WIDTH = 240
+const TRANSLATION_POPOVER_MAX_MATCH_WIDTH = 600
 const SELECTION_TOOLBAR_WIDTH = 120
 const SELECTION_TOOLBAR_HEIGHT = 40
 const SELECTION_TOOLBAR_GAP = 10
@@ -273,26 +278,60 @@ const translationPopoverStyle = computed(() => {
   const bounds = getBlockBounds(
     bboxListToRects(translation.source.page, translation.source.bboxList || []),
   )
-  const pageLeft = pageEl.offsetLeft
-  const pageTop = pageEl.offsetTop
   const visibleBounds = getVisibleBoundsInPages()
-  const preferredLeft = pageLeft + bounds.x + bounds.width + 14
-  const pinnedRightLeft = Math.max(
-    visibleBounds.left,
-    visibleBounds.right - TRANSLATION_POPOVER_WIDTH,
-  )
-  const left = preferredLeft + TRANSLATION_POPOVER_WIDTH <= visibleBounds.right
-    ? preferredLeft
-    : pinnedRightLeft
-  const top = clamp(
-    pageTop + bounds.y,
-    visibleBounds.top,
-    Math.max(visibleBounds.top, visibleBounds.bottom - TRANSLATION_POPOVER_MAX_HEIGHT),
-  )
+  const leftAbs = pageEl.offsetLeft + bounds.x
+  const rightAbs = leftAbs + bounds.width
+  const topAbs = pageEl.offsetTop + bounds.y
+  const bottomAbs = topAbs + bounds.height
+  // Follow the selection toolbar's placement so the popover appears where the
+  // buttons were.
+  const placement = computeSelectionPlacement(bounds, pageEl)
 
+  if (placement === 'right') {
+    // To the right of the selection, keeping the default popover width.
+    const preferredLeft = rightAbs + 14
+    const pinnedRightLeft = Math.max(visibleBounds.left, visibleBounds.right - TRANSLATION_POPOVER_WIDTH)
+    const left = preferredLeft + TRANSLATION_POPOVER_WIDTH <= visibleBounds.right
+      ? preferredLeft
+      : pinnedRightLeft
+    const top = clamp(
+      topAbs,
+      visibleBounds.top,
+      Math.max(visibleBounds.top, visibleBounds.bottom - TRANSLATION_POPOVER_MAX_HEIGHT),
+    )
+    return { left: `${left}px`, top: `${top}px` }
+  }
+
+  // Below / above: match the selection's width (clamped to a readable range).
+  const maxMatchWidth = Math.min(
+    TRANSLATION_POPOVER_MAX_MATCH_WIDTH,
+    visibleBounds.right - visibleBounds.left - 24,
+  )
+  const width = clamp(
+    bounds.width,
+    TRANSLATION_POPOVER_MIN_WIDTH,
+    Math.max(TRANSLATION_POPOVER_MIN_WIDTH, maxMatchWidth),
+  )
+  const left = clamp(leftAbs, visibleBounds.left, Math.max(visibleBounds.left, visibleBounds.right - width))
+
+  if (placement === 'above') {
+    // Anchor the popover's bottom just above the selection; translateY(-100%)
+    // lets it grow upward without needing to know its (dynamic) height.
+    return {
+      left: `${left}px`,
+      top: `${topAbs - SELECTION_TOOLBAR_GAP}px`,
+      width: `${width}px`,
+      maxWidth: 'none',
+      transform: 'translateY(-100%)',
+    }
+  }
+
+  // below
   return {
     left: `${left}px`,
-    top: `${top}px`,
+    top: `${bottomAbs + SELECTION_TOOLBAR_GAP}px`,
+    width: `${width}px`,
+    maxWidth: 'none',
   }
 })
 const assistRailHitZoneStyle = computed(() => {
@@ -1090,26 +1129,49 @@ function handleGlobalKeyDown(event) {
   }
 }
 
+// Where to place the selection toolbar / translation popover relative to the
+// selection: below by default, above when there isn't room below, and to the
+// right only when neither vertical direction fits. Measured against the toolbar
+// height so the toolbar and the popover always agree on the placement.
+function computeSelectionPlacement(bounds, pageEl) {
+  const visibleBounds = getVisibleBoundsInPages()
+  const topAbs = pageEl.offsetTop + bounds.y
+  const bottomAbs = topAbs + bounds.height
+  const belowFits = bottomAbs + SELECTION_TOOLBAR_GAP + SELECTION_TOOLBAR_HEIGHT <= visibleBounds.bottom
+  const aboveFits = topAbs - SELECTION_TOOLBAR_GAP - SELECTION_TOOLBAR_HEIGHT >= visibleBounds.top
+  if (belowFits) return 'below'
+  if (aboveFits) return 'above'
+  return 'right'
+}
+
 function positionSelectionToolbar(page, pageEl) {
   const visibleBounds = getVisibleBoundsInPages()
-  const selectionBounds = getBlockBounds(selectionRects.value || [])
-  if (!selectionBounds.width && !selectionBounds.height) return
-  const selectionLeft = selectionBounds.x
-  const selectionTop = selectionBounds.y
-  const selectionBottom = selectionBounds.y + selectionBounds.height
-  const centerLeft = pageEl.offsetLeft + selectionLeft + selectionBounds.width / 2 - SELECTION_TOOLBAR_WIDTH / 2
-  const aboveTop = pageEl.offsetTop + selectionTop - SELECTION_TOOLBAR_HEIGHT - SELECTION_TOOLBAR_GAP
-  const belowTop = pageEl.offsetTop + selectionBottom + SELECTION_TOOLBAR_GAP
-  const hasSpaceAbove = aboveTop >= visibleBounds.top
-  const hasSpaceBelow = belowTop + SELECTION_TOOLBAR_HEIGHT <= visibleBounds.bottom
-  const preferredTop = hasSpaceAbove || !hasSpaceBelow ? aboveTop : belowTop
+  const bounds = getBlockBounds(selectionRects.value || [])
+  if (!bounds.width && !bounds.height) return
+  const leftAbs = pageEl.offsetLeft + bounds.x
+  const rightAbs = leftAbs + bounds.width
+  const topAbs = pageEl.offsetTop + bounds.y
+  const bottomAbs = topAbs + bounds.height
+  const placement = computeSelectionPlacement(bounds, pageEl)
+
+  let left
+  let top
+  if (placement === 'right') {
+    left = rightAbs + SELECTION_TOOLBAR_GAP
+    top = topAbs + bounds.height / 2 - SELECTION_TOOLBAR_HEIGHT / 2
+  } else {
+    left = leftAbs + bounds.width / 2 - SELECTION_TOOLBAR_WIDTH / 2
+    top = placement === 'above'
+      ? topAbs - SELECTION_TOOLBAR_HEIGHT - SELECTION_TOOLBAR_GAP
+      : bottomAbs + SELECTION_TOOLBAR_GAP
+  }
   const maxLeft = Math.max(visibleBounds.left, visibleBounds.right - SELECTION_TOOLBAR_WIDTH)
   const maxTop = Math.max(visibleBounds.top, visibleBounds.bottom - SELECTION_TOOLBAR_HEIGHT)
 
   selectionPage.value = page
   toolbarPosition.value = {
-    left: clamp(centerLeft, visibleBounds.left, maxLeft),
-    top: clamp(preferredTop, visibleBounds.top, maxTop),
+    left: clamp(left, visibleBounds.left, maxLeft),
+    top: clamp(top, visibleBounds.top, maxTop),
   }
 }
 
@@ -2065,14 +2127,51 @@ defineExpose({
           @click.stop
         >
           <div class="translation-popover-head">
-            <div>
+            <div class="translation-popover-heading">
               <div class="translation-popover-title">{{ ui.translationResult }}</div>
               <div class="translation-popover-subtitle">
                 {{ ui.page }} {{ activeTranslation.source?.page || activePage }}
                 <template v-if="translationMeta"> · {{ translationMeta }}</template>
               </div>
             </div>
-            <button type="button" :title="ui.close" :aria-label="ui.close" @click="emit('close-translation')">×</button>
+            <div class="translation-popover-head-actions">
+              <button
+                v-if="activeTranslation.status !== 'running'"
+                type="button"
+                class="popover-icon-btn"
+                :title="activeTranslation.status === 'failed' ? ui.retry : ui.retranslate"
+                :aria-label="activeTranslation.status === 'failed' ? ui.retry : ui.retranslate"
+                @click="emit('retry-translation')"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                  <path d="M21 3v6h-6" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="popover-icon-btn"
+                :title="copyButtonLabel"
+                :aria-label="copyButtonLabel"
+                :disabled="activeTranslation.status !== 'succeeded'"
+                @click="copyActiveTranslation"
+              >
+                <svg v-if="copyStatus === 'copied'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M20 6 9 17l-5-5" />
+                </svg>
+                <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <rect x="9" y="9" width="11" height="11" rx="2" />
+                  <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="popover-icon-btn"
+                :title="ui.close"
+                :aria-label="ui.close"
+                @click="emit('close-translation')"
+              >×</button>
+            </div>
           </div>
 
           <div v-if="activeTranslation.status === 'failed'" class="translation-popover-error">
@@ -2085,28 +2184,6 @@ defineExpose({
                 ? ui.translationPending
                 : activeTranslation.translatedText
             }}
-          </div>
-
-          <details v-if="activeTranslation.source?.text" class="translation-source">
-            <summary>{{ ui.showSource }}</summary>
-            <div>{{ activeTranslation.source.text }}</div>
-          </details>
-
-          <div class="translation-popover-actions">
-            <button
-              v-if="activeTranslation.status !== 'running'"
-              type="button"
-              @click="emit('retry-translation')"
-            >
-              {{ activeTranslation.status === 'failed' ? ui.retry : ui.retranslate }}
-            </button>
-            <button
-              type="button"
-              :disabled="activeTranslation.status !== 'succeeded'"
-              @click="copyActiveTranslation"
-            >
-              {{ copyButtonLabel }}
-            </button>
           </div>
         </aside>
       </div>
@@ -2424,40 +2501,74 @@ defineExpose({
 
 .translation-popover-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+/* Title + subtitle on one line ("Translation   Page 1 · Provider: …"). */
+.translation-popover-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
 }
 
 .translation-popover-title {
   color: var(--text-primary);
   font-size: 13px;
   font-weight: 700;
+  flex-shrink: 0;
 }
 
 .translation-popover-subtitle {
-  margin-top: 4px;
+  min-width: 0;
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.translation-popover-head button,
-.translation-popover-actions button {
-  min-height: 30px;
-  border-radius: 9px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-primary);
-  cursor: pointer;
-  padding: 0 10px;
+.translation-popover-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 
-.translation-popover-head button {
-  min-width: 30px;
+.popover-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
   padding: 0;
-  border-radius: 999px;
-  flex: 0 0 auto;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  transition: color 140ms ease, background 140ms ease;
+}
+
+.popover-icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+.popover-icon-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+
+.popover-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .translation-popover-body,
@@ -2471,25 +2582,28 @@ defineExpose({
   white-space: pre-wrap;
 }
 
-.translation-source {
-  flex: 0 0 auto;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
-  padding-top: 8px;
-  color: var(--text-muted);
-  font-size: 12px;
+/* Slim, transparent, hover-revealed scrollbar — consistent with the rest of the
+   app. No scrollbar-width (it makes WebKit ignore these ::-webkit-scrollbar
+   rules and fall back to the native wide bar). */
+.translation-popover-body::-webkit-scrollbar,
+.translation-popover-error::-webkit-scrollbar {
+  width: 6px;
 }
 
-.translation-source summary {
-  cursor: pointer;
-  color: var(--text-secondary);
+.translation-popover-body::-webkit-scrollbar-track,
+.translation-popover-error::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-.translation-source div {
-  max-height: 110px;
-  overflow: auto;
-  margin-top: 8px;
-  white-space: pre-wrap;
-  line-height: 1.55;
+.translation-popover-body::-webkit-scrollbar-thumb,
+.translation-popover-error::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background-color: transparent;
+}
+
+.translation-popover-body:hover::-webkit-scrollbar-thumb,
+.translation-popover-error:hover::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.22);
 }
 
 .translation-popover-error {
@@ -2503,16 +2617,5 @@ defineExpose({
   line-height: 1.45;
 }
 
-.translation-popover-actions {
-  flex: 0 0 auto;
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.translation-popover-actions button:disabled {
-  opacity: 0.48;
-  cursor: not-allowed;
-}
 
 </style>

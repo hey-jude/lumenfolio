@@ -3211,6 +3211,25 @@ async function handleWorkspaceDrop(rawPaths = []) {
   await addWorkspaceRootsFromDrop(rawPaths, { targetRootId })
 }
 
+// "+" on a folder header: a discoverable alternative to drag-and-drop. Opens a
+// native PDF file picker and adds the chosen files to that folder via the same
+// import flow as a drop onto the folder.
+async function addPdfsToRoot(rootId) {
+  if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return
+  workspaceStatus.value = 'choosing'
+  let paths = []
+  try {
+    paths = await invoke('choose_pdf_files')
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  } finally {
+    workspaceStatus.value = 'idle'
+  }
+  if (Array.isArray(paths) && paths.length) {
+    await addWorkspaceRootsFromDrop(paths, { targetRootId: rootId })
+  }
+}
+
 async function handleTauriWorkspaceDrop(payload = null, options = {}) {
   const now = Date.now()
   if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return
@@ -3899,6 +3918,7 @@ onMounted(() => {
       @update:filter="filter = $event"
       @select-doc="selectDoc"
       @add-folder="chooseWorkspace"
+      @add-pdfs="addPdfsToRoot"
       @rescan="rescanWorkspace"
       @reindex-doc="reindexSelectedDocument"
       @open-workspace="openWorkspaceInFileManager"

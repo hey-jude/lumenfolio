@@ -54,6 +54,7 @@ const emit = defineEmits([
   'update:filter',
   'select-doc',
   'add-folder',
+  'add-pdfs',
   'rescan',
   'reindex-doc',
   'open-settings',
@@ -388,6 +389,16 @@ function triggerDeleteRoot(root, event = null) {
           >
             <span class="folder-caret">{{ workspaceRoot.collapsed ? '▸' : '▾' }}</span>
             <span class="folder-name">{{ localized(workspaceRoot.name) }}</span>
+          </button>
+          <button
+            type="button"
+            class="folder-open-btn"
+            :title="ui.addPdfs"
+            :aria-label="ui.addPdfs"
+            :disabled="isScanning"
+            @click="emit('add-pdfs', workspaceRoot.id)"
+          >
+            +
           </button>
           <button
             type="button"
