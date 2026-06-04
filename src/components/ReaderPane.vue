@@ -1577,13 +1577,20 @@ watch(translationArtifactActivePage, async () => {
   background-color: rgba(255, 255, 255, 0.08);
 }
 
-.toolbar-select:focus-visible,
-.toolbar-btn:focus-visible,
-.pdf-toolbar-controls button:focus-visible,
+/* Keyboard focus ring for the tabs only. The ghost toolbar controls use a calm
+   background highlight instead — a native <select> keeps focus after a click, so
+   a hard blue ring would linger and look harsh. */
 .reader-tab:focus-visible,
 .reader-tab-close:focus-visible {
   outline: 2px solid rgba(106, 169, 255, 0.62);
   outline-offset: 2px;
+}
+
+.toolbar-select:focus-visible,
+.toolbar-btn:focus-visible,
+.pdf-toolbar-controls button:focus-visible {
+  outline: none;
+  background-color: rgba(255, 255, 255, 0.08);
 }
 
 .toolbar-select:hover,
