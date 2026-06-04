@@ -444,18 +444,6 @@ function triggerDeleteRoot(root, event = null) {
       </div>
     </div>
 
-    <div v-if="selectedRoot?.recents?.length" class="recent-area">
-      <div class="recent-title">{{ ui.recent }}</div>
-      <button
-        v-for="docId in selectedRoot.recents"
-        :key="docId"
-        class="recent-row"
-        @click="emit('select-doc', docId)"
-      >
-        {{ allDocs.find((doc) => doc.id === docId)?.shortTitle }}
-      </button>
-    </div>
-
     <div v-if="scanError" class="scan-error">{{ scanError }}</div>
 
     <div class="sidebar-footer">
@@ -833,10 +821,6 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 .search-icon,
-.recent-title {
-  color: var(--text-secondary);
-}
-
 .tree-area {
   flex: 1;
   min-width: 0;
@@ -867,14 +851,6 @@ function triggerDeleteRoot(root, event = null) {
 
 .folder-group.drop-target .folder-title {
   color: var(--text-primary);
-}
-
-.recent-title {
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin-bottom: 8px;
 }
 
 .workspace-title-row {
@@ -968,7 +944,6 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 .doc-row,
-.recent-row,
 .footer-btn {
   width: 100%;
   background: transparent;
@@ -1077,11 +1052,6 @@ function triggerDeleteRoot(root, event = null) {
   transition: width 180ms ease;
 }
 
-.recent-area {
-  border-top: 1px solid var(--line-soft);
-  padding-top: 12px;
-}
-
 .empty-tree,
 .scan-error {
   border: 1px solid var(--line-soft);
@@ -1096,16 +1066,6 @@ function triggerDeleteRoot(root, event = null) {
   color: #ffb3b3;
   border-color: rgba(198, 73, 73, 0.28);
   background: rgba(198, 73, 73, 0.1);
-}
-
-.recent-row {
-  padding: 8px 0;
-  font-size: 13px;
-  color: var(--text-secondary);
-}
-
-.recent-row:hover {
-  color: var(--text-primary);
 }
 
 .sidebar-footer {
