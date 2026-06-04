@@ -503,13 +503,15 @@ function triggerDeleteRoot(root, event = null) {
 
 .sidebar-window-bar {
   position: relative;
-  min-height: 56px;
+  /* Just enough to clear the macOS traffic lights (≈y20–34); was 56+14≈70px,
+     which left a large empty gap above the brand. */
+  min-height: 40px;
   width: 100%;
   flex-shrink: 0;
   display: flex;
   align-items: flex-start;
   justify-content: flex-end;
-  padding-top: 14px;
+  padding-top: 0;
 }
 
 .sidebar.collapsed .sidebar-window-bar {
