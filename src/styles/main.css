@@ -39,4 +39,14 @@ button,
 input,
 select {
   font: inherit;
+  /* color-scheme alone isn't enough for the native <option> popup on Windows
+     (WebView2), especially when the <select> background is transparent — the
+     popup renders white. Pin explicit dark colors on the options so the dropdown
+     list is dark on every platform. */
+  color-scheme: dark;
+}
+
+option {
+  background-color: var(--bg-panel);
+  color: var(--text-primary);
 }
