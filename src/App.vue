@@ -627,16 +627,6 @@ const selectedDocument = computed(() => (
 ))
 // Tab descriptors for the reader tab bar: resolve each open id to its document,
 // dropping any that no longer exist. Status mirrors the sidebar status dot.
-const openTabDocs = computed(() => openTabs.value
-  .map((id) => allDocs.value.find((doc) => doc.id === id))
-  .filter(Boolean)
-  .map((doc) => ({
-    id: doc.id,
-    name: String(doc.shortTitle || doc.title || 'PDF').replace(/\.pdf$/i, ''),
-    status: doc.indexStatus === 'indexed'
-      ? 'ready'
-      : (doc.indexStatus === 'stale' ? 'failed' : 'processing'),
-  })))
 const activeWorkspaceRoot = computed(() => {
   if (!workspace.roots.length) return null
   const selectedId = selectedDocId.value
@@ -1435,26 +1425,6 @@ function openTab(docId) {
 // some document (falling back to allDocs[0]), so we keep that doc as the sole tab
 // rather than blanking selectedDocId (which would leave the reader showing a doc
 // with no matching active tab). The document itself stays in the sidebar regardless.
-function closeTab(docId) {
-  const index = openTabs.value.indexOf(docId)
-  if (index === -1) return
-  const next = openTabs.value.filter((id) => id !== docId)
-  if (selectedDocId.value === docId) {
-    const fallback = next[index] || next[index - 1] || ''
-    if (fallback) {
-      openTabs.value = next
-      selectedDocId.value = fallback
-      loadChatHistoryForDocument(fallback)
-      loadNotesForDocument(fallback)
-    } else {
-      // No other tab: keep the active document's tab open (closing it would
-      // desync the reader from the tab bar). Leave openTabs unchanged.
-    }
-  } else {
-    openTabs.value = next
-  }
-}
-
 function selectDoc(docId) {
   openTab(docId)
 }
@@ -3971,8 +3941,6 @@ onMounted(() => {
     <ReaderPane
       :key="`${selectedDocument.id}:${viewerReloadKey}`"
       :document="selectedDocument"
-      :tabs="openTabDocs"
-      :active-doc-id="selectedDocId"
       :translation-languages="translationLanguages"
       :translation-lang="translationLang"
       :view-mode="viewMode"
@@ -3987,8 +3955,6 @@ onMounted(() => {
       :inline-translate-open="inlineTranslateOpen"
       :locale="locale"
       :ui="ui"
-      @select-tab="openTab"
-      @close-tab="closeTab"
       @update:translationLang="translationLang = $event"
       @translation-action="handleTranslationAction"
       @cancel-translation="cancelTranslation"
