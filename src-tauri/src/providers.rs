@@ -70,6 +70,8 @@ pub(crate) fn provider_output(provider: StoredModelProvider) -> ModelProviderOut
                 capabilities: model.capabilities,
                 enabled: model.enabled,
                 is_default_chat_model: model.is_default_chat_model,
+                context_window_override: model.context_window_override,
+                detected_context_window: model.detected_context_window,
             })
             .collect(),
         default_model_key: provider.default_model_key,
@@ -116,6 +118,9 @@ pub(crate) fn normalize_provider_models(
             capabilities,
             enabled: input.enabled.unwrap_or(true),
             is_default_chat_model: input.is_default_chat_model.unwrap_or(false),
+            // 0 (or absent) means "auto" — only a positive value is a real override.
+            context_window_override: input.context_window_override.filter(|value| *value >= 1024),
+            detected_context_window: input.detected_context_window.filter(|value| *value >= 1024),
         });
     }
     if models.is_empty() {
@@ -232,10 +237,18 @@ pub(crate) fn resolve_chat_provider(
                 .to_string(),
         );
     }
-    let model_profile = model_catalog::resolve_model_profile(
+    let mut model_profile = model_catalog::resolve_model_profile(
         &stored_provider.provider_type,
         &stored_provider.base_url,
         &selected_model.model_id,
+    );
+    // Use the model's REAL context window when we know it: a user override always
+    // wins, then the window auto-detected from the provider's /models endpoint,
+    // then the bundled catalog / default the profile already carries.
+    apply_context_window_override(
+        &mut model_profile,
+        selected_model.context_window_override,
+        selected_model.detected_context_window,
     );
     let context_budget = model_profile.context_budget();
     let provider = OpenAiCompatibleProvider {
@@ -248,6 +261,24 @@ pub(crate) fn resolve_chat_provider(
     };
     let provider_label = format!("{} · {}", stored_provider.name, selected_model.nickname);
     Ok((provider, provider_label))
+}
+
+/// Apply the user override / auto-detected context window onto a resolved model
+/// profile. Precedence: user override > detected (`/models`) > the profile's own
+/// value (bundled catalog or default). Only positive windows (>= 1024 tokens) are
+/// honored, so an empty/"auto" field leaves the catalog value untouched.
+pub(crate) fn apply_context_window_override(
+    profile: &mut model_catalog::ResolvedModelProfile,
+    override_window: Option<u32>,
+    detected_window: Option<u32>,
+) {
+    if let Some(window) = override_window.filter(|value| *value >= 1024) {
+        profile.context_tokens = window as usize;
+        profile.source = "user-override".to_string();
+    } else if let Some(window) = detected_window.filter(|value| *value >= 1024) {
+        profile.context_tokens = window as usize;
+        profile.source = "models-endpoint".to_string();
+    }
 }
 
 pub(crate) fn pick_chat_model<'a>(
@@ -365,6 +396,8 @@ fn default_provider_model(
         capabilities: infer_model_capabilities(provider_type, model_id),
         enabled: true,
         is_default_chat_model: true,
+        context_window_override: None,
+        detected_context_window: None,
     }
 }
 
@@ -424,4 +457,47 @@ fn normalize_model_capabilities(capabilities: Vec<String>) -> Vec<String> {
         normalized.insert(0, "text".to_string());
     }
     normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile(context_tokens: usize) -> model_catalog::ResolvedModelProfile {
+        model_catalog::ResolvedModelProfile {
+            model_id: "m".into(),
+            context_tokens,
+            output_tokens: 4096,
+            source: "models.dev".into(),
+            matched_provider: None,
+            matched_model: None,
+            tool_call: Some(true),
+            input_modalities: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn context_window_override_precedence() {
+        // No override / no detection -> catalog value untouched.
+        let mut none = profile(32_000);
+        apply_context_window_override(&mut none, None, None);
+        assert_eq!(none.context_tokens, 32_000);
+
+        // Detected (/models) beats the bundled catalog.
+        let mut detected = profile(32_000);
+        apply_context_window_override(&mut detected, None, Some(128_000));
+        assert_eq!(detected.context_tokens, 128_000);
+        assert_eq!(detected.source, "models-endpoint");
+
+        // A user override beats both detection and catalog.
+        let mut overridden = profile(32_000);
+        apply_context_window_override(&mut overridden, Some(200_000), Some(128_000));
+        assert_eq!(overridden.context_tokens, 200_000);
+        assert_eq!(overridden.source, "user-override");
+
+        // Sub-1024 values are treated as "auto" and ignored.
+        let mut tiny = profile(32_000);
+        apply_context_window_override(&mut tiny, Some(0), Some(500));
+        assert_eq!(tiny.context_tokens, 32_000);
+    }
 }

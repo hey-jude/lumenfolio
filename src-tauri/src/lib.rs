@@ -443,6 +443,10 @@ struct ModelProviderModelInput {
     capabilities: Option<Vec<String>>,
     enabled: Option<bool>,
     is_default_chat_model: Option<bool>,
+    #[serde(default)]
+    context_window_override: Option<u32>,
+    #[serde(default)]
+    detected_context_window: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -503,6 +507,8 @@ struct ModelProviderModelOutput {
     capabilities: Vec<String>,
     enabled: bool,
     is_default_chat_model: bool,
+    context_window_override: Option<u32>,
+    detected_context_window: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -520,12 +526,36 @@ struct OpenAiModelsResponse {
 #[derive(Deserialize)]
 struct OpenAiModelItem {
     id: String,
+    // Different OpenAI-compatible servers expose the context window under
+    // different keys (OpenRouter: context_length, vLLM: max_model_len, LM Studio:
+    // max_context_length). Capture whichever is present so we use the model's
+    // REAL window instead of a guessed default.
+    #[serde(default)]
+    context_length: Option<u64>,
+    #[serde(default)]
+    max_model_len: Option<u64>,
+    #[serde(default)]
+    max_context_length: Option<u64>,
+}
+
+impl OpenAiModelItem {
+    fn detected_context_window(&self) -> Option<u32> {
+        self.context_length
+            .or(self.max_model_len)
+            .or(self.max_context_length)
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value >= 1024)
+    }
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FetchProviderModelsOutput {
     model_ids: Vec<String>,
+    /// model_id → detected context window (tokens), for models whose `/models`
+    /// entry exposed it. The frontend stores this as each model's auto-detected
+    /// window (overridable by the user).
+    context_windows: std::collections::HashMap<String, u32>,
 }
 
 #[derive(Deserialize)]
@@ -596,6 +626,14 @@ struct StoredProviderModel {
     capabilities: Vec<String>,
     enabled: bool,
     is_default_chat_model: bool,
+    /// User-set context window (tokens). When present it overrides everything —
+    /// the authoritative "this model really has N tokens" escape hatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_window_override: Option<u32>,
+    /// Context window auto-detected from the provider's `/models` endpoint.
+    /// Used when there is no user override (beats the bundled catalog/default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detected_context_window: Option<u32>,
 }
 
 pub(crate) struct OpenAiCompatibleProvider {
@@ -3516,16 +3554,25 @@ async fn fetch_provider_models(
         .json::<OpenAiModelsResponse>()
         .await
         .map_err(|err| format!("Failed to decode model list response: {err}"))?;
-    let mut model_ids = parsed
-        .data
-        .into_iter()
-        .map(|item| item.id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .collect::<Vec<_>>();
+    let mut context_windows = std::collections::HashMap::new();
+    let mut model_ids = Vec::new();
+    for item in parsed.data {
+        let id = item.id.trim().to_string();
+        if id.is_empty() {
+            continue;
+        }
+        if let Some(window) = item.detected_context_window() {
+            context_windows.insert(id.clone(), window);
+        }
+        model_ids.push(id);
+    }
     model_ids.sort();
     model_ids.dedup();
 
-    Ok(FetchProviderModelsOutput { model_ids })
+    Ok(FetchProviderModelsOutput {
+        model_ids,
+        context_windows,
+    })
 }
 
 #[tauri::command]

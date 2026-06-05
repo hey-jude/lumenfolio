@@ -806,6 +806,10 @@ function createProviderModelDraft(providerType = 'openai-compatible', model = nu
     capabilities: normalizeCapabilities(model?.capabilities ?? inferModelCapabilities(providerType, modelId)),
     enabled: model?.enabled ?? true,
     isDefaultChatModel: model?.isDefaultChatModel ?? true,
+    // Context window: user override (authoritative) + value auto-detected from
+    // the provider's /models endpoint. Empty override = "auto".
+    contextWindowOverride: model?.contextWindowOverride ?? null,
+    detectedContextWindow: model?.detectedContextWindow ?? null,
   }
 }
 
@@ -872,6 +876,8 @@ function snapshotProviderForm(editKey = selectedProviderEditKey.value) {
       capabilities: [...normalizeCapabilities(model.capabilities)],
       enabled: model.enabled,
       isDefaultChatModel: model.key === providerForm.defaultModelKey,
+      contextWindowOverride: normalizeContextWindow(model.contextWindowOverride),
+      detectedContextWindow: normalizeContextWindow(model.detectedContextWindow),
     })),
     defaultModelKey: providerForm.defaultModelKey,
     apiKey: providerForm.apiKey,
@@ -1067,7 +1073,26 @@ function isEmptyProviderModelDraft(model) {
     && !String(model?.nickname || '').trim()
 }
 
-function mergeFetchedProviderModels(modelIds) {
+// Coerce a context-window field to a positive integer or null ("auto").
+function normalizeContextWindow(value) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 1024 ? Math.floor(parsed) : null
+}
+
+// Placeholder for the context-window override input: shows the auto-detected
+// window (from /models) when known, otherwise just "auto".
+function contextWindowPlaceholder(model) {
+  const detected = normalizeContextWindow(model?.detectedContextWindow)
+  return detected ? `${detected} · ${ui.value.contextWindowAuto}` : ui.value.contextWindowAuto
+}
+
+function mergeFetchedProviderModels(modelIds, contextWindows = {}) {
+  // Refresh the auto-detected window on models we already have (the server's
+  // /models value may have changed); never clobber a user override.
+  providerForm.models.forEach((model) => {
+    const detected = normalizeContextWindow(contextWindows[model.modelId])
+    if (detected) model.detectedContextWindow = detected
+  })
   const existingIds = new Set(
     providerForm.models
       .map((model) => String(model.modelId || '').trim().toLowerCase())
@@ -1086,6 +1111,7 @@ function mergeFetchedProviderModels(modelIds) {
       capabilities: inferModelCapabilities(providerForm.providerType, normalizedModelId),
       enabled: true,
       isDefaultChatModel: false,
+      detectedContextWindow: normalizeContextWindow(contextWindows[normalizedModelId]),
     }))
   })
 
@@ -1117,7 +1143,7 @@ async function fetchProviderModels() {
         apiKey: providerForm.apiKey || null,
       },
     })
-    const importedCount = mergeFetchedProviderModels(result?.modelIds || [])
+    const importedCount = mergeFetchedProviderModels(result?.modelIds || [], result?.contextWindows || {})
     persistCurrentProviderEdit()
     modelFetchStatus.value = 'succeeded'
     modelFetchMessage.value = importedCount > 0
@@ -4357,6 +4383,7 @@ onMounted(() => {
                   <span>{{ ui.defaultShort }}</span>
                   <span>{{ ui.modelNickname }}</span>
                   <span>{{ ui.modelId }}</span>
+                  <span>{{ ui.contextWindow }}</span>
                   <span>{{ ui.modelCapabilities }}</span>
                   <span>{{ ui.enabled }}</span>
                   <span></span>
@@ -4385,6 +4412,17 @@ onMounted(() => {
                   <label class="model-field-cell model-id-cell">
                     <span>{{ ui.modelId }}</span>
                     <input v-model="model.modelId" type="text" :placeholder="providerTypePreset.model || 'gpt-4o / deepseek-chat'" />
+                  </label>
+
+                  <label class="model-field-cell model-context-cell" :title="ui.contextWindowHint">
+                    <span>{{ ui.contextWindow }}</span>
+                    <input
+                      v-model.number="model.contextWindowOverride"
+                      type="number"
+                      min="1024"
+                      step="1024"
+                      :placeholder="contextWindowPlaceholder(model)"
+                    />
                   </label>
 
                   <div class="model-capability-cell" :aria-label="ui.modelCapabilities">
@@ -5182,10 +5220,10 @@ onMounted(() => {
 .model-table-head,
 .model-row {
   display: grid;
-  grid-template-columns: 48px minmax(140px, 1fr) minmax(190px, 1.1fr) minmax(260px, 1.25fr) 48px 34px;
+  grid-template-columns: 48px minmax(140px, 1fr) minmax(190px, 1.1fr) 116px minmax(260px, 1.25fr) 48px 34px;
   gap: 8px;
   align-items: center;
-  min-width: 760px;
+  min-width: 880px;
 }
 
 .model-table-head {
