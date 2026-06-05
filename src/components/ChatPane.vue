@@ -1334,6 +1334,17 @@ function focusSourceDoc(message, src) {
   if (citation) emit('citation-click', citation)
 }
 
+// The document that owns the currently-active citation, if any. Used to move the
+// SOURCES highlight to whichever paper the user last clicked into, instead of
+// always pinning it to the focus document.
+function activeSourceDocId(message) {
+  if (!props.activeCitationId) return null
+  const citation = (message.citations || []).find(
+    (item) => item.id === props.activeCitationId,
+  )
+  return citation?.documentId || null
+}
+
 // For a trace step that routed to another document via `documentId`, the target
 // document's short name — so the user sees the agent fan out across papers.
 function eventTargetDocName(event) {
@@ -1689,7 +1700,10 @@ function evidenceSourceLabel(source) {
                   v-for="src in answerSourceDocs(message)"
                   :key="`${message.id}-src-${src.id}`"
                   class="evidence-source-chip"
-                  :class="{ focus: src.isFocus }"
+                  :class="{
+                    focus: src.isFocus && activeSourceDocId(message) === null,
+                    active: activeSourceDocId(message) === src.id,
+                  }"
                   :title="src.name"
                   @click="focusSourceDoc(message, src)"
                 >{{ src.name }}</button>
@@ -2660,6 +2674,15 @@ function evidenceSourceLabel(source) {
 .evidence-source-chip.focus {
   border-color: rgba(106, 169, 255, 0.34);
   background: rgba(106, 169, 255, 0.12);
+  color: var(--text-primary);
+}
+
+/* Active = the source document the user clicked into (owns the active citation).
+   Gold, matching the active evidence chip, so "selected" reads the same way in
+   both rows. */
+.evidence-source-chip.active {
+  border-color: rgba(250, 204, 21, 0.45);
+  background: rgba(250, 204, 21, 0.12);
   color: var(--text-primary);
 }
 
