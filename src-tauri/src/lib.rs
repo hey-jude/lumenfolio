@@ -2272,6 +2272,8 @@ async fn run_ask_document(
             runtime::rag::WorkspaceManifest {
                 entries: Vec::new(),
                 document_ids: Vec::new(),
+                total_indexed: 0,
+                all_document_ids: Vec::new(),
             }
         })
     };
@@ -2281,6 +2283,25 @@ async fn run_ask_document(
         .iter()
         .map(String::as_str)
         .collect();
+    // Progressive disclosure: for a large library the unified loop does NOT inline
+    // the whole manifest. It gets a compact block (focus + @-referenced) plus
+    // `search_library`/`list_documents` tools, and may route to ANY indexed doc —
+    // so its dispatch whitelist is the full indexed set, not the capped manifest.
+    let library_is_large = workspace_manifest.is_large();
+    let unified_loop_manifest_text = if library_is_large {
+        workspace_manifest.to_prompt_block_compact()
+    } else {
+        workspace_manifest_text.clone()
+    };
+    let unified_visible_document_id_refs: Vec<&str> = if library_is_large {
+        workspace_manifest
+            .all_document_ids
+            .iter()
+            .map(String::as_str)
+            .collect()
+    } else {
+        visible_document_id_refs.clone()
+    };
 
     let selected_provider_id = input.model_provider_id.as_deref().unwrap_or("").trim();
     let provider_result = providers::resolve_chat_provider(
@@ -2465,8 +2486,9 @@ async fn run_ask_document(
                     app,
                     question,
                     document_id,
-                    visible_document_ids: &visible_document_id_refs,
-                    workspace_manifest: &workspace_manifest_text,
+                    visible_document_ids: &unified_visible_document_id_refs,
+                    workspace_manifest: &unified_loop_manifest_text,
+                    library_is_large,
                     session_context: &session_context,
                     provider,
                     activity_event_id: activity_event_id.as_deref(),

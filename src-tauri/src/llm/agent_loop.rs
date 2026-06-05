@@ -47,8 +47,12 @@ pub(crate) struct UnifiedLoopInput<'a> {
     pub(crate) visible_document_ids: &'a [&'a str],
     /// Pre-rendered workspace manifest (titles/dirs/abstracts) — the model's
     /// "library view", injected so it can answer library questions and route
-    /// cross-document tool calls.
+    /// cross-document tool calls. For a large library this is the COMPACT block
+    /// (focus + @-referenced only); the rest are discovered via tools.
     pub(crate) workspace_manifest: &'a str,
+    /// Large library: expose `search_library`/`list_documents` discovery tools
+    /// instead of relying on a fully-inlined manifest (progressive disclosure).
+    pub(crate) library_is_large: bool,
     /// Session memory block (recent turns / selection), already rendered.
     pub(crate) session_context: &'a str,
     pub(crate) provider: &'a OpenAiCompatibleProvider,
@@ -121,7 +125,7 @@ pub(crate) async fn run_unified_agent_loop(
         vision_enabled,
         max_quote_chars: agent_run.retrieval_run.context_budget.max_quote_chars,
     };
-    let tools = build_openai_tools(vision_enabled);
+    let tools = build_openai_tools(vision_enabled, ctx.library_is_large);
     let mut messages = build_initial_messages(&ctx, agent_run);
 
     let client = reqwest::Client::builder()
@@ -189,6 +193,33 @@ pub(crate) async fn run_unified_agent_loop(
             emit_activity(ctx.app, ctx.activity_event_id, start_event.clone());
             agent_run.trace.events.push(start_event);
 
+            // Workspace-level discovery tools (large library): list/search docs.
+            // They produce no citations — the model uses the ids they return to
+            // route a normal retrieval tool to a discovered document.
+            if is_library_tool(&call.function.name) {
+                let (rendered, count) = {
+                    let conn = ctx
+                        .database
+                        .conn
+                        .lock()
+                        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+                    execute_library_tool(&conn, &call.function.name, &args)
+                };
+                let result_event = runtime::agent::AgentTraceEvent::new(
+                    "tool_result",
+                    call.function.name.clone(),
+                    "completed",
+                    format!("{} result", call.function.name),
+                    format!("{} returned {count} documents", call.function.name),
+                    format!("unified_loop library tool={} results={count}", call.function.name),
+                )
+                .with_tool(call.function.name.clone(), args.clone());
+                emit_activity(ctx.app, ctx.activity_event_id, result_event.clone());
+                agent_run.trace.events.push(result_event);
+                messages.push(tool_result_message(&call.id, &rendered));
+                continue;
+            }
+
             let output = {
                 let conn = ctx
                     .database
@@ -228,21 +259,110 @@ pub(crate) async fn run_unified_agent_loop(
     finalize_answer(&ctx, agent_run, messages, &client, &endpoint).await
 }
 
-/// Build the OpenAI `tools` array from the RAG tool specs.
-fn build_openai_tools(vision_enabled: bool) -> Vec<serde_json::Value> {
-    runtime::rag::rag_tool_specs_for_capabilities(vision_enabled)
-        .into_iter()
-        .map(|spec| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": spec.name,
-                    "description": spec.description,
-                    "parameters": spec.input_schema,
-                }
+/// Build the OpenAI `tools` array from the RAG tool specs, plus the library
+/// discovery tools when the workspace is large (progressive disclosure).
+fn build_openai_tools(vision_enabled: bool, library_is_large: bool) -> Vec<serde_json::Value> {
+    let mut tools: Vec<serde_json::Value> =
+        runtime::rag::rag_tool_specs_for_capabilities(vision_enabled)
+            .into_iter()
+            .map(|spec| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "parameters": spec.input_schema,
+                    }
+                })
             })
-        })
-        .collect()
+            .collect();
+    if library_is_large {
+        tools.extend(library_discovery_tool_specs());
+    }
+    tools
+}
+
+/// The two workspace-discovery tools for a large library. They return a ranked
+/// list of documents (id/title/dir/abstract) — NOT evidence; the model then
+/// routes a normal retrieval tool to a discovered doc via its `documentId`.
+fn library_discovery_tool_specs() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "search_library",
+                "description": "Search the user's whole document library by topic to find which documents are relevant. Returns matching documents (id, title, folder, abstract). Use a document's id as the `documentId` argument on a retrieval tool to then read it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "What to look for across the library (topic, title, keywords)." },
+                        "limit": { "type": "integer", "description": "Max documents to return (default 10).", "minimum": 1, "maximum": 30 }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }),
+        serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "list_documents",
+                "description": "Browse the user's document library (most recently opened first). Returns documents (id, title, folder, abstract). Use when you need an overview of what is in the library rather than a topical search.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "limit": { "type": "integer", "description": "Max documents to return (default 15).", "minimum": 1, "maximum": 30 }
+                    }
+                }
+            }
+        }),
+    ]
+}
+
+/// Whether a tool name is one of the workspace-level discovery tools (handled
+/// directly in the loop rather than the per-document RAG executor).
+fn is_library_tool(name: &str) -> bool {
+    matches!(name, "search_library" | "list_documents")
+}
+
+/// Execute a library discovery tool: rank/list workspace documents and render
+/// the result as text for the model. Returns (rendered_text, hit_count).
+fn execute_library_tool(
+    conn: &rusqlite::Connection,
+    tool: &str,
+    args: &serde_json::Value,
+) -> (String, usize) {
+    let default_limit = if tool == "list_documents" { 15 } else { 10 };
+    let limit = args
+        .get("limit")
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize)
+        .unwrap_or(default_limit)
+        .clamp(1, 30);
+    let query = args
+        .get("query")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let hits = runtime::rag::search_workspace_documents(conn, query, limit, &[]).unwrap_or_default();
+    if hits.is_empty() {
+        return (format!("{tool} found no documents in the library."), 0);
+    }
+    let mut rendered = format!("{tool} found {} document(s):\n", hits.len());
+    for hit in &hits {
+        let dir = if hit.rel_dir.is_empty() {
+            String::new()
+        } else {
+            format!("{}/ ", hit.rel_dir)
+        };
+        rendered.push_str(&format!(
+            "- [{}] {}\"{}\" ({}p)\n",
+            hit.document_id, dir, hit.title, hit.page_count
+        ));
+        if !hit.summary.is_empty() {
+            rendered.push_str(&format!("    Abstract: {}\n", hit.summary));
+        }
+    }
+    (rendered, hits.len())
 }
 
 fn build_initial_messages(
@@ -431,6 +551,7 @@ async fn finalize_answer(
             .capabilities
             .iter()
             .any(|capability| capability == "vision"),
+        ctx.library_is_large,
     );
     let request = serde_json::json!({
         "model": ctx.provider.model,
@@ -554,9 +675,16 @@ mod tests {
         }
     }
 
+    fn tool_names(tools: &[serde_json::Value]) -> Vec<&str> {
+        tools
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect()
+    }
+
     #[test]
     fn build_openai_tools_maps_specs_to_function_shape() {
-        let tools = build_openai_tools(false);
+        let tools = build_openai_tools(false, false);
         assert!(!tools.is_empty());
         // Every entry is a function tool with a name + parameters object.
         for tool in &tools {
@@ -564,13 +692,32 @@ mod tests {
             assert!(tool["function"]["name"].is_string());
             assert!(tool["function"]["parameters"].is_object());
         }
-        let names: Vec<&str> = tools
-            .iter()
-            .filter_map(|tool| tool["function"]["name"].as_str())
-            .collect();
+        let names = tool_names(&tools);
         assert!(names.contains(&"search_chunks"));
         // Vision-only tools are excluded when vision is disabled.
         assert!(!names.contains(&"analyze_visual"));
+        // Library discovery tools only appear for a large library.
+        assert!(!names.contains(&"search_library"));
+        assert!(!names.contains(&"list_documents"));
+    }
+
+    #[test]
+    fn build_openai_tools_adds_discovery_tools_for_large_library() {
+        let names_owned: Vec<String> = build_openai_tools(false, true)
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names_owned.iter().any(|name| name == "search_chunks"));
+        assert!(names_owned.iter().any(|name| name == "search_library"));
+        assert!(names_owned.iter().any(|name| name == "list_documents"));
+    }
+
+    #[test]
+    fn library_tool_predicate_only_matches_discovery_tools() {
+        assert!(is_library_tool("search_library"));
+        assert!(is_library_tool("list_documents"));
+        assert!(!is_library_tool("search_chunks"));
+        assert!(!is_library_tool("open_table"));
     }
 
     #[test]
