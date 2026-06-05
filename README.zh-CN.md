@@ -80,6 +80,19 @@ Question
 
 这种设计让检索可以在本地低成本运行，不依赖 embedding 模型质量，也更容易审计。它并不是要替代所有向量检索场景，而是专门优化单篇论文精读：结构、页内上下文和可验证 citation 比模糊语义召回更重要。
 
+对于支持原生工具调用（native tool calling）的模型，整个过程是一个统一的 agent loop：检索与回答共享同一段不断增长的上下文，因此 agent 能始终“记得”自己检索过什么。不支持工具调用的模型会回退到规则驱动的检索路径，弱模型 / 本地模型照样可用。Agent 还具备工作区感知：它能看到你整个已索引的文献库、回答关于库本身的问题（例如“我哪篇论文是关于 X 的”）、并把检索路由到正确的文档；库很大时按需发现文档，而不是把它们全部塞进 prompt。
+
+## Agent 会话
+
+Agent 区是一个独立的多会话工作区，而不是绑在某一篇 PDF 上的聊天框。会话与文档解耦：
+
+- 可同时打开多个独立会话，用标签页切换。
+- 会话不绑定单篇 PDF —— 可以设置 / 切换它的焦点文档，并用 `@` 拉入其它论文。
+- 对话记忆按会话隔离，每条研究线索保留自己的上下文。
+- 笔记以浮层抽屉的形式与任意会话并存。
+
+阅读器的文档切换由左侧栏驱动：你在左侧选哪篇，阅读器就跟到哪篇。
+
 ## 跨文档对话（@ 引用）
 
 阅读往往不止于一篇论文。在 Lumenfolio 中，只需在输入框里输入 `@`，就能把其它已索引的论文拉进当前对话。
@@ -89,7 +102,7 @@ Question
 - 输入 `@` 打开论文选择器，按标题搜索并选中要引用的论文。
 - 一次提问最多可引用 4 篇其它论文，每个引用都会变成一个可移除的标签。
 - Agent 会同时从被引用论文和当前论文取证，因此回答可以跨文档比较方法、对比结果并给出 citation。
-- Citation 依然可追溯：每条引用段落都带有来源文档、页码和 bbox，被引用的文档会以标签页打开，方便跳回精确位置。
+- Citation 依然可追溯：每条引用段落都带有来源文档、页码和 bbox，点击即可跳回精确的来源位置。
 
 这样，比较与综合就留在同一个证据可追溯的循环里，而不必在多个独立聊天之间来回复制文本。
 
@@ -132,15 +145,18 @@ Lumenfolio 的笔记不是脱离原文的普通文本片段，而是绑定到 PD
 ## 功能亮点
 
 - 三栏阅读工作流：
-  - 左侧：工作区目录与递归 PDF 列表
+  - 左侧：工作区文件夹与每个文件夹内的 PDF
   - 中间：PDF 阅读器、选区工具、翻译控制
-  - 右侧：文档聊天、证据链、Agent Trace 和笔记
+  - 右侧：独立 Agent 会话、证据链、Agent Trace 和浮层笔记抽屉
+- 独立的多会话 Agent 工作区（会话与文档解耦）
 - 本地 PDF 索引，持久化到 SQLite
-- 面向单文档的 agentic Q&A
+- 带 citation 的 agentic Q&A，支持单文档与跨文档
+- 工作区感知检索：agent 能看到并回答关于整个已索引库的问题，库大时按需发现文档
+- 面向支持工具调用模型的 native tool-calling agent loop，弱 / 本地模型自动回退到规则路径
 - 跨文档对话：一次提问可 `@` 引用至多 4 篇其它已索引论文
 - 带 citation 的回答，支持 page/bbox 跳转
 - Chat 侧 evidence chain 与可折叠 agent trace
-- Provider 化聊天和翻译配置
+- Provider 化聊天和翻译配置；每个模型的上下文窗口自动从 provider 探测（可手动覆盖）
 - 表格 / 视觉证据参与检索，支持视觉裁剪和 TSR-ready 表格证据
 - macOS Apple Silicon 和 Windows 版本支持扫描 / 图片型 PDF 本地 OCR
 - 基于 PDFMathTranslate sidecar 的版面级 PDF 翻译
@@ -167,6 +183,7 @@ Lumenfolio 是一个 Tauri 2 + Vue 3 桌面应用。
 - `src-tauri/src/lib.rs`：Tauri 命令与运行时入口
 - `src-tauri/src/runtime/rag/`：检索与证据组装
 - `src-tauri/src/runtime/agent/`：turn runner、policy gate、session memory、ledger、trace
+- `src-tauri/src/llm/agent_loop.rs`：统一的 native tool-calling agent loop
 - `src-tauri/src/pdf2zh_sidecar/`：PDF 翻译 sidecar 管理
 - `docs/`：产品、架构与 runtime 方案文档
 
@@ -174,11 +191,14 @@ Lumenfolio 是一个 Tauri 2 + Vue 3 桌面应用。
 
 已实现：
 
-- 工作区目录选择与递归 PDF 发现
+- 工作区文件夹选择与单层 PDF 发现（子目录需单独添加）
 - 本地 PDF 读取、索引与 SQLite 持久化
 - 阅读态选区、高亮与翻译流程
-- 面向单文档的 Agentic 检索问答链路
+- 独立的多会话 Agent 工作区
+- Agentic 检索问答链路：native tool-calling 路径 + 规则回退
+- 面向整个已索引库的工作区感知检索，库大时按需发现文档
 - 跨多篇已索引论文的 `@` 引用对话
+- 按模型识别上下文窗口并支持手动覆盖
 - 带页码 / bbox 的 citation 跳转
 - Chat 侧 evidence chain 与 trace 展示
 - 本地笔记与 PDF 锚点

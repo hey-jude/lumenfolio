@@ -80,6 +80,19 @@ Question
 
 This makes retrieval cheap to run locally, independent from embedding model quality, and easier to audit. The goal is not to replace every vector-search use case; it is to optimize for single-document scholarly reading where structure, page context, and verifiable citations matter.
 
+On models that support native tool calling, this runs as a single agent loop: retrieval and answering share one growing context, so the agent stays aware of everything it has explored. Models without tool calling fall back to a rule-driven retrieval path, so weaker or local models keep working. The agent is also workspace-aware — it can see your whole indexed library, answer questions about it (for example "which of my papers is about X"), and route retrieval to the right document; for large libraries it discovers documents on demand instead of loading them all into the prompt.
+
+## Agent Sessions
+
+The agent area is an independent multi-session workspace, not a chat box bolted onto one PDF. Sessions are decoupled from documents:
+
+- Open multiple independent sessions and switch between them with tabs.
+- A session isn't bound to a single PDF — set or change its focus document, and pull in other papers with `@`.
+- Conversation memory is per session, so each line of inquiry keeps its own context.
+- Notes are available as a floating drawer alongside any session.
+
+Document switching for the reader is driven by the left sidebar; the reader follows whichever document you select.
+
 ## Cross-Document Chat (@-mention)
 
 Reading rarely stays inside a single paper. Lumenfolio lets you pull other indexed papers into the current chat by typing `@` in the composer.
@@ -89,7 +102,7 @@ Reading rarely stays inside a single paper. Lumenfolio lets you pull other index
 - Type `@` to open the paper picker, then search by title and pick a paper to reference.
 - Mention up to 4 other papers in a single question; each mention becomes a chip you can remove.
 - The agent retrieves evidence from the mentioned papers alongside the current one, so answers can compare methods, contrast results, and cite across documents.
-- Citations stay grounded: each cited passage still carries its source document, page, and bbox, and referenced documents open as tabs so you can jump back to the exact location.
+- Citations stay grounded: each cited passage still carries its source document, page, and bbox, so you can jump straight back to the exact source location.
 
 This keeps comparison and synthesis inside the same evidence-grounded loop instead of forcing you to copy text between separate chats.
 
@@ -132,14 +145,17 @@ The notes workflow is designed for paper reading:
 ## Features
 
 - Three-pane reading workspace:
-  - left: workspace roots and recursive PDF list
+  - left: workspace folders and the PDFs in each folder
   - center: PDF reader, selection tools, translation controls
-  - right: document chat, evidence chain, agent trace, and notes
+  - right: independent agent sessions, evidence chain, agent trace, and a floating notes drawer
+- Independent multi-session agent workspace (sessions decoupled from documents)
 - Local PDF indexing into SQLite
-- Single-document agentic Q&A with citations
+- Agentic Q&A with citations, single- or cross-document
+- Workspace-aware retrieval: the agent can see and answer about your whole indexed library, with on-demand discovery for large libraries
+- Native tool-calling agent loop for capable models, with a rule-driven fallback for weaker/local models
 - Cross-document chat: `@`-mention up to 4 other indexed papers in one question
 - Evidence chain and foldable agent trace in chat
-- Provider-based chat and translation configuration
+- Provider-based chat and translation configuration, with per-model context window auto-detected from the provider (manual override available)
 - Visual/table-aware retrieval path with rendered crops and TSR-ready table evidence
 - Local OCR for scanned/image-only PDFs on macOS Apple Silicon and Windows
 - PDFMathTranslate-based sidecar for layout-aware translation
@@ -166,6 +182,7 @@ Key paths:
 - `src-tauri/src/lib.rs`: Tauri command surface and runtime setup
 - `src-tauri/src/runtime/rag/`: retrieval and evidence assembly
 - `src-tauri/src/runtime/agent/`: turn runner, policy gate, session memory, ledger, trace
+- `src-tauri/src/llm/agent_loop.rs`: unified native tool-calling agent loop
 - `src-tauri/src/pdf2zh_sidecar/`: PDF translation sidecar manager
 - `docs/`: product, architecture, and runtime plans
 
@@ -173,11 +190,14 @@ Key paths:
 
 Implemented today:
 
-- Workspace folder selection and recursive PDF discovery
+- Workspace folder selection with one-level PDF discovery (subfolders are added separately)
 - Local PDF reading and indexing with SQLite persistence
 - Reader-side selection, highlighting, and translation flow
-- Single-document agentic retrieval loop
+- Independent multi-session agent workspace
+- Agentic retrieval loop with a native tool-calling path and rule-based fallback
+- Workspace-aware retrieval across the indexed library, with large-library on-demand discovery
 - Cross-document `@`-mention chat across multiple indexed papers
+- Per-model context window detection and override
 - Citation-aware answers with page/bbox jump support
 - Evidence chain and agent trace metadata in chat
 - Local notes with PDF anchors
