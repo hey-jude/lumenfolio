@@ -1254,7 +1254,31 @@ function evidenceItems(message) {
 }
 
 function evidencePreviewItems(message) {
-  return evidenceItems(message).slice(0, 4)
+  const items = evidenceItems(message)
+  const docs = answerSourceDocs(message)
+  // Single-document answer: the simple first-N preview.
+  if (docs.length <= 1) return items.slice(0, 4)
+  // Multi-document answer: guarantee each source document shows at least its
+  // first citation, so cross-document evidence is never buried under the "+N".
+  const cap = Math.max(4, docs.length)
+  const firstPerDoc = []
+  const seenDocs = new Set()
+  for (const item of items) {
+    const docId = resolveCitation(message, item)?.documentId
+    if (docId && !seenDocs.has(docId)) {
+      seenDocs.add(docId)
+      firstPerDoc.push(item)
+    }
+  }
+  const result = []
+  const usedIds = new Set()
+  for (const item of [...firstPerDoc, ...items]) {
+    if (usedIds.has(item.citationId)) continue
+    usedIds.add(item.citationId)
+    result.push(item)
+    if (result.length >= cap) break
+  }
+  return result
 }
 
 function resolveCitation(message, evidence) {
@@ -1300,6 +1324,14 @@ function answerSourceDocs(message) {
       isFocus: id === props.document?.id,
     }
   })
+}
+
+// Clicking a SOURCES chip jumps to that document's first cited evidence (opening
+// its tab first for cross-document citations, via the parent's citation handler),
+// so the user can inspect a paper the answer drew on even when it isn't in focus.
+function focusSourceDoc(message, src) {
+  const citation = (message.citations || []).find((item) => item.documentId === src.id)
+  if (citation) emit('citation-click', citation)
 }
 
 // For a trace step that routed to another document via `documentId`, the target
@@ -1653,13 +1685,14 @@ function evidenceSourceLabel(source) {
             <div v-if="evidenceItems(message).length" class="evidence-group">
               <div v-if="answerSourceDocs(message).length" class="evidence-sources">
                 <span class="evidence-sources-label">{{ ui.sources }}</span>
-                <span
+                <button
                   v-for="src in answerSourceDocs(message)"
                   :key="`${message.id}-src-${src.id}`"
                   class="evidence-source-chip"
                   :class="{ focus: src.isFocus }"
                   :title="src.name"
-                >{{ src.name }}</span>
+                  @click="focusSourceDoc(message, src)"
+                >{{ src.name }}</button>
               </div>
               <div class="evidence-strip">
                 <span class="evidence-strip-label">{{ ui.evidence }}</span>
@@ -2611,6 +2644,17 @@ function evidenceSourceLabel(source) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.evidence-source-chip:hover {
+  border-color: rgba(106, 169, 255, 0.45);
+  color: var(--text-primary);
 }
 
 .evidence-source-chip.focus {

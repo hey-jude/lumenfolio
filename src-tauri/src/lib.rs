@@ -1921,6 +1921,52 @@ fn ask_document_stream(input: AskDocumentInput, app: tauri::AppHandle) -> Result
     Ok(())
 }
 
+/// Whether the question explicitly names one of the OTHER (non-focus) workspace
+/// documents — by its filename stem or its (distinctive) title. When it does, the
+/// focus document's "current view" is noise: the user is asking about a different
+/// paper, so seeding evidence from the page they happen to be looking at floods
+/// the evidence with the wrong document. We use this to suppress current-view
+/// seeding and let retrieval route to the named document instead.
+fn question_targets_non_focus_document(
+    conn: &Connection,
+    question: &str,
+    focus_document_id: &str,
+    visible_document_ids: &[&str],
+) -> bool {
+    let normalized = question.to_lowercase();
+    for &id in visible_document_ids {
+        if id == focus_document_id {
+            continue;
+        }
+        let Some((title, path)) = conn
+            .query_row(
+                "SELECT COALESCE(NULLIF(short_title, ''), title), path
+                 FROM documents WHERE id = ?1 LIMIT 1",
+                rusqlite::params![id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .ok()
+        else {
+            continue;
+        };
+        // The filename the user most likely typed (e.g. "forge_ieee_preprint").
+        let stem = std::path::Path::new(&path)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        if stem.chars().count() >= 4 && normalized.contains(&stem) {
+            return true;
+        }
+        // Or a distinctive document title spelled out in the question.
+        let title = title.trim().to_lowercase();
+        if title.chars().count() >= 8 && normalized.contains(&title) {
+            return true;
+        }
+    }
+    false
+}
+
 async fn current_view_decision_for_input(
     question: &str,
     input: &AskDocumentInput,
@@ -2294,13 +2340,45 @@ async fn run_ask_document(
         input.page,
         input.selected_text.as_deref(),
     )?;
-    let current_view_decision = current_view_decision_for_input(
-        question,
-        &input,
-        current_view_metadata.as_ref(),
-        provider_result.as_ref().ok().map(|(provider, _)| provider),
-    )
-    .await;
+    // If the question explicitly names another workspace document, the focus
+    // document's current page is noise — suppress current-view seeding so the
+    // retrieval loop routes to the named document instead of flooding the
+    // evidence with the page the user happens to be viewing. (Selected text is an
+    // explicit current-view intent and is handled inside the decision fn, so this
+    // only matters for the no-selection case.)
+    let targets_other_document = {
+        let conn = database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        question_targets_non_focus_document(
+            &conn,
+            question,
+            document_id,
+            &visible_document_id_refs,
+        )
+    };
+    let current_view_decision = if targets_other_document
+        && input
+            .selected_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        log::info!(
+            "Suppressing current-view seeding: question names a non-focus document"
+        );
+        None
+    } else {
+        current_view_decision_for_input(
+            question,
+            &input,
+            current_view_metadata.as_ref(),
+            provider_result.as_ref().ok().map(|(provider, _)| provider),
+        )
+        .await
+    };
     let current_view_event = current_view_decision.as_ref().map(|decision| {
         runtime::agent::AgentTraceEvent::new(
             "judge_result",
