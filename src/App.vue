@@ -2938,7 +2938,9 @@ function scheduleDocumentVisualIndex(doc) {
       const target = allDocs.value.find((item) => item.id === doc.id) || doc
       target.visualIndexStatus = 'failed'
       target.visualIndexError = err?.message || String(err)
-      workspaceError.value = `Visual index failed: ${target.visualIndexError}`
+      // Visual indexing (tables/figures) is an enhancement on top of a usable text
+      // index — a failure must NOT raise the global red error bar. It's recorded
+      // on the document for a quiet indicator only.
       visualIndexRuns.delete(doc.id)
     })
 }
@@ -2951,9 +2953,8 @@ function handleVisualIndexEvent(payload) {
   target.visualIndexStatus = payload.status || target.visualIndexStatus || 'pending'
   target.visualIndexVersion = Number(payload.version || target.visualIndexVersion || 0)
   target.visualIndexError = payload.error || ''
-  if (target.visualIndexStatus === 'failed' && target.visualIndexError) {
-    workspaceError.value = `Visual index failed: ${target.visualIndexError}`
-  }
+  // A visual-index failure is recorded on the document but never raises the global
+  // red error bar — the text index is what makes the document usable.
   if (['succeeded', 'failed', 'cancelled'].includes(target.visualIndexStatus)) {
     visualIndexRuns.delete(documentId)
   }
