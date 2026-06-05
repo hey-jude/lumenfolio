@@ -36,6 +36,17 @@ const UNIFIED_TOOL_ROUND_TIMEOUT_SECS: u64 = 90;
 const DEFAULT_MAX_TOOL_ROUNDS: u32 = 8;
 /// Hard clamp so a stray `max_retrieval_steps` can't run the loop forever.
 const MAX_TOOL_ROUNDS_CLAMP: u32 = 12;
+/// Rough chars-per-token for the context-budget estimate. Intentionally low (so
+/// it OVER-estimates tokens) — we'd rather compact a little early than overflow.
+const CHARS_PER_TOKEN: usize = 3;
+/// The most recent messages are never pruned — keeps the last couple of tool
+/// rounds (and the question) intact so the model still has fresh evidence.
+const UNIFIED_KEEP_RECENT_MESSAGES: usize = 8;
+/// Floor for the tool-history char budget, so an odd/small model budget never
+/// prunes almost everything.
+const MIN_HISTORY_CHARS: usize = 6_000;
+/// Placeholder swapped in for an elided old tool result.
+const ELIDED_TOOL_RESULT: &str = "[earlier tool result elided to fit the context window]";
 
 pub(crate) struct UnifiedLoopInput<'a> {
     pub(crate) input: &'a AskDocumentInput,
@@ -141,8 +152,12 @@ pub(crate) async fn run_unified_agent_loop(
         .max_retrieval_steps
         .unwrap_or(DEFAULT_MAX_TOOL_ROUNDS)
         .clamp(1, MAX_TOOL_ROUNDS_CLAMP);
+    // Keep the accumulating tool history within the model's context window — a
+    // long tool-calling turn would otherwise overflow a small-context model.
+    let char_budget = history_char_budget(&agent_run.retrieval_run.context_budget);
 
     for round in 0..max_rounds {
+        compact_history(ctx.app, ctx.activity_event_id, agent_run, &mut messages, char_budget);
         let request = serde_json::json!({
             "model": ctx.provider.model,
             "messages": messages,
@@ -280,6 +295,107 @@ fn build_openai_tools(vision_enabled: bool, library_is_large: bool) -> Vec<serde
         tools.extend(library_discovery_tool_specs());
     }
     tools
+}
+
+/// Conservative char budget for the accumulating tool history, derived from the
+/// model's context window: reserve the output budget, then keep ~70% headroom for
+/// the system/question/answer. Floored so a tiny budget never prunes everything.
+fn history_char_budget(budget: &crate::model_catalog::ModelContextBudget) -> usize {
+    let history_tokens = budget
+        .model_context_tokens
+        .saturating_sub(budget.model_output_tokens)
+        .saturating_mul(7)
+        / 10;
+    history_tokens
+        .saturating_mul(CHARS_PER_TOKEN)
+        .max(MIN_HISTORY_CHARS)
+}
+
+/// Rough character size of the message history (content + tool-call args, with a
+/// small per-message overhead). Only used to decide WHEN to compact.
+fn estimate_message_chars(messages: &[serde_json::Value]) -> usize {
+    messages
+        .iter()
+        .map(|message| {
+            let mut chars = message
+                .get("content")
+                .and_then(|value| value.as_str())
+                .map(str::len)
+                .unwrap_or(0);
+            if let Some(calls) = message.get("tool_calls").and_then(|value| value.as_array()) {
+                for call in calls {
+                    let function = call.get("function");
+                    chars += function
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|value| value.as_str())
+                        .map(str::len)
+                        .unwrap_or(0);
+                    chars += function
+                        .and_then(|f| f.get("name"))
+                        .and_then(|value| value.as_str())
+                        .map(str::len)
+                        .unwrap_or(0);
+                }
+            }
+            chars + 16
+        })
+        .sum()
+}
+
+/// Prune the OLDEST tool-result messages — replacing their content with a short
+/// placeholder, but keeping the assistant/tool message structure intact so each
+/// tool result still pairs with its `tool_call_id` — until the history fits
+/// `char_budget`. The most recent `UNIFIED_KEEP_RECENT_MESSAGES` messages are
+/// never touched (fresh evidence stays whole). Returns how many were elided.
+fn compact_messages_to_budget(messages: &mut [serde_json::Value], char_budget: usize) -> usize {
+    if estimate_message_chars(messages) <= char_budget {
+        return 0;
+    }
+    let keep_from = messages.len().saturating_sub(UNIFIED_KEEP_RECENT_MESSAGES);
+    let mut pruned = 0;
+    for index in 0..keep_from {
+        if estimate_message_chars(messages) <= char_budget {
+            break;
+        }
+        let is_tool = messages[index].get("role").and_then(|value| value.as_str()) == Some("tool");
+        if !is_tool {
+            continue;
+        }
+        let already_elided = messages[index].get("content").and_then(|value| value.as_str())
+            == Some(ELIDED_TOOL_RESULT);
+        if already_elided {
+            continue;
+        }
+        messages[index]["content"] = serde_json::Value::String(ELIDED_TOOL_RESULT.to_string());
+        pruned += 1;
+    }
+    pruned
+}
+
+/// Compact `messages` to fit `char_budget` and, if anything was elided, record a
+/// trace event so the compaction is visible in the Debug trace.
+fn compact_history(
+    app: &tauri::AppHandle,
+    activity_event_id: Option<&str>,
+    agent_run: &mut runtime::agent::AgentRunResult,
+    messages: &mut [serde_json::Value],
+    char_budget: usize,
+) {
+    let pruned = compact_messages_to_budget(messages, char_budget);
+    if pruned == 0 {
+        return;
+    }
+    log::info!("unified_loop compacted {pruned} old tool result(s) to fit the context window");
+    let event = runtime::agent::AgentTraceEvent::new(
+        "context_compacted",
+        "generate_answer",
+        "completed",
+        "Compacted context",
+        format!("Elided {pruned} older tool result(s) to fit the context window"),
+        format!("unified_loop compacted {pruned} old tool results"),
+    );
+    emit_activity(app, activity_event_id, event.clone());
+    agent_run.trace.events.push(event);
 }
 
 /// The two workspace-discovery tools for a large library. They return a ranked
@@ -525,10 +641,21 @@ async fn send_tool_round(
 async fn finalize_answer(
     ctx: &UnifiedLoopInput<'_>,
     agent_run: &mut runtime::agent::AgentRunResult,
-    messages: Vec<serde_json::Value>,
+    mut messages: Vec<serde_json::Value>,
     client: &reqwest::Client,
     endpoint: &str,
 ) -> Result<AskAnswerResult, String> {
+    // The final answer call sends the whole history — compact it one last time so
+    // it stays within the model's context window even after a long tool loop.
+    let char_budget = history_char_budget(&agent_run.retrieval_run.context_budget);
+    compact_history(
+        ctx.app,
+        ctx.activity_event_id,
+        agent_run,
+        &mut messages,
+        char_budget,
+    );
+
     if let Some(event_id) = ctx.activity_event_id {
         let _ = ctx.app.emit(
             "lumenfolio://agent-activity",
@@ -783,5 +910,73 @@ mod tests {
         assert_eq!(message["role"], "tool");
         assert_eq!(message["tool_call_id"], "call_1");
         assert_eq!(message["content"], "evidence text");
+    }
+
+    fn round_messages(rounds: usize, tool_chars: usize) -> Vec<serde_json::Value> {
+        let big = "x".repeat(tool_chars);
+        let mut messages = vec![
+            serde_json::json!({ "role": "system", "content": "sys" }),
+            serde_json::json!({ "role": "user", "content": "question" }),
+        ];
+        for index in 0..rounds {
+            let id = format!("call_{index}");
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": serde_json::Value::Null,
+                "tool_calls": [{
+                    "id": id,
+                    "type": "function",
+                    "function": { "name": "search_chunks", "arguments": "{}" }
+                }]
+            }));
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": id,
+                "content": big,
+            }));
+        }
+        messages
+    }
+
+    #[test]
+    fn compaction_noop_when_within_budget() {
+        let mut messages = round_messages(2, 50);
+        let pruned = compact_messages_to_budget(&mut messages, 10_000_000);
+        assert_eq!(pruned, 0);
+    }
+
+    #[test]
+    fn compaction_elides_old_tool_results_and_keeps_recent() {
+        let mut messages = round_messages(6, 2_000);
+        let before = estimate_message_chars(&messages);
+        let pruned = compact_messages_to_budget(&mut messages, 5_000);
+        assert!(pruned > 0, "must prune when over budget");
+        assert!(estimate_message_chars(&messages) < before);
+        // System + question are never touched.
+        assert_eq!(messages[0]["content"], "sys");
+        assert_eq!(messages[1]["content"], "question");
+        // The most recent tool result stays whole (recent window preserved).
+        let last_tool = messages
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "tool")
+            .expect("a tool message");
+        assert_ne!(last_tool["content"].as_str().unwrap(), ELIDED_TOOL_RESULT);
+        // An early tool result was elided.
+        assert_eq!(messages[3]["content"], ELIDED_TOOL_RESULT);
+        // Assistant tool_calls structure is preserved (tool_call_id pairing intact).
+        assert_eq!(messages[2]["role"], "assistant");
+        assert!(messages[2]["tool_calls"].is_array());
+    }
+
+    #[test]
+    fn history_char_budget_reserves_output_and_has_floor() {
+        let budget = crate::model_catalog::ModelContextBudget::from_model_limits(32_000, 4_000, "t");
+        let chars = history_char_budget(&budget);
+        assert!(chars >= MIN_HISTORY_CHARS);
+        assert!(chars < 32_000 * CHARS_PER_TOKEN);
+        // A degenerate budget still yields at least the floor.
+        let tiny = crate::model_catalog::ModelContextBudget::from_model_limits(1, 1, "t");
+        assert!(history_char_budget(&tiny) >= MIN_HISTORY_CHARS);
     }
 }
