@@ -2548,6 +2548,7 @@ async fn run_ask_document(
         &input,
         &agent_run,
         &provider,
+        &workspace_manifest_text,
         app,
         activity_event_id.as_deref(),
     )
