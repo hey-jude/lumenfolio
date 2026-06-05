@@ -1106,7 +1106,7 @@ fn image_file_data_url(path: &Path) -> Result<String, String> {
     ))
 }
 
-pub(super) fn apply_judge_tool_output(
+pub(crate) fn apply_judge_tool_output(
     agent_run: &mut runtime::agent::AgentRunResult,
     output: &runtime::rag::RagToolExecutionOutput,
 ) -> (usize, usize) {

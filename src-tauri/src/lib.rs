@@ -2369,24 +2369,59 @@ async fn run_ask_document(
         agent_run.trace.events.insert(0, event);
     }
 
+    // The unified loop produces the answer itself (retrieval + answering share one
+    // growing context). When it runs, we skip the M4 judge AND the separate answer
+    // generation below. `None` means we fall through to the legacy M3+M4 path.
+    let mut unified_answer: Option<AskAnswerResult> = None;
     if let Ok((provider, _)) = provider_result.as_ref() {
-        if let Err(err) = agent_judge::improve_retrieval_with_llm_judge(
-            agent_judge::LlmJudgeLoopInput {
-                input: &input,
-                database,
-                app: Some(app),
-                question,
-                document_id,
-                visible_document_ids: &visible_document_id_refs,
-                workspace_manifest: &workspace_manifest_text,
-                provider,
-                activity_event_id: activity_event_id.as_deref(),
-            },
-            &mut agent_run,
-        )
-        .await
-        {
-            log::warn!("LLM answerability judge skipped: {err}");
+        // Strong (native tool-calling) models go through the unified agent loop.
+        // Any failure degrades gracefully to the existing M4 judge + answer path.
+        if llm::agent_loop::should_use_unified_loop(provider, &input) {
+            // Clone the session memory block up front so the loop can borrow
+            // `agent_run` mutably (to accumulate citations) without conflicting.
+            let session_context = agent_run.session_context.clone();
+            match llm::agent_loop::run_unified_agent_loop(
+                llm::agent_loop::UnifiedLoopInput {
+                    input: &input,
+                    database,
+                    app,
+                    question,
+                    document_id,
+                    visible_document_ids: &visible_document_id_refs,
+                    workspace_manifest: &workspace_manifest_text,
+                    session_context: &session_context,
+                    provider,
+                    activity_event_id: activity_event_id.as_deref(),
+                },
+                &mut agent_run,
+            )
+            .await
+            {
+                Ok(result) => unified_answer = Some(result),
+                Err(err) => {
+                    log::warn!("Unified agent loop failed; falling back to M4 judge: {err}");
+                }
+            }
+        }
+        if unified_answer.is_none() {
+            if let Err(err) = agent_judge::improve_retrieval_with_llm_judge(
+                agent_judge::LlmJudgeLoopInput {
+                    input: &input,
+                    database,
+                    app: Some(app),
+                    question,
+                    document_id,
+                    visible_document_ids: &visible_document_id_refs,
+                    workspace_manifest: &workspace_manifest_text,
+                    provider,
+                    activity_event_id: activity_event_id.as_deref(),
+                },
+                &mut agent_run,
+            )
+            .await
+            {
+                log::warn!("LLM answerability judge skipped: {err}");
+            }
         }
     } else if let Err(err) = provider_result.as_ref() {
         let judge_required = !agent_judge::has_image_context(&input)
@@ -2445,114 +2480,128 @@ async fn run_ask_document(
 
     let retrieval_budget_exhausted = agent_judge::retrieval_budget_exhausted(&agent_run);
     let retrieval_attempt_count = agent_judge::retrieval_attempt_count(&agent_run);
-    // Refuse with the "insufficient evidence" message ONLY when the retrieval loop
-    // is neither answerable NOR has enough accumulated evidence for a best-effort,
-    // caveated answer. When best-effort applies, fall through to the normal answer
-    // generator (which is told to state its limits) so open-ended questions degrade
-    // to "here's what I can tell, with stated uncertainty" instead of refusing.
-    if !agent_judge::has_image_context(&input)
-        && !agent_judge::retrieval_is_answerable(&agent_run)
-        && !agent_judge::should_answer_best_effort(&agent_run)
-    {
-        let answer = insufficient_evidence_answer(question, &agent_run, input.locale.as_deref());
-        runtime::agent::record_completed_turn(
-            agent_sessions,
-            runtime::agent::CompletedTurnRecord {
-                session_key: &session_id,
-                provider_id: if selected_provider_id.is_empty() {
-                    None
-                } else {
-                    Some(selected_provider_id)
-                },
-                question,
-                answer: &answer,
-                selected_text: input.selected_text.as_deref(),
-                citations: &agent_run.retrieval_run.citations,
-                trace: &agent_run.trace,
-            },
-        );
-        if let Err(err) = persist_chat_turn(
-            database,
-            ChatTurnPersistInput {
-                turn_id: activity_event_id.as_deref(),
-                session_id: &session_id,
-                document_id,
-                provider_id: if selected_provider_id.is_empty() {
-                    None
-                } else {
-                    Some(selected_provider_id)
-                },
-                model_key: input.model_key.as_deref(),
-                provider_label: "Local retrieval",
-                user_message: question,
-                assistant_answer: &answer,
-                reasoning_content: None,
-                selected_text: input.selected_text.as_deref(),
-                image_data_url: input.image_data_url.as_deref(),
-                citations: &agent_run.retrieval_run.citations,
-                claims: &[],
-                retrieval_trace: &agent_run.trace,
-                referenced_document_ids: &reference_document_ids,
-            },
-        ) {
-            log::warn!("Failed to persist insufficient-evidence chat turn: {err}");
-        }
-        return Ok(AskDocumentOutput {
-            answer,
-            reasoning_content: None,
-            provider: "Local retrieval".to_string(),
-            claims: Vec::new(),
-            citations: agent_run.retrieval_run.citations,
-            retrieval_trace: agent_run.trace,
-            can_continue_retrieval: false,
-            retrieval_attempt_count,
-            retrieval_budget_exhausted,
-        });
-    }
+    // The unified loop already produced (and streamed) its answer. The refusal /
+    // best-effort gating and the separate answer generator below apply only to the
+    // legacy M3+M4 fallback path. `provider_label` is needed by both paths for
+    // persistence/output, so derive it once without consuming `provider_result`.
+    let provider_label = provider_result
+        .as_ref()
+        .map(|(_, label)| label.clone())
+        .unwrap_or_else(|_| "Local retrieval".to_string());
 
-    // We're answering. If the gate never reached "answerable" (e.g. the judge
-    // timed out) but we have enough evidence to answer best-effort, stamp the gate
-    // so the UI shows "answered with available evidence" instead of "insufficient".
-    if !agent_judge::has_image_context(&input)
-        && agent_judge::should_answer_best_effort(&agent_run)
-    {
-        for gate in [
-            &mut agent_run.retrieval_run.trace.finalize_gate,
-            &mut agent_run.trace.finalize_gate,
-        ] {
-            if let Some(object) = gate.as_object_mut() {
-                object.insert("bestEffort".to_string(), serde_json::Value::Bool(true));
+    let answer_result = if let Some(result) = unified_answer {
+        result
+    } else {
+        // Refuse with the "insufficient evidence" message ONLY when the retrieval
+        // loop is neither answerable NOR has enough accumulated evidence for a
+        // best-effort, caveated answer. When best-effort applies, fall through to
+        // the normal answer generator (told to state its limits) so open-ended
+        // questions degrade to "here's what I can tell, with stated uncertainty".
+        if !agent_judge::has_image_context(&input)
+            && !agent_judge::retrieval_is_answerable(&agent_run)
+            && !agent_judge::should_answer_best_effort(&agent_run)
+        {
+            let answer =
+                insufficient_evidence_answer(question, &agent_run, input.locale.as_deref());
+            runtime::agent::record_completed_turn(
+                agent_sessions,
+                runtime::agent::CompletedTurnRecord {
+                    session_key: &session_id,
+                    provider_id: if selected_provider_id.is_empty() {
+                        None
+                    } else {
+                        Some(selected_provider_id)
+                    },
+                    question,
+                    answer: &answer,
+                    selected_text: input.selected_text.as_deref(),
+                    citations: &agent_run.retrieval_run.citations,
+                    trace: &agent_run.trace,
+                },
+            );
+            if let Err(err) = persist_chat_turn(
+                database,
+                ChatTurnPersistInput {
+                    turn_id: activity_event_id.as_deref(),
+                    session_id: &session_id,
+                    document_id,
+                    provider_id: if selected_provider_id.is_empty() {
+                        None
+                    } else {
+                        Some(selected_provider_id)
+                    },
+                    model_key: input.model_key.as_deref(),
+                    provider_label: "Local retrieval",
+                    user_message: question,
+                    assistant_answer: &answer,
+                    reasoning_content: None,
+                    selected_text: input.selected_text.as_deref(),
+                    image_data_url: input.image_data_url.as_deref(),
+                    citations: &agent_run.retrieval_run.citations,
+                    claims: &[],
+                    retrieval_trace: &agent_run.trace,
+                    referenced_document_ids: &reference_document_ids,
+                },
+            ) {
+                log::warn!("Failed to persist insufficient-evidence chat turn: {err}");
+            }
+            return Ok(AskDocumentOutput {
+                answer,
+                reasoning_content: None,
+                provider: "Local retrieval".to_string(),
+                claims: Vec::new(),
+                citations: agent_run.retrieval_run.citations,
+                retrieval_trace: agent_run.trace,
+                can_continue_retrieval: false,
+                retrieval_attempt_count,
+                retrieval_budget_exhausted,
+            });
+        }
+
+        // We're answering. If the gate never reached "answerable" (e.g. the judge
+        // timed out) but we have enough evidence to answer best-effort, stamp the
+        // gate so the UI shows "answered with available evidence".
+        if !agent_judge::has_image_context(&input)
+            && agent_judge::should_answer_best_effort(&agent_run)
+        {
+            for gate in [
+                &mut agent_run.retrieval_run.trace.finalize_gate,
+                &mut agent_run.trace.finalize_gate,
+            ] {
+                if let Some(object) = gate.as_object_mut() {
+                    object.insert("bestEffort".to_string(), serde_json::Value::Bool(true));
+                }
             }
         }
-    }
 
-    let (provider, provider_label) = provider_result?;
-    if let Some(event_id) = activity_event_id.as_deref() {
-        let _ = app.emit(
-            "lumenfolio://agent-activity",
-            AgentActivityEventOutput {
-                event_id: event_id.to_string(),
-                event: runtime::agent::AgentTraceEvent::new(
-                    "answer_start",
-                    "generate_answer",
-                    "running",
-                    "Generating answer",
-                    "Streaming answer from the configured chat model",
-                    "streaming answer from the configured chat model",
-                ),
-            },
-        );
-    }
-    let answer_result = llm::chat::ask_with_openai_compatible(
-        question,
-        &input,
-        &agent_run,
-        &provider,
-        &workspace_manifest_text,
-        app,
-        activity_event_id.as_deref(),
-    )
-    .await?;
+        let (provider, _) = provider_result?;
+        if let Some(event_id) = activity_event_id.as_deref() {
+            let _ = app.emit(
+                "lumenfolio://agent-activity",
+                AgentActivityEventOutput {
+                    event_id: event_id.to_string(),
+                    event: runtime::agent::AgentTraceEvent::new(
+                        "answer_start",
+                        "generate_answer",
+                        "running",
+                        "Generating answer",
+                        "Streaming answer from the configured chat model",
+                        "streaming answer from the configured chat model",
+                    ),
+                },
+            );
+        }
+        llm::chat::ask_with_openai_compatible(
+            question,
+            &input,
+            &agent_run,
+            &provider,
+            &workspace_manifest_text,
+            app,
+            activity_event_id.as_deref(),
+        )
+        .await?
+    };
     runtime::agent::record_completed_turn(
         agent_sessions,
         runtime::agent::CompletedTurnRecord {
