@@ -170,10 +170,18 @@ pub(crate) async fn run_unified_agent_loop(
         let Some(choice) = response.choices.into_iter().next() else {
             return Err("Agent loop response had no choices".to_string());
         };
-        let tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
+        let mut tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
         if tool_calls.is_empty() {
             // The model is done exploring and is ready to answer.
             break;
+        }
+        // Some OpenAI-compatible servers omit the tool_call `id`. Synthesize a
+        // stable one so the assistant echo and the tool result still pair up
+        // (an empty/duplicate tool_call_id makes the next request fail).
+        for (index, call) in tool_calls.iter_mut().enumerate() {
+            if call.id.trim().is_empty() {
+                call.id = format!("call_{round}_{index}");
+            }
         }
         log::info!(
             "unified_loop round={} requested {} tool call(s)",
@@ -185,8 +193,17 @@ pub(crate) async fn run_unified_agent_loop(
         messages.push(assistant_tool_call_message(&choice.message.content, &tool_calls));
 
         for call in &tool_calls {
-            let args: serde_json::Value =
-                serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::json!({}));
+            let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
+                .unwrap_or_else(|err| {
+                    // Malformed argument JSON would otherwise silently become {} —
+                    // dropping e.g. a cross-document `documentId`. Surface it.
+                    log::warn!(
+                        "unified_loop tool={} had unparseable arguments ({err}); using empty args: {}",
+                        call.function.name,
+                        truncate_for_error(&call.function.arguments, 200)
+                    );
+                    serde_json::json!({})
+                });
             let fallback_query = args
                 .get("query")
                 .and_then(|value| value.as_str())
@@ -280,6 +297,11 @@ fn build_openai_tools(vision_enabled: bool, library_is_large: bool) -> Vec<serde
     let mut tools: Vec<serde_json::Value> =
         runtime::rag::rag_tool_specs_for_capabilities(vision_enabled)
             .into_iter()
+            // The unified loop runs the SYNCHRONOUS RAG executor, which only stubs
+            // analyze_visual/analyze_page (they need the async multimodal provider
+            // path). Don't advertise tools we can't fulfil — the model would call
+            // them and silently get a text-search fallback instead of vision.
+            .filter(|spec| !matches!(spec.name, "analyze_visual" | "analyze_page"))
             .map(|spec| {
                 serde_json::json!({
                     "type": "function",

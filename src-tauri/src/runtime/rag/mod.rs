@@ -2026,6 +2026,12 @@ pub fn search_workspace_documents(
             (row, score)
         })
         .collect();
+    // For a real topical query, return ONLY actual term matches — never pad with
+    // recency-ranked unrelated docs, or the model treats a stale doc as a match
+    // and routes retrieval to it. An empty query (browse/list) keeps everything.
+    if !terms.is_empty() {
+        scored.retain(|(_, score)| *score > 0);
+    }
     // Best score first; the SELECT's recency order is the stable tiebreak.
     scored.sort_by(|a, b| b.1.cmp(&a.1));
     Ok(scored
@@ -2055,25 +2061,18 @@ pub fn load_workspace_manifest(
     let referenced: std::collections::HashSet<&str> =
         reference_document_ids.iter().copied().collect();
     let terms = query_terms(question);
-    let score_of = |row: &ManifestRow| -> usize {
-        if terms.is_empty() {
-            return 0;
-        }
-        let haystack = format!("{} {}", row.title, row.abstract_text).to_lowercase();
-        terms
-            .iter()
-            .filter(|term| haystack.contains(term.as_str()))
-            .count()
-    };
 
-    // Split into always-included (focus + @) and the locally-ranked rest.
+    // Split into always-included (focus + @) and the locally-ranked rest. Ranking
+    // shares `manifest_row_score` with `search_workspace_documents` so the inlined
+    // manifest and the search_library tool can never rank the same library
+    // differently.
     let mut priority: Vec<&ManifestRow> = Vec::new();
     let mut rest: Vec<(&ManifestRow, usize)> = Vec::new();
     for row in &rows {
         if row.id == focus || referenced.contains(row.id.as_str()) {
             priority.push(row);
         } else {
-            rest.push((row, score_of(row)));
+            rest.push((row, manifest_row_score(row, &terms)));
         }
     }
     priority.sort_by_key(|row| usize::from(row.id != focus)); // focus leads

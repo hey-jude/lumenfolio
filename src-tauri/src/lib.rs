@@ -528,23 +528,42 @@ struct OpenAiModelItem {
     id: String,
     // Different OpenAI-compatible servers expose the context window under
     // different keys (OpenRouter: context_length, vLLM: max_model_len, LM Studio:
-    // max_context_length). Capture whichever is present so we use the model's
-    // REAL window instead of a guessed default.
+    // max_context_length) and varying types (int / float / string). Capture as raw
+    // JSON and coerce, so a present-but-oddly-typed value never fails the WHOLE
+    // /models decode (which would break model import for that provider).
     #[serde(default)]
-    context_length: Option<u64>,
+    context_length: Option<serde_json::Value>,
     #[serde(default)]
-    max_model_len: Option<u64>,
+    max_model_len: Option<serde_json::Value>,
     #[serde(default)]
-    max_context_length: Option<u64>,
+    max_context_length: Option<serde_json::Value>,
 }
 
 impl OpenAiModelItem {
     fn detected_context_window(&self) -> Option<u32> {
-        self.context_length
-            .or(self.max_model_len)
-            .or(self.max_context_length)
-            .and_then(|value| u32::try_from(value).ok())
-            .filter(|value| *value >= 1024)
+        [
+            &self.context_length,
+            &self.max_model_len,
+            &self.max_context_length,
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(coerce_context_window)
+    }
+}
+
+/// Coerce a JSON context-window value (int / float / numeric string) to a token
+/// count, ignoring anything that isn't a sane positive window.
+fn coerce_context_window(value: &serde_json::Value) -> Option<u32> {
+    let tokens = match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }?;
+    if tokens.is_finite() && tokens >= 1024.0 && tokens <= u32::MAX as f64 {
+        Some(tokens as u32)
+    } else {
+        None
     }
 }
 
@@ -1965,40 +1984,75 @@ fn ask_document_stream(input: AskDocumentInput, app: tauri::AppHandle) -> Result
 /// paper, so seeding evidence from the page they happen to be looking at floods
 /// the evidence with the wrong document. We use this to suppress current-view
 /// seeding and let retrieval route to the named document instead.
+/// Whether `needle` appears in `haystack` delimited by non-alphanumeric
+/// boundaries (a whole-token match), so a short filename stem like "data" does
+/// NOT match inside "database". Both are already lowercased.
+fn mentions_token(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(needle) {
+        let start = from + offset;
+        let end = start + needle.len();
+        let before_ok = start == 0
+            || !haystack[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric);
+        let after_ok = end >= haystack.len()
+            || !haystack[end..]
+                .chars()
+                .next()
+                .is_some_and(char::is_alphanumeric);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// Whether the question explicitly names a NON-focus indexed document (by filename
+/// stem or distinctive title). One scan over all indexed docs (not the capped
+/// manifest), so it still fires for documents the large-library manifest omitted.
 fn question_targets_non_focus_document(
     conn: &Connection,
     question: &str,
     focus_document_id: &str,
-    visible_document_ids: &[&str],
 ) -> bool {
     let normalized = question.to_lowercase();
-    for &id in visible_document_ids {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, COALESCE(NULLIF(short_title, ''), title), path
+         FROM documents WHERE index_status = 'indexed'",
+    ) else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }) else {
+        return false;
+    };
+    for (id, title, path) in rows.flatten() {
         if id == focus_document_id {
             continue;
         }
-        let Some((title, path)) = conn
-            .query_row(
-                "SELECT COALESCE(NULLIF(short_title, ''), title), path
-                 FROM documents WHERE id = ?1 LIMIT 1",
-                rusqlite::params![id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .ok()
-        else {
-            continue;
-        };
         // The filename the user most likely typed (e.g. "forge_ieee_preprint").
         let stem = std::path::Path::new(&path)
             .file_stem()
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_lowercase();
-        if stem.chars().count() >= 4 && normalized.contains(&stem) {
+        if stem.chars().count() >= 4 && mentions_token(&normalized, &stem) {
             return true;
         }
         // Or a distinctive document title spelled out in the question.
         let title = title.trim().to_lowercase();
-        if title.chars().count() >= 8 && normalized.contains(&title) {
+        if title.chars().count() >= 8 && mentions_token(&normalized, &title) {
             return true;
         }
     }
@@ -2410,12 +2464,7 @@ async fn run_ask_document(
             .conn
             .lock()
             .map_err(|_| "SQLite lock was poisoned".to_string())?;
-        question_targets_non_focus_document(
-            &conn,
-            question,
-            document_id,
-            &visible_document_id_refs,
-        )
+        question_targets_non_focus_document(&conn, question, document_id)
     };
     let current_view_decision = if targets_other_document
         && input
@@ -2510,10 +2559,17 @@ async fn run_ask_document(
     // growing context). When it runs, we skip the M4 judge AND the separate answer
     // generation below. `None` means we fall through to the legacy M3+M4 path.
     let mut unified_answer: Option<AskAnswerResult> = None;
+    // Whether the unified loop ran this turn (Ok OR Err). When it did, we must NOT
+    // also run the M4 judge: the loop already mutated `agent_run` (citations,
+    // ledger, trace), so a second retrieval pass would double-count evidence. On a
+    // unified-loop error we instead fall through to the best-effort/refusal answer
+    // path with whatever evidence was already gathered.
+    let mut unified_attempted = false;
     if let Ok((provider, _)) = provider_result.as_ref() {
-        // Strong (native tool-calling) models go through the unified agent loop.
-        // Any failure degrades gracefully to the existing M4 judge + answer path.
+        // Strong (native tool-calling) models go through the unified agent loop;
+        // others (and image questions) use the legacy M4 judge + answer path.
         if llm::agent_loop::should_use_unified_loop(provider, &input) {
+            unified_attempted = true;
             // Clone the session memory block up front so the loop can borrow
             // `agent_run` mutably (to accumulate citations) without conflicting.
             let session_context = agent_run.session_context.clone();
@@ -2537,11 +2593,13 @@ async fn run_ask_document(
             {
                 Ok(result) => unified_answer = Some(result),
                 Err(err) => {
-                    log::warn!("Unified agent loop failed; falling back to M4 judge: {err}");
+                    log::warn!(
+                        "Unified agent loop failed; answering from gathered evidence: {err}"
+                    );
                 }
             }
         }
-        if unified_answer.is_none() {
+        if !unified_attempted {
             if let Err(err) = agent_judge::improve_retrieval_with_llm_judge(
                 agent_judge::LlmJudgeLoopInput {
                     input: &input,
@@ -4053,6 +4111,37 @@ fn truncate_for_error(value: &str, max_chars: usize) -> String {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentions_token_requires_word_boundaries() {
+        // Whole-token match.
+        assert!(mentions_token("what is forge_ieee_preprint.pdf about", "forge_ieee_preprint"));
+        assert!(mentions_token("summarize data today", "data"));
+        // Substring inside a larger word must NOT match.
+        assert!(!mentions_token("explain the database schema", "data"));
+        assert!(!mentions_token("metadata pipeline", "data"));
+        assert!(!mentions_token("anything", ""));
+    }
+
+    #[test]
+    fn coerce_context_window_accepts_int_float_string() {
+        assert_eq!(
+            coerce_context_window(&serde_json::json!(128000)),
+            Some(128000)
+        );
+        assert_eq!(
+            coerce_context_window(&serde_json::json!(128000.0)),
+            Some(128000)
+        );
+        assert_eq!(
+            coerce_context_window(&serde_json::json!("128000")),
+            Some(128000)
+        );
+        // Junk / too-small / non-numeric → None (never breaks the decode).
+        assert_eq!(coerce_context_window(&serde_json::json!("n/a")), None);
+        assert_eq!(coerce_context_window(&serde_json::json!(512)), None);
+        assert_eq!(coerce_context_window(&serde_json::json!(true)), None);
+    }
 
     #[test]
     fn budget_exhausted_chinese_answer_does_not_suggest_continue_retrieval() {
