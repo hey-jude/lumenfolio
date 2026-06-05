@@ -1452,11 +1452,14 @@ pub(crate) fn retrieval_is_answerable(agent_run: &runtime::agent::AgentRunResult
         .get("status")
         .and_then(|value| value.as_str())
         .is_some_and(|status| status == FinalizeStatus::Answerable.as_str());
-    let runtime_is_llm_judge = gate
+    // A real verdict (M4 LLM judge or the unified agent loop) must have cleared the
+    // turn — an M3 rule/heuristic seed alone never authorizes an answer.
+    let runtime_is_verdict = gate
         .get("runtime")
         .and_then(|value| value.as_str())
-        .is_some_and(|runtime| runtime == FinalizeRuntime::M4LlmJudge.as_str());
-    status_is_answerable && runtime_is_llm_judge
+        .and_then(FinalizeRuntime::parse)
+        .is_some_and(FinalizeRuntime::is_verdict);
+    status_is_answerable && runtime_is_verdict
 }
 
 /// Minimum accumulated citations to attempt a best-effort answer instead of

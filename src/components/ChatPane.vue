@@ -1209,6 +1209,26 @@ function traceJudgeTitle() {
   return props.locale === 'zh' ? '判定' : 'Judge'
 }
 
+// Friendly label for finalizeGate.runtime — keeps the Debug trace coherent across
+// all gates (the unified agent loop as well as the legacy M3 seed / M4 judge).
+function formatRuntime(runtime) {
+  const value = String(runtime || '')
+  const zh = {
+    'unified-loop': '统一智能体循环',
+    'm4-llm-judge': 'LLM 证据判官',
+    'm3-rule-guard': '规则判官',
+    'm3-heuristic-judge': '启发式判官',
+  }
+  const en = {
+    'unified-loop': 'Unified agent loop',
+    'm4-llm-judge': 'LLM judge',
+    'm3-rule-guard': 'Rule guard',
+    'm3-heuristic-judge': 'Heuristic judge',
+  }
+  const map = props.locale === 'zh' ? zh : en
+  return map[value] || value
+}
+
 function traceJudgeLabel(key) {
   const zh = {
     runtime: '运行',
@@ -1752,7 +1772,7 @@ function evidenceSourceLabel(source) {
                 <div class="trace-judge-grid">
                   <div v-if="traceJudgeDetails(message).runtime" class="trace-judge-row">
                     <span>{{ traceJudgeLabel('runtime') }}</span>
-                    <span>{{ traceJudgeDetails(message).runtime }}</span>
+                    <span>{{ formatRuntime(traceJudgeDetails(message).runtime) }}</span>
                   </div>
                   <div v-if="traceJudgeDetails(message).reason" class="trace-judge-row">
                     <span>{{ traceJudgeLabel('reason') }}</span>

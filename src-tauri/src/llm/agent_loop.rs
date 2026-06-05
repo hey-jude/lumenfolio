@@ -597,14 +597,15 @@ async fn finalize_answer(
     }
 
     // Stamp an answerable gate so downstream persistence/UI treats this turn as
-    // answered via the unified runtime.
+    // answered via the unified runtime — a first-class verdict alongside the M4
+    // judge (see FinalizeRuntime::is_verdict).
     let gate = serde_json::json!({
-        "status": "answerable",
+        "status": runtime::agent::FinalizeStatus::Answerable.as_str(),
         "reason": "Answered via the unified tool-calling agent loop.",
         "missing": serde_json::json!([]),
         "nextToolCall": serde_json::Value::Null,
         "citationCount": agent_run.retrieval_run.citations.len(),
-        "runtime": "unified-loop",
+        "runtime": runtime::agent::FinalizeRuntime::UnifiedLoop.as_str(),
     });
     agent_run.retrieval_run.trace.finalize_gate = gate.clone();
     agent_run.trace.finalize_gate = gate;
