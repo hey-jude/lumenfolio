@@ -153,8 +153,23 @@ pub(crate) fn render_visual_asset_crop(
     }
 }
 
+/// Serializes ALL pdfium access process-wide. pdfium (the C library) is NOT
+/// thread-safe: concurrent calls from the text-index and visual-index worker
+/// threads (both run on the blocking thread pool, each binding its own pdfium)
+/// intermittently fail or crash — the "occasional red error" when indexing a
+/// document. Every function that binds pdfium must hold this guard for the whole
+/// duration of its pdfium work. Poison is recovered (the guarded unit carries no
+/// invariant), so a single panicking indexing job can't wedge all future indexing.
+pub(crate) fn pdfium_lock() -> std::sync::MutexGuard<'static, ()> {
+    static PDFIUM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    PDFIUM_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub(crate) fn render_pdf_page_image(pdf_path: &Path, page_no: u32) -> Result<PathBuf, String> {
     use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
+    let _pdfium_guard = pdfium_lock();
 
     if !pdf_path.is_file() {
         return Err(format!(
@@ -350,6 +365,7 @@ fn render_pdf_asset_crop(
     pdfium_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     use pdfium_render::prelude::{PdfRenderConfig, Pdfium};
+    let _pdfium_guard = pdfium_lock();
 
     if !pdf_path.is_file() {
         return Err(format!(

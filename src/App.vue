@@ -627,16 +627,6 @@ const selectedDocument = computed(() => (
 ))
 // Tab descriptors for the reader tab bar: resolve each open id to its document,
 // dropping any that no longer exist. Status mirrors the sidebar status dot.
-const openTabDocs = computed(() => openTabs.value
-  .map((id) => allDocs.value.find((doc) => doc.id === id))
-  .filter(Boolean)
-  .map((doc) => ({
-    id: doc.id,
-    name: String(doc.shortTitle || doc.title || 'PDF').replace(/\.pdf$/i, ''),
-    status: doc.indexStatus === 'indexed'
-      ? 'ready'
-      : (doc.indexStatus === 'stale' ? 'failed' : 'processing'),
-  })))
 const activeWorkspaceRoot = computed(() => {
   if (!workspace.roots.length) return null
   const selectedId = selectedDocId.value
@@ -806,6 +796,10 @@ function createProviderModelDraft(providerType = 'openai-compatible', model = nu
     capabilities: normalizeCapabilities(model?.capabilities ?? inferModelCapabilities(providerType, modelId)),
     enabled: model?.enabled ?? true,
     isDefaultChatModel: model?.isDefaultChatModel ?? true,
+    // Context window: user override (authoritative) + value auto-detected from
+    // the provider's /models endpoint. Empty override = "auto".
+    contextWindowOverride: model?.contextWindowOverride ?? null,
+    detectedContextWindow: model?.detectedContextWindow ?? null,
   }
 }
 
@@ -872,6 +866,8 @@ function snapshotProviderForm(editKey = selectedProviderEditKey.value) {
       capabilities: [...normalizeCapabilities(model.capabilities)],
       enabled: model.enabled,
       isDefaultChatModel: model.key === providerForm.defaultModelKey,
+      contextWindowOverride: normalizeContextWindow(model.contextWindowOverride),
+      detectedContextWindow: normalizeContextWindow(model.detectedContextWindow),
     })),
     defaultModelKey: providerForm.defaultModelKey,
     apiKey: providerForm.apiKey,
@@ -1067,7 +1063,26 @@ function isEmptyProviderModelDraft(model) {
     && !String(model?.nickname || '').trim()
 }
 
-function mergeFetchedProviderModels(modelIds) {
+// Coerce a context-window field to a positive integer or null ("auto").
+function normalizeContextWindow(value) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 1024 ? Math.floor(parsed) : null
+}
+
+// Placeholder for the context-window override input: shows the auto-detected
+// window (from /models) when known, otherwise just "auto".
+function contextWindowPlaceholder(model) {
+  const detected = normalizeContextWindow(model?.detectedContextWindow)
+  return detected ? `${detected} · ${ui.value.contextWindowAuto}` : ui.value.contextWindowAuto
+}
+
+function mergeFetchedProviderModels(modelIds, contextWindows = {}) {
+  // Refresh the auto-detected window on models we already have (the server's
+  // /models value may have changed); never clobber a user override.
+  providerForm.models.forEach((model) => {
+    const detected = normalizeContextWindow(contextWindows[model.modelId])
+    if (detected) model.detectedContextWindow = detected
+  })
   const existingIds = new Set(
     providerForm.models
       .map((model) => String(model.modelId || '').trim().toLowerCase())
@@ -1086,6 +1101,7 @@ function mergeFetchedProviderModels(modelIds) {
       capabilities: inferModelCapabilities(providerForm.providerType, normalizedModelId),
       enabled: true,
       isDefaultChatModel: false,
+      detectedContextWindow: normalizeContextWindow(contextWindows[normalizedModelId]),
     }))
   })
 
@@ -1117,7 +1133,7 @@ async function fetchProviderModels() {
         apiKey: providerForm.apiKey || null,
       },
     })
-    const importedCount = mergeFetchedProviderModels(result?.modelIds || [])
+    const importedCount = mergeFetchedProviderModels(result?.modelIds || [], result?.contextWindows || {})
     persistCurrentProviderEdit()
     modelFetchStatus.value = 'succeeded'
     modelFetchMessage.value = importedCount > 0
@@ -1409,26 +1425,6 @@ function openTab(docId) {
 // some document (falling back to allDocs[0]), so we keep that doc as the sole tab
 // rather than blanking selectedDocId (which would leave the reader showing a doc
 // with no matching active tab). The document itself stays in the sidebar regardless.
-function closeTab(docId) {
-  const index = openTabs.value.indexOf(docId)
-  if (index === -1) return
-  const next = openTabs.value.filter((id) => id !== docId)
-  if (selectedDocId.value === docId) {
-    const fallback = next[index] || next[index - 1] || ''
-    if (fallback) {
-      openTabs.value = next
-      selectedDocId.value = fallback
-      loadChatHistoryForDocument(fallback)
-      loadNotesForDocument(fallback)
-    } else {
-      // No other tab: keep the active document's tab open (closing it would
-      // desync the reader from the tab bar). Leave openTabs unchanged.
-    }
-  } else {
-    openTabs.value = next
-  }
-}
-
 function selectDoc(docId) {
   openTab(docId)
 }
@@ -2912,7 +2908,9 @@ function scheduleDocumentVisualIndex(doc) {
       const target = allDocs.value.find((item) => item.id === doc.id) || doc
       target.visualIndexStatus = 'failed'
       target.visualIndexError = err?.message || String(err)
-      workspaceError.value = `Visual index failed: ${target.visualIndexError}`
+      // Visual indexing (tables/figures) is an enhancement on top of a usable text
+      // index — a failure must NOT raise the global red error bar. It's recorded
+      // on the document for a quiet indicator only.
       visualIndexRuns.delete(doc.id)
     })
 }
@@ -2925,9 +2923,8 @@ function handleVisualIndexEvent(payload) {
   target.visualIndexStatus = payload.status || target.visualIndexStatus || 'pending'
   target.visualIndexVersion = Number(payload.version || target.visualIndexVersion || 0)
   target.visualIndexError = payload.error || ''
-  if (target.visualIndexStatus === 'failed' && target.visualIndexError) {
-    workspaceError.value = `Visual index failed: ${target.visualIndexError}`
-  }
+  // A visual-index failure is recorded on the document but never raises the global
+  // red error bar — the text index is what makes the document usable.
   if (['succeeded', 'failed', 'cancelled'].includes(target.visualIndexStatus)) {
     visualIndexRuns.delete(documentId)
   }
@@ -3944,8 +3941,6 @@ onMounted(() => {
     <ReaderPane
       :key="`${selectedDocument.id}:${viewerReloadKey}`"
       :document="selectedDocument"
-      :tabs="openTabDocs"
-      :active-doc-id="selectedDocId"
       :translation-languages="translationLanguages"
       :translation-lang="translationLang"
       :view-mode="viewMode"
@@ -3960,8 +3955,6 @@ onMounted(() => {
       :inline-translate-open="inlineTranslateOpen"
       :locale="locale"
       :ui="ui"
-      @select-tab="openTab"
-      @close-tab="closeTab"
       @update:translationLang="translationLang = $event"
       @translation-action="handleTranslationAction"
       @cancel-translation="cancelTranslation"
@@ -4357,6 +4350,7 @@ onMounted(() => {
                   <span>{{ ui.defaultShort }}</span>
                   <span>{{ ui.modelNickname }}</span>
                   <span>{{ ui.modelId }}</span>
+                  <span>{{ ui.contextWindow }}</span>
                   <span>{{ ui.modelCapabilities }}</span>
                   <span>{{ ui.enabled }}</span>
                   <span></span>
@@ -4385,6 +4379,17 @@ onMounted(() => {
                   <label class="model-field-cell model-id-cell">
                     <span>{{ ui.modelId }}</span>
                     <input v-model="model.modelId" type="text" :placeholder="providerTypePreset.model || 'gpt-4o / deepseek-chat'" />
+                  </label>
+
+                  <label class="model-field-cell model-context-cell" :title="ui.contextWindowHint">
+                    <span>{{ ui.contextWindow }}</span>
+                    <input
+                      v-model.number="model.contextWindowOverride"
+                      type="number"
+                      min="1024"
+                      step="1024"
+                      :placeholder="contextWindowPlaceholder(model)"
+                    />
                   </label>
 
                   <div class="model-capability-cell" :aria-label="ui.modelCapabilities">
@@ -5182,10 +5187,10 @@ onMounted(() => {
 .model-table-head,
 .model-row {
   display: grid;
-  grid-template-columns: 48px minmax(140px, 1fr) minmax(190px, 1.1fr) minmax(260px, 1.25fr) 48px 34px;
+  grid-template-columns: 48px minmax(140px, 1fr) minmax(190px, 1.1fr) 116px minmax(260px, 1.25fr) 48px 34px;
   gap: 8px;
   align-items: center;
-  min-width: 760px;
+  min-width: 880px;
 }
 
 .model-table-head {

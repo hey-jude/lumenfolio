@@ -37,14 +37,6 @@ const props = defineProps({
     type: Object,
     required: true,
   },
-  tabs: {
-    type: Array,
-    default: () => [],
-  },
-  activeDocId: {
-    type: String,
-    default: '',
-  },
   translationLanguages: {
     type: Array,
     required: true,
@@ -104,8 +96,6 @@ const props = defineProps({
 })
 
 const emit = defineEmits([
-  'select-tab',
-  'close-tab',
   'update:translationLang',
   'translation-action',
   'cancel-translation',
@@ -839,16 +829,6 @@ function zoomPdf(delta) {
   }
 }
 
-// Let a plain mouse wheel scroll the horizontal document-tab strip (it only
-// scrolls horizontally, which vertical wheels otherwise ignore).
-function onReaderTabsWheel(event) {
-  const el = event.currentTarget
-  if (!el || el.scrollWidth <= el.clientWidth) return
-  if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return
-  el.scrollLeft += event.deltaY
-  event.preventDefault()
-}
-
 function translationPagePlaceholderLabel(translation) {
   if (translation?.status === 'failed') return translation.error || props.ui.translationFailed
   if (props.document.translation.status === 'succeeded') return props.ui.translationPageLoading
@@ -980,37 +960,9 @@ watch(translationArtifactActivePage, async () => {
         </span>
       </div>
 
-      <!-- Row 2: document tabs (left) + translation/page/zoom controls (right). -->
+      <!-- Row 2: translation/page/zoom controls (right). Document switching is
+           driven entirely by the left sidebar — there is no separate tab strip. -->
       <div class="reader-tabrow">
-        <div
-          v-if="tabs.length > 1"
-          class="reader-tab-bar"
-          @wheel="onReaderTabsWheel"
-          v-bind="testAttrs('reader-tab-bar')"
-        >
-          <div
-            v-for="tab in tabs"
-            :key="tab.id"
-            class="reader-tab"
-            :class="{ active: tab.id === activeDocId }"
-            :title="tab.name"
-            v-bind="testAttrs('reader-tab')"
-            @click="emit('select-tab', tab.id)"
-          >
-            <span class="reader-tab-dot" :class="tab.status"></span>
-            <span class="reader-tab-name">{{ tab.name }}</span>
-            <button
-              type="button"
-              class="reader-tab-close"
-              :title="ui.tabClose"
-              :aria-label="ui.tabClose"
-              v-bind="testAttrs('reader-tab-close')"
-              @click.stop="emit('close-tab', tab.id)"
-            >×</button>
-          </div>
-        </div>
-        <div v-else class="reader-tab-spacer"></div>
-
         <div class="reader-tab-controls">
           <select
             class="toolbar-select"
@@ -1451,18 +1403,14 @@ watch(translationArtifactActivePage, async () => {
   font-weight: 600;
 }
 
-/* Row 2: tabs (left, flex) + controls (right). Not a drag region, so tabs
-   scroll and controls stay clickable. */
+/* Row 2: translation/page/zoom controls, right-aligned. Not a drag region so the
+   controls stay clickable. Document switching lives in the left sidebar. */
 .reader-tabrow {
   min-width: 0;
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 0 12px;
-}
-
-.reader-tab-spacer {
-  flex: 1;
 }
 
 .reader-tab-controls {
@@ -1510,15 +1458,9 @@ watch(translationArtifactActivePage, async () => {
   background-color: rgba(255, 255, 255, 0.08);
 }
 
-/* Keyboard focus ring for the tabs only. The ghost toolbar controls use a calm
-   background highlight instead — a native <select> keeps focus after a click, so
-   a hard blue ring would linger and look harsh. */
-.reader-tab:focus-visible,
-.reader-tab-close:focus-visible {
-  outline: 2px solid rgba(106, 169, 255, 0.62);
-  outline-offset: 2px;
-}
-
+/* The ghost toolbar controls use a calm background highlight instead of a hard
+   focus ring — a native <select> keeps focus after a click, so a blue ring would
+   linger and look harsh. */
 .toolbar-select:focus-visible,
 .toolbar-btn:focus-visible,
 .pdf-toolbar-controls button:focus-visible {
@@ -1665,118 +1607,6 @@ watch(translationArtifactActivePage, async () => {
   border-radius: 12px;
   padding: 12px 14px;
   font-size: 13px;
-}
-
-.reader-tab-bar {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  flex: 1;
-  min-width: 0;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.reader-tab-bar::-webkit-scrollbar {
-  display: none;
-}
-
-.reader-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  max-width: 200px;
-  padding: 0 8px 0 12px;
-  /* Cursor-style: flat tabs packed tight, separated by a very light divider. */
-  border: none;
-  border-right: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 0;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  font-size: 12px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.reader-tab:hover {
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-secondary);
-}
-
-.reader-tab:last-child {
-  border-right: none;
-}
-
-.reader-tab:hover {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(255, 255, 255, 0.075);
-  color: var(--text-primary);
-}
-
-.reader-tab.active {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-primary);
-  box-shadow: inset 0 -2px 0 rgba(120, 170, 255, 0.75);
-}
-
-
-.reader-tab-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: var(--text-secondary);
-}
-
-.reader-tab-dot.ready {
-  background: #4caf7d;
-}
-
-.reader-tab-dot.indexed {
-  background: #4caf7d;
-}
-
-.reader-tab-dot.failed {
-  background: #c64949;
-}
-
-.reader-tab-dot.processing {
-  background: #d6a14a;
-}
-
-.reader-tab-dot.indexing,
-.reader-tab-dot.pending {
-  background: #d6a14a;
-}
-
-.reader-tab-dot.stale {
-  background: #c64949;
-}
-
-.reader-tab-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 150px;
-}
-
-.reader-tab-close {
-  border: none;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 13px;
-  line-height: 1;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border-radius: 5px;
-}
-
-.reader-tab-close:hover {
-  background: rgba(255, 255, 255, 0.1);
-  color: var(--text-primary);
 }
 
 .viewer-stage {

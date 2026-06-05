@@ -1821,6 +1821,12 @@ pub fn recall_chat_history(
 /// documents are always included; remaining slots are filled by local relevance
 /// to the question. Prevents an enormous library from blowing up the prompt.
 pub const WORKSPACE_MANIFEST_MAX_DOCS: usize = 50;
+/// At or below this many indexed documents the whole manifest is inlined into the
+/// agent's context. Above it, the library is "large": the agent gets only the
+/// focus + @-referenced docs inline, plus `search_library`/`list_documents` tools
+/// to discover the rest on demand (progressive disclosure — keeps the prompt
+/// bounded no matter how big the library grows).
+pub const WORKSPACE_MANIFEST_INLINE_MAX_DOCS: usize = 25;
 /// Beyond the focus + @-referenced docs, how many of the highest-scoring docs
 /// also get their abstract shown (the rest are listed title-only).
 const MANIFEST_ABSTRACT_DOCS_TOP_K: usize = 8;
@@ -1850,9 +1856,32 @@ pub struct WorkspaceManifest {
     pub entries: Vec<DocManifestEntry>,
     /// The `documentId` whitelist (== entry ids), for the tool-dispatch guard.
     pub document_ids: Vec<String>,
+    /// Total indexed documents in the workspace (before any cap). Drives the
+    /// large-library "progressive disclosure" decision.
+    pub total_indexed: usize,
+    /// Every indexed document id (uncapped) — the dispatch whitelist for a large
+    /// library, where the agent discovers documents on demand via `search_library`
+    /// rather than from the inlined manifest.
+    pub all_document_ids: Vec<String>,
+}
+
+/// A ranked workspace document hit for the agent's `search_library` /
+/// `list_documents` tools (progressive disclosure of a large library).
+pub struct WorkspaceDocHit {
+    pub document_id: String,
+    pub title: String,
+    pub rel_dir: String,
+    pub page_count: u32,
+    pub summary: String,
 }
 
 impl WorkspaceManifest {
+    /// Whether the library is large enough to switch from inlining the whole
+    /// manifest to on-demand discovery via `search_library`/`list_documents`.
+    pub fn is_large(&self) -> bool {
+        self.total_indexed > WORKSPACE_MANIFEST_INLINE_MAX_DOCS
+    }
+
     /// Render the manifest as a prompt block the agent uses to locate documents
     /// and route `documentId` tool calls. Every doc gets title + dir + page
     /// count; only the focus, @-referenced, and top-ranked docs get an abstract.
@@ -1864,27 +1893,51 @@ impl WorkspaceManifest {
             "Workspace documents (the user's whole library). To gather evidence from any of them, pass its id as the `documentId` argument on a retrieval tool:\n",
         );
         for entry in &self.entries {
-            let mut tags = String::new();
-            if entry.is_focus {
-                tags.push_str(" [CURRENT FOCUS]");
-            }
-            if entry.is_referenced {
-                tags.push_str(" [@referenced]");
-            }
-            let dir = if entry.rel_dir.is_empty() {
-                String::new()
-            } else {
-                format!("{}/ ", entry.rel_dir)
-            };
-            out.push_str(&format!(
-                "- [{}] {}\"{}\" ({}p){}\n",
-                entry.document_id, dir, entry.title, entry.page_count, tags
-            ));
-            if !entry.summary.is_empty() {
-                out.push_str(&format!("    Abstract: {}\n", entry.summary));
-            }
+            push_manifest_entry(&mut out, entry);
         }
         out
+    }
+
+    /// Compact prompt block for a large library: only the focus + @-referenced
+    /// docs inline, plus a note that the rest are discoverable via the
+    /// `search_library`/`list_documents` tools. Keeps the prompt bounded.
+    pub fn to_prompt_block_compact(&self) -> String {
+        let pinned: Vec<&DocManifestEntry> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.is_focus || entry.is_referenced)
+            .collect();
+        let mut out = format!(
+            "Workspace documents: the user's library has {} indexed documents — too many to list in full here. The focus and any @-referenced documents are shown below. To find OTHER relevant documents in the library, call the `search_library` tool with a query (or `list_documents` to browse the most recent). Then gather evidence from a document by passing its id as the `documentId` argument on a retrieval tool.\n",
+            self.total_indexed
+        );
+        for entry in pinned {
+            push_manifest_entry(&mut out, entry);
+        }
+        out
+    }
+}
+
+/// Render one manifest entry line (+ abstract when present) into `out`.
+fn push_manifest_entry(out: &mut String, entry: &DocManifestEntry) {
+    let mut tags = String::new();
+    if entry.is_focus {
+        tags.push_str(" [CURRENT FOCUS]");
+    }
+    if entry.is_referenced {
+        tags.push_str(" [@referenced]");
+    }
+    let dir = if entry.rel_dir.is_empty() {
+        String::new()
+    } else {
+        format!("{}/ ", entry.rel_dir)
+    };
+    out.push_str(&format!(
+        "- [{}] {}\"{}\" ({}p){}\n",
+        entry.document_id, dir, entry.title, entry.page_count, tags
+    ));
+    if !entry.summary.is_empty() {
+        out.push_str(&format!("    Abstract: {}\n", entry.summary));
     }
 }
 
@@ -1905,12 +1958,10 @@ fn manifest_summary(text: &str) -> String {
 /// Build the workspace manifest: all indexed documents (title + dir + page
 /// count), with abstracts for the focus, @-referenced, and locally-most-relevant
 /// docs. Pure local ranking (question-term overlap with title+abstract) — no LLM.
-pub fn load_workspace_manifest(
-    conn: &Connection,
-    question: &str,
-    focus_document_id: &str,
-    reference_document_ids: &[&str],
-) -> Result<WorkspaceManifest, String> {
+/// Load every indexed document's manifest row (id, title, dir, page count,
+/// abstract), most-recently-opened first. Shared by the manifest builder and the
+/// `search_library` ranking.
+fn load_manifest_rows(conn: &Connection) -> Result<Vec<ManifestRow>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT d.id,
@@ -1939,30 +1990,89 @@ pub fn load_workspace_manifest(
         .map_err(|err| format!("Failed to load workspace manifest: {err}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("Failed to read workspace manifest: {err}"))?;
+    Ok(rows)
+}
+
+/// Term-overlap score of a manifest row against pre-tokenized query `terms`.
+fn manifest_row_score(row: &ManifestRow, terms: &[String]) -> usize {
+    if terms.is_empty() {
+        return 0;
+    }
+    let haystack = format!("{} {}", row.title, row.abstract_text).to_lowercase();
+    terms
+        .iter()
+        .filter(|term| haystack.contains(term.as_str()))
+        .count()
+}
+
+/// Rank indexed documents by local term overlap with `query` (title + abstract),
+/// for the agent's `search_library` tool. `exclude` ids are skipped (e.g. docs
+/// already pinned in the compact manifest). An empty query returns the most
+/// recently opened documents (browse). Returns up to `limit` hits, best first.
+pub fn search_workspace_documents(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+    exclude: &[&str],
+) -> Result<Vec<WorkspaceDocHit>, String> {
+    let rows = load_manifest_rows(conn)?;
+    let terms = query_terms(query);
+    let excluded: std::collections::HashSet<&str> = exclude.iter().copied().collect();
+    let mut scored: Vec<(ManifestRow, usize)> = rows
+        .into_iter()
+        .filter(|row| !excluded.contains(row.id.as_str()))
+        .map(|row| {
+            let score = manifest_row_score(&row, &terms);
+            (row, score)
+        })
+        .collect();
+    // For a real topical query, return ONLY actual term matches — never pad with
+    // recency-ranked unrelated docs, or the model treats a stale doc as a match
+    // and routes retrieval to it. An empty query (browse/list) keeps everything.
+    if !terms.is_empty() {
+        scored.retain(|(_, score)| *score > 0);
+    }
+    // Best score first; the SELECT's recency order is the stable tiebreak.
+    scored.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(scored
+        .into_iter()
+        .take(limit.max(1))
+        .map(|(row, _score)| WorkspaceDocHit {
+            document_id: row.id,
+            title: row.title,
+            rel_dir: row.rel_dir,
+            page_count: row.page_count,
+            summary: manifest_summary(&row.abstract_text),
+        })
+        .collect())
+}
+
+pub fn load_workspace_manifest(
+    conn: &Connection,
+    question: &str,
+    focus_document_id: &str,
+    reference_document_ids: &[&str],
+) -> Result<WorkspaceManifest, String> {
+    let rows = load_manifest_rows(conn)?;
+    let total_indexed = rows.len();
+    let all_document_ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
 
     let focus = focus_document_id.trim();
     let referenced: std::collections::HashSet<&str> =
         reference_document_ids.iter().copied().collect();
     let terms = query_terms(question);
-    let score_of = |row: &ManifestRow| -> usize {
-        if terms.is_empty() {
-            return 0;
-        }
-        let haystack = format!("{} {}", row.title, row.abstract_text).to_lowercase();
-        terms
-            .iter()
-            .filter(|term| haystack.contains(term.as_str()))
-            .count()
-    };
 
-    // Split into always-included (focus + @) and the locally-ranked rest.
+    // Split into always-included (focus + @) and the locally-ranked rest. Ranking
+    // shares `manifest_row_score` with `search_workspace_documents` so the inlined
+    // manifest and the search_library tool can never rank the same library
+    // differently.
     let mut priority: Vec<&ManifestRow> = Vec::new();
     let mut rest: Vec<(&ManifestRow, usize)> = Vec::new();
     for row in &rows {
         if row.id == focus || referenced.contains(row.id.as_str()) {
             priority.push(row);
         } else {
-            rest.push((row, score_of(row)));
+            rest.push((row, manifest_row_score(row, &terms)));
         }
     }
     priority.sort_by_key(|row| usize::from(row.id != focus)); // focus leads
@@ -2010,6 +2120,8 @@ pub fn load_workspace_manifest(
     Ok(WorkspaceManifest {
         entries,
         document_ids,
+        total_indexed,
+        all_document_ids,
     })
 }
 
@@ -8153,6 +8265,102 @@ mod tests {
         let prompt = manifest.to_prompt_block();
         assert!(prompt.contains("[CURRENT FOCUS]"));
         assert!(prompt.contains("[@referenced]"));
+        // Four indexed docs (pending excluded) — well under the large threshold.
+        assert_eq!(manifest.total_indexed, 4);
+        assert!(!manifest.is_large());
+        assert_eq!(manifest.all_document_ids.len(), 4);
+        assert!(!manifest.all_document_ids.iter().any(|id| id == "pending"));
+    }
+
+    #[test]
+    fn search_workspace_documents_ranks_excludes_and_browses() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE documents (
+               id TEXT PRIMARY KEY,
+               short_title TEXT NOT NULL DEFAULT '',
+               title TEXT NOT NULL DEFAULT '',
+               path TEXT NOT NULL DEFAULT '',
+               page_count INTEGER NOT NULL DEFAULT 0,
+               index_status TEXT NOT NULL DEFAULT 'indexed',
+               last_opened_at INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE document_blocks (
+               id TEXT PRIMARY KEY,
+               document_id TEXT NOT NULL,
+               text TEXT NOT NULL,
+               block_role TEXT NOT NULL DEFAULT 'body'
+             );
+             INSERT INTO documents (id, short_title, title, path, page_count, index_status, last_opened_at) VALUES
+               ('focus', 'Focus', 'Focus Paper', '/lib/a/focus.pdf', 10, 'indexed', 100),
+               ('hit',   'Hitt',  'Relevant',    '/lib/c/hit.pdf',   6,  'indexed', 80),
+               ('miss',  'Misss', 'Unrelated',   '/lib/c/miss.pdf',  4,  'indexed', 70),
+               ('pending','Pend', 'Not Indexed', '/lib/c/pend.pdf',  4,  'pending', 60);
+             INSERT INTO document_blocks (id, document_id, text, block_role) VALUES
+               ('b1', 'hit', 'This paper studies transformer attention mechanisms.', 'abstract'),
+               ('b2', 'miss', 'A cookbook about soup recipes.', 'abstract');",
+        )
+        .expect("seed");
+
+        // Topical search: the relevant doc ranks first; the non-indexed doc is gone.
+        let hits = search_workspace_documents(&conn, "transformer attention", 10, &[]).expect("search");
+        assert_eq!(hits[0].document_id, "hit");
+        assert!(hits.iter().all(|hit| hit.document_id != "pending"));
+
+        // `exclude` removes already-pinned docs.
+        let excluded = search_workspace_documents(&conn, "transformer", 10, &["hit"]).expect("search");
+        assert!(excluded.iter().all(|hit| hit.document_id != "hit"));
+
+        // Empty query = browse by recency (most recently opened first).
+        let browse = search_workspace_documents(&conn, "", 10, &[]).expect("browse");
+        assert_eq!(browse[0].document_id, "focus");
+    }
+
+    #[test]
+    fn compact_prompt_block_lists_only_pinned_for_large_library() {
+        let entries = vec![
+            DocManifestEntry {
+                document_id: "focus".into(),
+                title: "Focus Paper".into(),
+                rel_dir: "a".into(),
+                page_count: 10,
+                summary: String::new(),
+                is_focus: true,
+                is_referenced: false,
+            },
+            DocManifestEntry {
+                document_id: "ref".into(),
+                title: "Referenced".into(),
+                rel_dir: "b".into(),
+                page_count: 8,
+                summary: String::new(),
+                is_focus: false,
+                is_referenced: true,
+            },
+            DocManifestEntry {
+                document_id: "other".into(),
+                title: "Some Other Paper".into(),
+                rel_dir: "c".into(),
+                page_count: 5,
+                summary: String::new(),
+                is_focus: false,
+                is_referenced: false,
+            },
+        ];
+        let manifest = WorkspaceManifest {
+            entries,
+            document_ids: Vec::new(),
+            total_indexed: 40,
+            all_document_ids: Vec::new(),
+        };
+        assert!(manifest.is_large());
+        let compact = manifest.to_prompt_block_compact();
+        assert!(compact.contains("40 indexed documents"));
+        assert!(compact.contains("search_library"));
+        // Only the pinned (focus + @referenced) docs are inlined.
+        assert!(compact.contains("Focus Paper"));
+        assert!(compact.contains("Referenced"));
+        assert!(!compact.contains("Some Other Paper"));
     }
 
     fn setup_chat_history_conn() -> Connection {

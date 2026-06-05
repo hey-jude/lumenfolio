@@ -1209,6 +1209,26 @@ function traceJudgeTitle() {
   return props.locale === 'zh' ? '判定' : 'Judge'
 }
 
+// Friendly label for finalizeGate.runtime — keeps the Debug trace coherent across
+// all gates (the unified agent loop as well as the legacy M3 seed / M4 judge).
+function formatRuntime(runtime) {
+  const value = String(runtime || '')
+  const zh = {
+    'unified-loop': '统一智能体循环',
+    'm4-llm-judge': 'LLM 证据判官',
+    'm3-rule-guard': '规则判官',
+    'm3-heuristic-judge': '启发式判官',
+  }
+  const en = {
+    'unified-loop': 'Unified agent loop',
+    'm4-llm-judge': 'LLM judge',
+    'm3-rule-guard': 'Rule guard',
+    'm3-heuristic-judge': 'Heuristic judge',
+  }
+  const map = props.locale === 'zh' ? zh : en
+  return map[value] || value
+}
+
 function traceJudgeLabel(key) {
   const zh = {
     runtime: '运行',
@@ -1254,7 +1274,31 @@ function evidenceItems(message) {
 }
 
 function evidencePreviewItems(message) {
-  return evidenceItems(message).slice(0, 4)
+  const items = evidenceItems(message)
+  const docs = answerSourceDocs(message)
+  // Single-document answer: the simple first-N preview.
+  if (docs.length <= 1) return items.slice(0, 4)
+  // Multi-document answer: guarantee each source document shows at least its
+  // first citation, so cross-document evidence is never buried under the "+N".
+  const cap = Math.max(4, docs.length)
+  const firstPerDoc = []
+  const seenDocs = new Set()
+  for (const item of items) {
+    const docId = resolveCitation(message, item)?.documentId
+    if (docId && !seenDocs.has(docId)) {
+      seenDocs.add(docId)
+      firstPerDoc.push(item)
+    }
+  }
+  const result = []
+  const usedIds = new Set()
+  for (const item of [...firstPerDoc, ...items]) {
+    if (usedIds.has(item.citationId)) continue
+    usedIds.add(item.citationId)
+    result.push(item)
+    if (result.length >= cap) break
+  }
+  return result
 }
 
 function resolveCitation(message, evidence) {
@@ -1300,6 +1344,25 @@ function answerSourceDocs(message) {
       isFocus: id === props.document?.id,
     }
   })
+}
+
+// Clicking a SOURCES chip jumps to that document's first cited evidence (opening
+// its tab first for cross-document citations, via the parent's citation handler),
+// so the user can inspect a paper the answer drew on even when it isn't in focus.
+function focusSourceDoc(message, src) {
+  const citation = (message.citations || []).find((item) => item.documentId === src.id)
+  if (citation) emit('citation-click', citation)
+}
+
+// The document that owns the currently-active citation, if any. Used to move the
+// SOURCES highlight to whichever paper the user last clicked into, instead of
+// always pinning it to the focus document.
+function activeSourceDocId(message) {
+  if (!props.activeCitationId) return null
+  const citation = (message.citations || []).find(
+    (item) => item.id === props.activeCitationId,
+  )
+  return citation?.documentId || null
 }
 
 // For a trace step that routed to another document via `documentId`, the target
@@ -1653,13 +1716,17 @@ function evidenceSourceLabel(source) {
             <div v-if="evidenceItems(message).length" class="evidence-group">
               <div v-if="answerSourceDocs(message).length" class="evidence-sources">
                 <span class="evidence-sources-label">{{ ui.sources }}</span>
-                <span
+                <button
                   v-for="src in answerSourceDocs(message)"
                   :key="`${message.id}-src-${src.id}`"
                   class="evidence-source-chip"
-                  :class="{ focus: src.isFocus }"
+                  :class="{
+                    focus: src.isFocus && activeSourceDocId(message) === null,
+                    active: activeSourceDocId(message) === src.id,
+                  }"
                   :title="src.name"
-                >{{ src.name }}</span>
+                  @click="focusSourceDoc(message, src)"
+                >{{ src.name }}</button>
               </div>
               <div class="evidence-strip">
                 <span class="evidence-strip-label">{{ ui.evidence }}</span>
@@ -1705,7 +1772,7 @@ function evidenceSourceLabel(source) {
                 <div class="trace-judge-grid">
                   <div v-if="traceJudgeDetails(message).runtime" class="trace-judge-row">
                     <span>{{ traceJudgeLabel('runtime') }}</span>
-                    <span>{{ traceJudgeDetails(message).runtime }}</span>
+                    <span>{{ formatRuntime(traceJudgeDetails(message).runtime) }}</span>
                   </div>
                   <div v-if="traceJudgeDetails(message).reason" class="trace-judge-row">
                     <span>{{ traceJudgeLabel('reason') }}</span>
@@ -2611,11 +2678,31 @@ function evidenceSourceLabel(source) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.evidence-source-chip:hover {
+  border-color: rgba(106, 169, 255, 0.45);
+  color: var(--text-primary);
 }
 
 .evidence-source-chip.focus {
   border-color: rgba(106, 169, 255, 0.34);
   background: rgba(106, 169, 255, 0.12);
+  color: var(--text-primary);
+}
+
+/* Active = the source document the user clicked into (owns the active citation).
+   Gold, matching the active evidence chip, so "selected" reads the same way in
+   both rows. */
+.evidence-source-chip.active {
+  border-color: rgba(250, 204, 21, 0.45);
+  background: rgba(250, 204, 21, 0.12);
   color: var(--text-primary);
 }
 

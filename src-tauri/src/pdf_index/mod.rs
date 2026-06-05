@@ -115,6 +115,11 @@ pub(super) fn build_document_index_from_pdfium_with_progress(
 ) -> Result<UpsertDocumentIndexInput, String> {
     use pdfium_render::prelude::Pdfium;
 
+    // pdfium is not thread-safe — hold the global lock for the whole extraction so
+    // a concurrent visual-index render can't collide with it (the intermittent
+    // indexing error). See vision::pdfium_lock.
+    let _pdfium_guard = vision::pdfium_lock();
+
     let pdfium_dir = vision::pdfium_dir_from_env_or_default();
     let bindings = match pdfium_dir.as_deref() {
         Some(dir) => Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(dir))

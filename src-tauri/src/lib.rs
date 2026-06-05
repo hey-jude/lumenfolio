@@ -443,6 +443,10 @@ struct ModelProviderModelInput {
     capabilities: Option<Vec<String>>,
     enabled: Option<bool>,
     is_default_chat_model: Option<bool>,
+    #[serde(default)]
+    context_window_override: Option<u32>,
+    #[serde(default)]
+    detected_context_window: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -503,6 +507,8 @@ struct ModelProviderModelOutput {
     capabilities: Vec<String>,
     enabled: bool,
     is_default_chat_model: bool,
+    context_window_override: Option<u32>,
+    detected_context_window: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -520,12 +526,55 @@ struct OpenAiModelsResponse {
 #[derive(Deserialize)]
 struct OpenAiModelItem {
     id: String,
+    // Different OpenAI-compatible servers expose the context window under
+    // different keys (OpenRouter: context_length, vLLM: max_model_len, LM Studio:
+    // max_context_length) and varying types (int / float / string). Capture as raw
+    // JSON and coerce, so a present-but-oddly-typed value never fails the WHOLE
+    // /models decode (which would break model import for that provider).
+    #[serde(default)]
+    context_length: Option<serde_json::Value>,
+    #[serde(default)]
+    max_model_len: Option<serde_json::Value>,
+    #[serde(default)]
+    max_context_length: Option<serde_json::Value>,
+}
+
+impl OpenAiModelItem {
+    fn detected_context_window(&self) -> Option<u32> {
+        [
+            &self.context_length,
+            &self.max_model_len,
+            &self.max_context_length,
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(coerce_context_window)
+    }
+}
+
+/// Coerce a JSON context-window value (int / float / numeric string) to a token
+/// count, ignoring anything that isn't a sane positive window.
+fn coerce_context_window(value: &serde_json::Value) -> Option<u32> {
+    let tokens = match value {
+        serde_json::Value::Number(number) => number.as_f64(),
+        serde_json::Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
+    }?;
+    if tokens.is_finite() && tokens >= 1024.0 && tokens <= u32::MAX as f64 {
+        Some(tokens as u32)
+    } else {
+        None
+    }
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FetchProviderModelsOutput {
     model_ids: Vec<String>,
+    /// model_id → detected context window (tokens), for models whose `/models`
+    /// entry exposed it. The frontend stores this as each model's auto-detected
+    /// window (overridable by the user).
+    context_windows: std::collections::HashMap<String, u32>,
 }
 
 #[derive(Deserialize)]
@@ -596,6 +645,14 @@ struct StoredProviderModel {
     capabilities: Vec<String>,
     enabled: bool,
     is_default_chat_model: bool,
+    /// User-set context window (tokens). When present it overrides everything —
+    /// the authoritative "this model really has N tokens" escape hatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_window_override: Option<u32>,
+    /// Context window auto-detected from the provider's `/models` endpoint.
+    /// Used when there is no user override (beats the bundled catalog/default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    detected_context_window: Option<u32>,
 }
 
 pub(crate) struct OpenAiCompatibleProvider {
@@ -1921,6 +1978,87 @@ fn ask_document_stream(input: AskDocumentInput, app: tauri::AppHandle) -> Result
     Ok(())
 }
 
+/// Whether the question explicitly names one of the OTHER (non-focus) workspace
+/// documents — by its filename stem or its (distinctive) title. When it does, the
+/// focus document's "current view" is noise: the user is asking about a different
+/// paper, so seeding evidence from the page they happen to be looking at floods
+/// the evidence with the wrong document. We use this to suppress current-view
+/// seeding and let retrieval route to the named document instead.
+/// Whether `needle` appears in `haystack` delimited by non-alphanumeric
+/// boundaries (a whole-token match), so a short filename stem like "data" does
+/// NOT match inside "database". Both are already lowercased.
+fn mentions_token(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(needle) {
+        let start = from + offset;
+        let end = start + needle.len();
+        let before_ok = start == 0
+            || !haystack[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric);
+        let after_ok = end >= haystack.len()
+            || !haystack[end..]
+                .chars()
+                .next()
+                .is_some_and(char::is_alphanumeric);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// Whether the question explicitly names a NON-focus indexed document (by filename
+/// stem or distinctive title). One scan over all indexed docs (not the capped
+/// manifest), so it still fires for documents the large-library manifest omitted.
+fn question_targets_non_focus_document(
+    conn: &Connection,
+    question: &str,
+    focus_document_id: &str,
+) -> bool {
+    let normalized = question.to_lowercase();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT id, COALESCE(NULLIF(short_title, ''), title), path
+         FROM documents WHERE index_status = 'indexed'",
+    ) else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }) else {
+        return false;
+    };
+    for (id, title, path) in rows.flatten() {
+        if id == focus_document_id {
+            continue;
+        }
+        // The filename the user most likely typed (e.g. "forge_ieee_preprint").
+        let stem = std::path::Path::new(&path)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_lowercase();
+        if stem.chars().count() >= 4 && mentions_token(&normalized, &stem) {
+            return true;
+        }
+        // Or a distinctive document title spelled out in the question.
+        let title = title.trim().to_lowercase();
+        if title.chars().count() >= 8 && mentions_token(&normalized, &title) {
+            return true;
+        }
+    }
+    false
+}
+
 async fn current_view_decision_for_input(
     question: &str,
     input: &AskDocumentInput,
@@ -2226,6 +2364,8 @@ async fn run_ask_document(
             runtime::rag::WorkspaceManifest {
                 entries: Vec::new(),
                 document_ids: Vec::new(),
+                total_indexed: 0,
+                all_document_ids: Vec::new(),
             }
         })
     };
@@ -2235,6 +2375,25 @@ async fn run_ask_document(
         .iter()
         .map(String::as_str)
         .collect();
+    // Progressive disclosure: for a large library the unified loop does NOT inline
+    // the whole manifest. It gets a compact block (focus + @-referenced) plus
+    // `search_library`/`list_documents` tools, and may route to ANY indexed doc —
+    // so its dispatch whitelist is the full indexed set, not the capped manifest.
+    let library_is_large = workspace_manifest.is_large();
+    let unified_loop_manifest_text = if library_is_large {
+        workspace_manifest.to_prompt_block_compact()
+    } else {
+        workspace_manifest_text.clone()
+    };
+    let unified_visible_document_id_refs: Vec<&str> = if library_is_large {
+        workspace_manifest
+            .all_document_ids
+            .iter()
+            .map(String::as_str)
+            .collect()
+    } else {
+        visible_document_id_refs.clone()
+    };
 
     let selected_provider_id = input.model_provider_id.as_deref().unwrap_or("").trim();
     let provider_result = providers::resolve_chat_provider(
@@ -2294,13 +2453,40 @@ async fn run_ask_document(
         input.page,
         input.selected_text.as_deref(),
     )?;
-    let current_view_decision = current_view_decision_for_input(
-        question,
-        &input,
-        current_view_metadata.as_ref(),
-        provider_result.as_ref().ok().map(|(provider, _)| provider),
-    )
-    .await;
+    // If the question explicitly names another workspace document, the focus
+    // document's current page is noise — suppress current-view seeding so the
+    // retrieval loop routes to the named document instead of flooding the
+    // evidence with the page the user happens to be viewing. (Selected text is an
+    // explicit current-view intent and is handled inside the decision fn, so this
+    // only matters for the no-selection case.)
+    let targets_other_document = {
+        let conn = database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        question_targets_non_focus_document(&conn, question, document_id)
+    };
+    let current_view_decision = if targets_other_document
+        && input
+            .selected_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+    {
+        log::info!(
+            "Suppressing current-view seeding: question names a non-focus document"
+        );
+        None
+    } else {
+        current_view_decision_for_input(
+            question,
+            &input,
+            current_view_metadata.as_ref(),
+            provider_result.as_ref().ok().map(|(provider, _)| provider),
+        )
+        .await
+    };
     let current_view_event = current_view_decision.as_ref().map(|decision| {
         runtime::agent::AgentTraceEvent::new(
             "judge_result",
@@ -2369,24 +2555,69 @@ async fn run_ask_document(
         agent_run.trace.events.insert(0, event);
     }
 
+    // The unified loop produces the answer itself (retrieval + answering share one
+    // growing context). When it runs, we skip the M4 judge AND the separate answer
+    // generation below. `None` means we fall through to the legacy M3+M4 path.
+    let mut unified_answer: Option<AskAnswerResult> = None;
+    // Whether the unified loop ran this turn (Ok OR Err). When it did, we must NOT
+    // also run the M4 judge: the loop already mutated `agent_run` (citations,
+    // ledger, trace), so a second retrieval pass would double-count evidence. On a
+    // unified-loop error we instead fall through to the best-effort/refusal answer
+    // path with whatever evidence was already gathered.
+    let mut unified_attempted = false;
     if let Ok((provider, _)) = provider_result.as_ref() {
-        if let Err(err) = agent_judge::improve_retrieval_with_llm_judge(
-            agent_judge::LlmJudgeLoopInput {
-                input: &input,
-                database,
-                app: Some(app),
-                question,
-                document_id,
-                visible_document_ids: &visible_document_id_refs,
-                workspace_manifest: &workspace_manifest_text,
-                provider,
-                activity_event_id: activity_event_id.as_deref(),
-            },
-            &mut agent_run,
-        )
-        .await
-        {
-            log::warn!("LLM answerability judge skipped: {err}");
+        // Strong (native tool-calling) models go through the unified agent loop;
+        // others (and image questions) use the legacy M4 judge + answer path.
+        if llm::agent_loop::should_use_unified_loop(provider, &input) {
+            unified_attempted = true;
+            // Clone the session memory block up front so the loop can borrow
+            // `agent_run` mutably (to accumulate citations) without conflicting.
+            let session_context = agent_run.session_context.clone();
+            match llm::agent_loop::run_unified_agent_loop(
+                llm::agent_loop::UnifiedLoopInput {
+                    input: &input,
+                    database,
+                    app,
+                    question,
+                    document_id,
+                    visible_document_ids: &unified_visible_document_id_refs,
+                    workspace_manifest: &unified_loop_manifest_text,
+                    library_is_large,
+                    session_context: &session_context,
+                    provider,
+                    activity_event_id: activity_event_id.as_deref(),
+                },
+                &mut agent_run,
+            )
+            .await
+            {
+                Ok(result) => unified_answer = Some(result),
+                Err(err) => {
+                    log::warn!(
+                        "Unified agent loop failed; answering from gathered evidence: {err}"
+                    );
+                }
+            }
+        }
+        if !unified_attempted {
+            if let Err(err) = agent_judge::improve_retrieval_with_llm_judge(
+                agent_judge::LlmJudgeLoopInput {
+                    input: &input,
+                    database,
+                    app: Some(app),
+                    question,
+                    document_id,
+                    visible_document_ids: &visible_document_id_refs,
+                    workspace_manifest: &workspace_manifest_text,
+                    provider,
+                    activity_event_id: activity_event_id.as_deref(),
+                },
+                &mut agent_run,
+            )
+            .await
+            {
+                log::warn!("LLM answerability judge skipped: {err}");
+            }
         }
     } else if let Err(err) = provider_result.as_ref() {
         let judge_required = !agent_judge::has_image_context(&input)
@@ -2445,113 +2676,128 @@ async fn run_ask_document(
 
     let retrieval_budget_exhausted = agent_judge::retrieval_budget_exhausted(&agent_run);
     let retrieval_attempt_count = agent_judge::retrieval_attempt_count(&agent_run);
-    // Refuse with the "insufficient evidence" message ONLY when the retrieval loop
-    // is neither answerable NOR has enough accumulated evidence for a best-effort,
-    // caveated answer. When best-effort applies, fall through to the normal answer
-    // generator (which is told to state its limits) so open-ended questions degrade
-    // to "here's what I can tell, with stated uncertainty" instead of refusing.
-    if !agent_judge::has_image_context(&input)
-        && !agent_judge::retrieval_is_answerable(&agent_run)
-        && !agent_judge::should_answer_best_effort(&agent_run)
-    {
-        let answer = insufficient_evidence_answer(question, &agent_run, input.locale.as_deref());
-        runtime::agent::record_completed_turn(
-            agent_sessions,
-            runtime::agent::CompletedTurnRecord {
-                session_key: &session_id,
-                provider_id: if selected_provider_id.is_empty() {
-                    None
-                } else {
-                    Some(selected_provider_id)
-                },
-                question,
-                answer: &answer,
-                selected_text: input.selected_text.as_deref(),
-                citations: &agent_run.retrieval_run.citations,
-                trace: &agent_run.trace,
-            },
-        );
-        if let Err(err) = persist_chat_turn(
-            database,
-            ChatTurnPersistInput {
-                turn_id: activity_event_id.as_deref(),
-                session_id: &session_id,
-                document_id,
-                provider_id: if selected_provider_id.is_empty() {
-                    None
-                } else {
-                    Some(selected_provider_id)
-                },
-                model_key: input.model_key.as_deref(),
-                provider_label: "Local retrieval",
-                user_message: question,
-                assistant_answer: &answer,
-                reasoning_content: None,
-                selected_text: input.selected_text.as_deref(),
-                image_data_url: input.image_data_url.as_deref(),
-                citations: &agent_run.retrieval_run.citations,
-                claims: &[],
-                retrieval_trace: &agent_run.trace,
-                referenced_document_ids: &reference_document_ids,
-            },
-        ) {
-            log::warn!("Failed to persist insufficient-evidence chat turn: {err}");
-        }
-        return Ok(AskDocumentOutput {
-            answer,
-            reasoning_content: None,
-            provider: "Local retrieval".to_string(),
-            claims: Vec::new(),
-            citations: agent_run.retrieval_run.citations,
-            retrieval_trace: agent_run.trace,
-            can_continue_retrieval: false,
-            retrieval_attempt_count,
-            retrieval_budget_exhausted,
-        });
-    }
+    // The unified loop already produced (and streamed) its answer. The refusal /
+    // best-effort gating and the separate answer generator below apply only to the
+    // legacy M3+M4 fallback path. `provider_label` is needed by both paths for
+    // persistence/output, so derive it once without consuming `provider_result`.
+    let provider_label = provider_result
+        .as_ref()
+        .map(|(_, label)| label.clone())
+        .unwrap_or_else(|_| "Local retrieval".to_string());
 
-    // We're answering. If the gate never reached "answerable" (e.g. the judge
-    // timed out) but we have enough evidence to answer best-effort, stamp the gate
-    // so the UI shows "answered with available evidence" instead of "insufficient".
-    if !agent_judge::has_image_context(&input)
-        && agent_judge::should_answer_best_effort(&agent_run)
-    {
-        for gate in [
-            &mut agent_run.retrieval_run.trace.finalize_gate,
-            &mut agent_run.trace.finalize_gate,
-        ] {
-            if let Some(object) = gate.as_object_mut() {
-                object.insert("bestEffort".to_string(), serde_json::Value::Bool(true));
+    let answer_result = if let Some(result) = unified_answer {
+        result
+    } else {
+        // Refuse with the "insufficient evidence" message ONLY when the retrieval
+        // loop is neither answerable NOR has enough accumulated evidence for a
+        // best-effort, caveated answer. When best-effort applies, fall through to
+        // the normal answer generator (told to state its limits) so open-ended
+        // questions degrade to "here's what I can tell, with stated uncertainty".
+        if !agent_judge::has_image_context(&input)
+            && !agent_judge::retrieval_is_answerable(&agent_run)
+            && !agent_judge::should_answer_best_effort(&agent_run)
+        {
+            let answer =
+                insufficient_evidence_answer(question, &agent_run, input.locale.as_deref());
+            runtime::agent::record_completed_turn(
+                agent_sessions,
+                runtime::agent::CompletedTurnRecord {
+                    session_key: &session_id,
+                    provider_id: if selected_provider_id.is_empty() {
+                        None
+                    } else {
+                        Some(selected_provider_id)
+                    },
+                    question,
+                    answer: &answer,
+                    selected_text: input.selected_text.as_deref(),
+                    citations: &agent_run.retrieval_run.citations,
+                    trace: &agent_run.trace,
+                },
+            );
+            if let Err(err) = persist_chat_turn(
+                database,
+                ChatTurnPersistInput {
+                    turn_id: activity_event_id.as_deref(),
+                    session_id: &session_id,
+                    document_id,
+                    provider_id: if selected_provider_id.is_empty() {
+                        None
+                    } else {
+                        Some(selected_provider_id)
+                    },
+                    model_key: input.model_key.as_deref(),
+                    provider_label: "Local retrieval",
+                    user_message: question,
+                    assistant_answer: &answer,
+                    reasoning_content: None,
+                    selected_text: input.selected_text.as_deref(),
+                    image_data_url: input.image_data_url.as_deref(),
+                    citations: &agent_run.retrieval_run.citations,
+                    claims: &[],
+                    retrieval_trace: &agent_run.trace,
+                    referenced_document_ids: &reference_document_ids,
+                },
+            ) {
+                log::warn!("Failed to persist insufficient-evidence chat turn: {err}");
+            }
+            return Ok(AskDocumentOutput {
+                answer,
+                reasoning_content: None,
+                provider: "Local retrieval".to_string(),
+                claims: Vec::new(),
+                citations: agent_run.retrieval_run.citations,
+                retrieval_trace: agent_run.trace,
+                can_continue_retrieval: false,
+                retrieval_attempt_count,
+                retrieval_budget_exhausted,
+            });
+        }
+
+        // We're answering. If the gate never reached "answerable" (e.g. the judge
+        // timed out) but we have enough evidence to answer best-effort, stamp the
+        // gate so the UI shows "answered with available evidence".
+        if !agent_judge::has_image_context(&input)
+            && agent_judge::should_answer_best_effort(&agent_run)
+        {
+            for gate in [
+                &mut agent_run.retrieval_run.trace.finalize_gate,
+                &mut agent_run.trace.finalize_gate,
+            ] {
+                if let Some(object) = gate.as_object_mut() {
+                    object.insert("bestEffort".to_string(), serde_json::Value::Bool(true));
+                }
             }
         }
-    }
 
-    let (provider, provider_label) = provider_result?;
-    if let Some(event_id) = activity_event_id.as_deref() {
-        let _ = app.emit(
-            "lumenfolio://agent-activity",
-            AgentActivityEventOutput {
-                event_id: event_id.to_string(),
-                event: runtime::agent::AgentTraceEvent::new(
-                    "answer_start",
-                    "generate_answer",
-                    "running",
-                    "Generating answer",
-                    "Streaming answer from the configured chat model",
-                    "streaming answer from the configured chat model",
-                ),
-            },
-        );
-    }
-    let answer_result = llm::chat::ask_with_openai_compatible(
-        question,
-        &input,
-        &agent_run,
-        &provider,
-        app,
-        activity_event_id.as_deref(),
-    )
-    .await?;
+        let (provider, _) = provider_result?;
+        if let Some(event_id) = activity_event_id.as_deref() {
+            let _ = app.emit(
+                "lumenfolio://agent-activity",
+                AgentActivityEventOutput {
+                    event_id: event_id.to_string(),
+                    event: runtime::agent::AgentTraceEvent::new(
+                        "answer_start",
+                        "generate_answer",
+                        "running",
+                        "Generating answer",
+                        "Streaming answer from the configured chat model",
+                        "streaming answer from the configured chat model",
+                    ),
+                },
+            );
+        }
+        llm::chat::ask_with_openai_compatible(
+            question,
+            &input,
+            &agent_run,
+            &provider,
+            &workspace_manifest_text,
+            app,
+            activity_event_id.as_deref(),
+        )
+        .await?
+    };
     runtime::agent::record_completed_turn(
         agent_sessions,
         runtime::agent::CompletedTurnRecord {
@@ -3366,16 +3612,25 @@ async fn fetch_provider_models(
         .json::<OpenAiModelsResponse>()
         .await
         .map_err(|err| format!("Failed to decode model list response: {err}"))?;
-    let mut model_ids = parsed
-        .data
-        .into_iter()
-        .map(|item| item.id.trim().to_string())
-        .filter(|id| !id.is_empty())
-        .collect::<Vec<_>>();
+    let mut context_windows = std::collections::HashMap::new();
+    let mut model_ids = Vec::new();
+    for item in parsed.data {
+        let id = item.id.trim().to_string();
+        if id.is_empty() {
+            continue;
+        }
+        if let Some(window) = item.detected_context_window() {
+            context_windows.insert(id.clone(), window);
+        }
+        model_ids.push(id);
+    }
     model_ids.sort();
     model_ids.dedup();
 
-    Ok(FetchProviderModelsOutput { model_ids })
+    Ok(FetchProviderModelsOutput {
+        model_ids,
+        context_windows,
+    })
 }
 
 #[tauri::command]
@@ -3856,6 +4111,37 @@ fn truncate_for_error(value: &str, max_chars: usize) -> String {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentions_token_requires_word_boundaries() {
+        // Whole-token match.
+        assert!(mentions_token("what is forge_ieee_preprint.pdf about", "forge_ieee_preprint"));
+        assert!(mentions_token("summarize data today", "data"));
+        // Substring inside a larger word must NOT match.
+        assert!(!mentions_token("explain the database schema", "data"));
+        assert!(!mentions_token("metadata pipeline", "data"));
+        assert!(!mentions_token("anything", ""));
+    }
+
+    #[test]
+    fn coerce_context_window_accepts_int_float_string() {
+        assert_eq!(
+            coerce_context_window(&serde_json::json!(128000)),
+            Some(128000)
+        );
+        assert_eq!(
+            coerce_context_window(&serde_json::json!(128000.0)),
+            Some(128000)
+        );
+        assert_eq!(
+            coerce_context_window(&serde_json::json!("128000")),
+            Some(128000)
+        );
+        // Junk / too-small / non-numeric → None (never breaks the decode).
+        assert_eq!(coerce_context_window(&serde_json::json!("n/a")), None);
+        assert_eq!(coerce_context_window(&serde_json::json!(512)), None);
+        assert_eq!(coerce_context_window(&serde_json::json!(true)), None);
+    }
 
     #[test]
     fn budget_exhausted_chinese_answer_does_not_suggest_continue_retrieval() {

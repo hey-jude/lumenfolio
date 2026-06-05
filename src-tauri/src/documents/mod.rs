@@ -234,6 +234,9 @@ pub(crate) fn persist_workspace_scan(
         .map_err(|err| format!("Failed to commit workspace scan: {err}"))
 }
 
+/// Collect the PDFs DIRECTLY inside `dir` (one level only — subdirectories are
+/// skipped, see the `is_dir` branch). Each scanned folder maps to exactly the
+/// files it contains, so the sidebar never flattens nested folders together.
 pub(crate) fn collect_pdfs(
     dir: &Path,
     workspace_root_id: &str,
@@ -282,7 +285,10 @@ pub(crate) fn collect_pdfs(
         }
 
         if file_type.is_dir() {
-            collect_pdfs(&path, workspace_root_id, docs)?;
+            // One level only: subdirectory PDFs are intentionally NOT collected.
+            // A scanned folder shows just the PDFs directly inside it; to import a
+            // subfolder, add it as its own folder. (Recursing here flattened every
+            // nested PDF under the root with no indication of its origin folder.)
             continue;
         }
 
