@@ -26,7 +26,8 @@ use tauri::Emitter;
 use crate::runtime::agent::{tool_call_event, tool_result_event};
 use crate::{
     llm, normalize_base_url, optional_non_empty, runtime, truncate_for_error,
-    AgentActivityEventOutput, AskAnswerResult, AskDocumentInput, OpenAiCompatibleProvider,
+    AgentActivityEventOutput, AnswerDeltaEventOutput, AskAnswerResult, AskDocumentInput,
+    OpenAiCompatibleProvider,
 };
 
 /// Per tool-round HTTP timeout. Generous: a round may run an expensive retrieval
@@ -106,6 +107,8 @@ struct ToolRoundMessage {
     #[serde(default)]
     content: serde_json::Value,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<ToolCallEntry>>,
 }
 
@@ -172,6 +175,7 @@ pub(crate) async fn run_unified_agent_loop(
         };
         let mut tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
         let content_str = llm::chat::extract_chat_response_text(&choice.message.content);
+        let reasoning_str = choice.message.reasoning_content.clone().unwrap_or_default();
 
         if !tool_calls.is_empty() {
             // --- OpenAI-native structured tool calls ---
@@ -218,8 +222,12 @@ pub(crate) async fn run_unified_agent_loop(
         // `<tool_result>…</tool_result>` in a user message (the DSML protocol).
         let dsml_calls = parse_dsml_tool_calls(&content_str);
         if dsml_calls.is_empty() {
-            // No tool call of either kind — the model is ready to answer.
-            break;
+            // No tool call of either kind — this response IS the model's answer.
+            // Use it directly: no separate re-generation step (which is what made
+            // an interleaved model emit a trailing, un-runnable tool call). The
+            // loop is closed — the model either keeps calling tools above or
+            // answers here.
+            return build_unified_answer(&ctx, agent_run, &content_str, &reasoning_str);
         }
         log::info!(
             "unified_loop round={} DSML tool call(s)={}",
@@ -235,7 +243,11 @@ pub(crate) async fn run_unified_agent_loop(
         messages.push(serde_json::json!({ "role": "user", "content": tool_results }));
     }
 
-    finalize_answer(&ctx, agent_run, messages, &client, &endpoint).await
+    // Round cap reached while the model still wanted tools — force a final answer
+    // (no tools offered) so it commits to prose instead of looping forever.
+    compact_history(ctx.app, ctx.activity_event_id, agent_run, &mut messages, char_budget);
+    let (content, reasoning) = force_final_answer(&ctx, &client, &endpoint, &messages).await?;
+    build_unified_answer(&ctx, agent_run, &content, &reasoning)
 }
 
 /// A tool call parsed out of DeepSeek's DSML text format.
@@ -762,24 +774,17 @@ async fn send_tool_round(
 
 /// Final answer: stream from the SAME full message history (tool results included)
 /// with tools disabled so the model writes prose instead of calling more tools.
-async fn finalize_answer(
+/// Build the final answer from the model's TERMINAL response — the round in which
+/// it stopped requesting tools. There is no second "answer generation" call, so an
+/// interleaved model can't emit a trailing, un-runnable tool call here; the loop
+/// is genuinely closed (keep calling tools, or answer). Any stray tool-call markup
+/// is stripped as a safety net.
+fn build_unified_answer(
     ctx: &UnifiedLoopInput<'_>,
     agent_run: &mut runtime::agent::AgentRunResult,
-    mut messages: Vec<serde_json::Value>,
-    client: &reqwest::Client,
-    endpoint: &str,
+    content: &str,
+    reasoning: &str,
 ) -> Result<AskAnswerResult, String> {
-    // The final answer call sends the whole history — compact it one last time so
-    // it stays within the model's context window even after a long tool loop.
-    let char_budget = history_char_budget(&agent_run.retrieval_run.context_budget);
-    compact_history(
-        ctx.app,
-        ctx.activity_event_id,
-        agent_run,
-        &mut messages,
-        char_budget,
-    );
-
     if let Some(event_id) = ctx.activity_event_id {
         let _ = ctx.app.emit(
             "lumenfolio://agent-activity",
@@ -790,60 +795,21 @@ async fn finalize_answer(
                     "generate_answer",
                     "running",
                     "Generating answer",
-                    "Streaming answer from the unified agent loop",
-                    "unified_loop streaming final answer",
+                    "Composing the answer from the gathered evidence",
+                    "unified_loop building final answer",
                 ),
             },
         );
     }
 
-    // Deliberately send NO `tools` for the final answer. Some providers return a
-    // model's tool call as plain TEXT (e.g. DeepSeek-style `<｜｜DSML｜｜tool_calls>…`)
-    // rather than structured tool_calls; if `tools` are present here the model
-    // emits another such text tool-call AS the answer instead of prose. With no
-    // tools advertised it answers from the gathered evidence.
-    let request = serde_json::json!({
-        "model": ctx.provider.model,
-        "messages": messages,
-        "temperature": 0.2,
-        "stream": true,
-    });
-
-    let mut builder = client
-        .post(endpoint)
-        .header("Accept", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .json(&request);
-    if let Some(api_key) = &ctx.provider.api_key {
-        builder = builder.bearer_auth(api_key);
-    }
-    let response = builder
-        .send()
-        .await
-        .map_err(|err| format!("Agent loop answer request failed: {err}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Agent loop answer provider returned {status}: {}",
-            truncate_for_error(&body, 600)
-        ));
-    }
-
-    let streamed = llm::openai_stream::read_openai_answer_stream(
-        response,
-        ctx.app,
-        ctx.activity_event_id,
-    )
-    .await?;
-    let answer = streamed.answer.trim().to_string();
+    let answer = llm::openai_stream::strip_tool_call_markup(content);
     if answer.is_empty() {
-        return Err("Agent loop returned an empty answer".to_string());
+        return Err("Agent loop produced an empty answer".to_string());
     }
+    let reasoning = llm::openai_stream::strip_tool_call_markup(reasoning);
 
-    // Stamp an answerable gate so downstream persistence/UI treats this turn as
-    // answered via the unified runtime — a first-class verdict alongside the M4
-    // judge (see FinalizeRuntime::is_verdict).
+    // Answerable gate — a first-class verdict alongside the M4 judge
+    // (see FinalizeRuntime::is_verdict).
     let gate = serde_json::json!({
         "status": runtime::agent::FinalizeStatus::Answerable.as_str(),
         "reason": "Answered via the unified tool-calling agent loop.",
@@ -855,17 +821,52 @@ async fn finalize_answer(
     agent_run.retrieval_run.trace.finalize_gate = gate.clone();
     agent_run.trace.finalize_gate = gate;
 
-    let claims = llm::claims::fallback_claims_from_answer(&answer, &agent_run.retrieval_run.citations);
-    let answer = llm::claims::strip_known_inline_citation_labels(
-        &answer,
-        &agent_run.retrieval_run.citations,
-    );
+    let claims =
+        llm::claims::fallback_claims_from_answer(&answer, &agent_run.retrieval_run.citations);
+    let answer =
+        llm::claims::strip_known_inline_citation_labels(&answer, &agent_run.retrieval_run.citations);
+
+    // Push the answer to the UI in one shot — the tool rounds are non-streamed, so
+    // there are no token deltas; the frontend renders this delta as the answer.
+    if let Some(event_id) = ctx.activity_event_id {
+        let _ = ctx.app.emit(
+            "lumenfolio://answer-delta",
+            AnswerDeltaEventOutput {
+                event_id: event_id.to_string(),
+                delta: answer.clone(),
+            },
+        );
+    }
 
     Ok(AskAnswerResult {
         answer,
-        reasoning_content: optional_non_empty(streamed.reasoning_content),
+        reasoning_content: optional_non_empty(reasoning),
         claims,
     })
+}
+
+/// Last resort when the round cap is hit while the model still wants tools: one
+/// non-streaming call with NO tools offered, so it commits to a prose answer
+/// instead of requesting yet another tool. Returns (content, reasoning).
+async fn force_final_answer(
+    ctx: &UnifiedLoopInput<'_>,
+    client: &reqwest::Client,
+    endpoint: &str,
+    messages: &[serde_json::Value],
+) -> Result<(String, String), String> {
+    let request = serde_json::json!({
+        "model": ctx.provider.model,
+        "messages": messages,
+        "temperature": 0.2,
+        "stream": false,
+    });
+    let response = send_tool_round(client, endpoint, ctx.provider, &request).await?;
+    let Some(choice) = response.choices.into_iter().next() else {
+        return Err("Agent loop forced-answer response had no choices".to_string());
+    };
+    let content = llm::chat::extract_chat_response_text(&choice.message.content);
+    let reasoning = choice.message.reasoning_content.clone().unwrap_or_default();
+    Ok((content, reasoning))
 }
 
 fn emit_activity(
