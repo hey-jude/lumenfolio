@@ -1958,6 +1958,38 @@ function chatTurnIdFromMessage(message) {
     : ''
 }
 
+// Edit the last user question and re-ask: drop that turn from the UI and from
+// the persisted store, then resend the edited text (preserving the turn's
+// @-mentions). Persisted turn id comes from `turnId` (loaded) or `activityEventId`
+// (sent this session).
+async function handleEditResend({ messageId, text } = {}) {
+  const newText = String(text || '').trim()
+  if (!messageId || !newText) return
+  const session = activeSession.value
+  if (!session || !Array.isArray(session.messages)) return
+  const messages = session.messages
+  const userIndex = messages.findIndex((item) => item.id === messageId && item.role === 'user')
+  if (userIndex === -1) return
+  const mentions = Array.isArray(messages[userIndex].mentionedDocumentIds)
+    ? [...messages[userIndex].mentionedDocumentIds]
+    : []
+  const turnIds = [...new Set(
+    messages
+      .slice(userIndex)
+      .map((item) => chatTurnIdFromMessage(item) || String(item?.activityEventId || '').trim())
+      .filter(Boolean),
+  )]
+  // Drop the turn (and anything after it) from the UI.
+  session.messages = messages.slice(0, userIndex)
+  // Delete the persisted turn(s); best-effort.
+  if (turnIds.length) {
+    invoke('clear_chat_turns', { input: { sessionId: session.id, turnIds } })
+      .catch((err) => console.warn(ui.value.clearChatHistoryFailed, err))
+  }
+  // Re-ask with the edited question.
+  await handleSend({ text: newText, mentionedDocIds: mentions, ignoreSelection: true })
+}
+
 function openClearChatHistoryConfirm() {
   const session = activeSession.value
   if (!session) return
@@ -4016,6 +4048,7 @@ onMounted(() => {
       @close-history="sessionHistoryOpen = false"
       @toggle-notes="toggleNotesDrawer"
       @set-focus-doc="handleSetSessionFocus"
+      @edit-resend="handleEditResend"
       @send="handleSend"
     />
 

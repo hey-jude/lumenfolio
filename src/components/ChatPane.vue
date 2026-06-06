@@ -110,7 +110,13 @@ const emit = defineEmits([
   'close-history',
   'toggle-notes',
   'set-focus-doc',
+  'edit-resend',
 ])
+
+// Inline edit of the last user question ("edit & re-ask"). Only one message is
+// editable at a time; submitting replaces the last turn (handled by the parent).
+const editingMessageId = ref('')
+const editDraft = ref('')
 
 // A plain mouse wheel only emits vertical deltas, which the horizontally-only
 // session tab strip ignores by default. Translate vertical wheel into
@@ -521,6 +527,47 @@ function localized(value) {
 
 function messageText(message) {
   return String(localized(message.content) || '')
+}
+
+// The last user question — the only one that can be edited & re-asked.
+const lastUserMessage = computed(() => {
+  const msgs = visibleMessages.value
+  for (let i = msgs.length - 1; i >= 0; i -= 1) {
+    if (msgs[i].role === 'user') return msgs[i]
+  }
+  return null
+})
+
+// Editing is blocked while the turn is still streaming.
+const lastTurnRunning = computed(() => {
+  const msgs = visibleMessages.value
+  const last = msgs[msgs.length - 1]
+  return Boolean(last && last.role === 'assistant' && last.status === 'running')
+})
+
+function isEditableUserMessage(message) {
+  return (
+    message.role === 'user'
+    && message.id === lastUserMessage.value?.id
+    && !lastTurnRunning.value
+  )
+}
+
+function startEdit(message) {
+  editingMessageId.value = message.id
+  editDraft.value = messageText(message)
+}
+
+function cancelEdit() {
+  editingMessageId.value = ''
+  editDraft.value = ''
+}
+
+function submitEdit(message) {
+  const text = editDraft.value.trim()
+  if (!text) return
+  emit('edit-resend', { messageId: message.id, text })
+  cancelEdit()
 }
 
 function reasoningText(message) {
@@ -1699,12 +1746,51 @@ function evidenceSourceLabel(source) {
               </summary>
               <div class="reasoning-content">{{ reasoningText(message) }}</div>
             </details>
+            <!-- Inline edit of the last user question: textarea replaces the bubble. -->
+            <div v-if="editingMessageId === message.id" class="message-edit">
+              <textarea
+                v-model="editDraft"
+                class="message-edit-input"
+                rows="2"
+                :placeholder="ui.inputPlaceholder"
+                @keydown.enter.exact.prevent="submitEdit(message)"
+                @keydown.esc.prevent="cancelEdit()"
+                @mousedown.stop
+              ></textarea>
+              <div class="message-edit-actions">
+                <button type="button" class="message-edit-cancel" @click="cancelEdit()">{{ ui.cancel }}</button>
+                <button
+                  type="button"
+                  class="message-edit-submit"
+                  :disabled="!editDraft.trim()"
+                  @click="submitEdit(message)"
+                >{{ ui.reAsk }}</button>
+              </div>
+            </div>
             <MarkdownText
-              v-if="messageText(message)"
+              v-else-if="messageText(message)"
               class="message-content"
               :text="messageText(message)"
               :loading="message.role === 'assistant' && message.status === 'running'"
             />
+            <div
+              v-if="isEditableUserMessage(message) && editingMessageId !== message.id"
+              class="message-edit-affordance"
+            >
+              <button
+                type="button"
+                class="message-edit-btn"
+                :title="ui.editAndReask"
+                :aria-label="ui.editAndReask"
+                @click="startEdit(message)"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M4 20h4L18 10l-4-4L4 16v4Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" />
+                  <path d="M13.5 6.5l4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                </svg>
+                <span>{{ ui.editAndReask }}</span>
+              </button>
+            </div>
             <div v-else-if="isWaitingForAnswer(message) && !agentProcessVisible(message)" class="message-loading" :aria-label="runningStatusLabel(message)">
               <span class="loading-dots" aria-hidden="true">
                 <span></span>
@@ -2550,6 +2636,87 @@ function evidenceSourceLabel(source) {
 .message-content {
   color: var(--text-primary);
   font-size: 13px;
+}
+
+/* Inline "edit & re-ask" of the last user question. */
+.message-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.message-edit-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid rgba(106, 169, 255, 0.4);
+  border-radius: 10px;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.message-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.message-edit-cancel,
+.message-edit-submit {
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.message-edit-submit {
+  border-color: rgba(106, 169, 255, 0.45);
+  background: rgba(106, 169, 255, 0.16);
+  color: var(--text-primary);
+}
+
+.message-edit-submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.message-edit-affordance {
+  display: flex;
+  margin-top: 6px;
+}
+
+.message-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 140ms ease, color 140ms ease, background 140ms ease;
+}
+
+.message-edit-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.message-edit-btn:hover {
+  opacity: 1;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .message-loading {
