@@ -205,10 +205,16 @@ pub(crate) async fn run_unified_agent_loop(
             continue;
         }
 
-        // --- DSML text tool calls (e.g. DeepSeek V4) ---
-        // This provider returns the tool call as TEXT in `content`
-        // (`<｜DSML｜tool_calls>…`), not as structured tool_calls. Parse and execute
-        // them so the agent can actually explore, then feed the results back as
+        // --- DSML text tool calls (e.g. DeepSeek V4) — COMPATIBILITY FALLBACK ---
+        // Reached ONLY when there were no native `tool_calls` above, so normal
+        // tool-calling models are never affected by this branch. Some endpoints
+        // (a passthrough proxy, or a server without DSML tool parsing) return a
+        // DeepSeek tool call as TEXT in `content` (`<｜DSML｜tool_calls>…`) instead of
+        // structured tool_calls. The canonical fix is server-side parsing — the
+        // official DeepSeek API, or vLLM/SGLang with `--tool-call-parser deepseek_v4`,
+        // expose proper `tool_calls` and take the native path above. This block is
+        // a client-side shim for non-conformant endpoints: parse the DSML so the
+        // agent can still explore, then feed results back as
         // `<tool_result>…</tool_result>` in a user message (the DSML protocol).
         let dsml_calls = parse_dsml_tool_calls(&content_str);
         if dsml_calls.is_empty() {
@@ -242,6 +248,12 @@ struct DsmlCall {
 /// (DeepSeek V4 "Tool Calling (DSML Format)"). Delimiters use ASCII `|` or
 /// full-width `｜` (U+FF5C), sometimes doubled, e.g. `<｜DSML｜invoke name="…">`.
 /// A `string="true"` parameter is a raw string; `string="false"` is JSON.
+///
+/// Fallback only: this exists for endpoints that don't parse DSML server-side
+/// (the official DeepSeek API and vLLM/SGLang with the deepseek_v4 tool parser
+/// already expose structured `tool_calls`). It is called only when native
+/// `tool_calls` were absent, and returns an empty vec for ordinary prose — so it
+/// never interferes with other models' normal tool calling.
 fn parse_dsml_tool_calls(content: &str) -> Vec<DsmlCall> {
     use regex::Regex;
     use std::sync::OnceLock;
