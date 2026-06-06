@@ -1717,7 +1717,9 @@ function clearAssistantStreamState(eventId) {
 function applyAskDocumentMetadata(message, result) {
   message.claims = result?.claims || []
   message.provider = result?.provider || ''
-  message.reasoningContent = result?.reasoningContent || message.reasoningContent || ''
+  // Trust the final (server-cleaned) reasoning over the streamed accumulation, so
+  // leaked tool-call markup stripped on the backend doesn't linger in the drawer.
+  message.reasoningContent = result?.reasoningContent || ''
   message.citations = result?.citations?.length ? result.citations : message.citations || []
   message.retrievalTrace = result?.retrievalTrace || null
   message.activityEvents = result?.retrievalTrace?.events || message.activityEvents || []
@@ -1954,6 +1956,38 @@ function chatTurnIdFromMessage(message) {
   return id.endsWith(':user') || id.endsWith(':assistant')
     ? id.slice(0, id.lastIndexOf(':'))
     : ''
+}
+
+// Edit the last user question and re-ask: drop that turn from the UI and from
+// the persisted store, then resend the edited text (preserving the turn's
+// @-mentions). Persisted turn id comes from `turnId` (loaded) or `activityEventId`
+// (sent this session).
+async function handleEditResend({ messageId, text } = {}) {
+  const newText = String(text || '').trim()
+  if (!messageId || !newText) return
+  const session = activeSession.value
+  if (!session || !Array.isArray(session.messages)) return
+  const messages = session.messages
+  const userIndex = messages.findIndex((item) => item.id === messageId && item.role === 'user')
+  if (userIndex === -1) return
+  const mentions = Array.isArray(messages[userIndex].mentionedDocumentIds)
+    ? [...messages[userIndex].mentionedDocumentIds]
+    : []
+  const turnIds = [...new Set(
+    messages
+      .slice(userIndex)
+      .map((item) => chatTurnIdFromMessage(item) || String(item?.activityEventId || '').trim())
+      .filter(Boolean),
+  )]
+  // Drop the turn (and anything after it) from the UI.
+  session.messages = messages.slice(0, userIndex)
+  // Delete the persisted turn(s); best-effort.
+  if (turnIds.length) {
+    invoke('clear_chat_turns', { input: { sessionId: session.id, turnIds } })
+      .catch((err) => console.warn(ui.value.clearChatHistoryFailed, err))
+  }
+  // Re-ask with the edited question.
+  await handleSend({ text: newText, mentionedDocIds: mentions, ignoreSelection: true })
 }
 
 function openClearChatHistoryConfirm() {
@@ -4014,6 +4048,7 @@ onMounted(() => {
       @close-history="sessionHistoryOpen = false"
       @toggle-notes="toggleNotesDrawer"
       @set-focus-doc="handleSetSessionFocus"
+      @edit-resend="handleEditResend"
       @send="handleSend"
     />
 

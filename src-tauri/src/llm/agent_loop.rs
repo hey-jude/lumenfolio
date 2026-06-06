@@ -26,7 +26,8 @@ use tauri::Emitter;
 use crate::runtime::agent::{tool_call_event, tool_result_event};
 use crate::{
     llm, normalize_base_url, optional_non_empty, runtime, truncate_for_error,
-    AgentActivityEventOutput, AskAnswerResult, AskDocumentInput, OpenAiCompatibleProvider,
+    AgentActivityEventOutput, AnswerDeltaEventOutput, AskAnswerResult, AskDocumentInput,
+    OpenAiCompatibleProvider,
 };
 
 /// Per tool-round HTTP timeout. Generous: a round may run an expensive retrieval
@@ -106,6 +107,8 @@ struct ToolRoundMessage {
     #[serde(default)]
     content: serde_json::Value,
     #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<ToolCallEntry>>,
 }
 
@@ -171,124 +174,235 @@ pub(crate) async fn run_unified_agent_loop(
             return Err("Agent loop response had no choices".to_string());
         };
         let mut tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
-        if tool_calls.is_empty() {
-            // The model is done exploring and is ready to answer.
-            break;
-        }
-        // Some OpenAI-compatible servers omit the tool_call `id`. Synthesize a
-        // stable one so the assistant echo and the tool result still pair up
-        // (an empty/duplicate tool_call_id makes the next request fail).
-        for (index, call) in tool_calls.iter_mut().enumerate() {
-            if call.id.trim().is_empty() {
-                call.id = format!("call_{round}_{index}");
+        let content_str = llm::chat::extract_chat_response_text(&choice.message.content);
+        let reasoning_str = choice.message.reasoning_content.clone().unwrap_or_default();
+
+        if !tool_calls.is_empty() {
+            // --- OpenAI-native structured tool calls ---
+            // Some servers omit the tool_call `id`; synthesize a stable one so the
+            // assistant echo and the tool result still pair up.
+            for (index, call) in tool_calls.iter_mut().enumerate() {
+                if call.id.trim().is_empty() {
+                    call.id = format!("call_{round}_{index}");
+                }
             }
+            log::info!(
+                "unified_loop round={} native tool call(s)={}",
+                round + 1,
+                tool_calls.len()
+            );
+            messages.push(assistant_tool_call_message(&choice.message.content, &tool_calls));
+            for call in &tool_calls {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
+                    .unwrap_or_else(|err| {
+                        log::warn!(
+                            "unified_loop tool={} had unparseable arguments ({err}); using empty args: {}",
+                            call.function.name,
+                            truncate_for_error(&call.function.arguments, 200)
+                        );
+                        serde_json::json!({})
+                    });
+                let rendered =
+                    run_one_tool(&ctx, agent_run, rag_capabilities, &call.function.name, &args)?;
+                messages.push(tool_result_message(&call.id, &rendered));
+            }
+            continue;
+        }
+
+        // --- DSML text tool calls (e.g. DeepSeek V4) — COMPATIBILITY FALLBACK ---
+        // Reached ONLY when there were no native `tool_calls` above, so normal
+        // tool-calling models are never affected by this branch. Some endpoints
+        // (a passthrough proxy, or a server without DSML tool parsing) return a
+        // DeepSeek tool call as TEXT in `content` (`<｜DSML｜tool_calls>…`) instead of
+        // structured tool_calls. The canonical fix is server-side parsing — the
+        // official DeepSeek API, or vLLM/SGLang with `--tool-call-parser deepseek_v4`,
+        // expose proper `tool_calls` and take the native path above. This block is
+        // a client-side shim for non-conformant endpoints: parse the DSML so the
+        // agent can still explore, then feed results back as
+        // `<tool_result>…</tool_result>` in a user message (the DSML protocol).
+        let dsml_calls = parse_dsml_tool_calls(&content_str);
+        if dsml_calls.is_empty() {
+            // No tool call of either kind — this response IS the model's answer.
+            // Use it directly: no separate re-generation step (which is what made
+            // an interleaved model emit a trailing, un-runnable tool call). The
+            // loop is closed — the model either keeps calling tools above or
+            // answers here.
+            return build_unified_answer(&ctx, agent_run, &content_str, &reasoning_str);
         }
         log::info!(
-            "unified_loop round={} requested {} tool call(s)",
+            "unified_loop round={} DSML tool call(s)={}",
             round + 1,
-            tool_calls.len()
+            dsml_calls.len()
         );
-        // Echo the assistant's tool-call message back so the provider can match
-        // the tool results to it in the next request.
-        messages.push(assistant_tool_call_message(&choice.message.content, &tool_calls));
-
-        for call in &tool_calls {
-            let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
-                .unwrap_or_else(|err| {
-                    // Malformed argument JSON would otherwise silently become {} —
-                    // dropping e.g. a cross-document `documentId`. Surface it.
-                    log::warn!(
-                        "unified_loop tool={} had unparseable arguments ({err}); using empty args: {}",
-                        call.function.name,
-                        truncate_for_error(&call.function.arguments, 200)
-                    );
-                    serde_json::json!({})
-                });
-            let fallback_query = args
-                .get("query")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| ctx.question.to_string());
-
-            let start_event = tool_call_event(
-                call.function.name.clone(),
-                args.clone(),
-                format!("Calling {}", call.function.name),
-                String::new(),
-                format!(
-                    "unified_loop tool={} args={}",
-                    call.function.name,
-                    truncate_for_error(&args.to_string(), 200)
-                ),
-            );
-            emit_activity(ctx.app, ctx.activity_event_id, start_event.clone());
-            agent_run.trace.events.push(start_event);
-
-            // Workspace-level discovery tools (large library): list/search docs.
-            // They produce no citations — the model uses the ids they return to
-            // route a normal retrieval tool to a discovered document.
-            if is_library_tool(&call.function.name) {
-                let (rendered, count) = {
-                    let conn = ctx
-                        .database
-                        .conn
-                        .lock()
-                        .map_err(|_| "SQLite lock was poisoned".to_string())?;
-                    execute_library_tool(&conn, &call.function.name, &args)
-                };
-                let result_event = runtime::agent::AgentTraceEvent::new(
-                    "tool_result",
-                    call.function.name.clone(),
-                    "completed",
-                    format!("{} result", call.function.name),
-                    format!("{} returned {count} documents", call.function.name),
-                    format!("unified_loop library tool={} results={count}", call.function.name),
-                )
-                .with_tool(call.function.name.clone(), args.clone());
-                emit_activity(ctx.app, ctx.activity_event_id, result_event.clone());
-                agent_run.trace.events.push(result_event);
-                messages.push(tool_result_message(&call.id, &rendered));
-                continue;
-            }
-
-            let output = {
-                let conn = ctx
-                    .database
-                    .conn
-                    .lock()
-                    .map_err(|_| "SQLite lock was poisoned".to_string())?;
-                runtime::rag::execute_rag_tool_call_for_capabilities(
-                    &conn,
-                    ctx.document_id,
-                    ctx.visible_document_ids,
-                    &call.function.name,
-                    &args,
-                    &fallback_query,
-                    rag_capabilities,
-                )
-            };
-
-            let result_event = tool_result_event(
-                &output,
-                output.tool_call.tool.clone(),
-                format!(
-                    "unified_loop tool={} results={}",
-                    output.tool_call.tool, output.tool_call.result_count
-                ),
-            );
-            emit_activity(ctx.app, ctx.activity_event_id, result_event.clone());
-            agent_run.trace.events.push(result_event);
-
-            let rendered = render_tool_output(&call.function.name, &output);
-            // Merge the gained citations into the shared run (budget-aware merge +
-            // coverage + trace sync) — the same accounting the M4 loop uses.
-            crate::agent_judge::apply_judge_tool_output(agent_run, &output);
-            messages.push(tool_result_message(&call.id, &rendered));
+        messages.push(serde_json::json!({ "role": "assistant", "content": content_str }));
+        let mut tool_results = String::new();
+        for call in &dsml_calls {
+            let rendered = run_one_tool(&ctx, agent_run, rag_capabilities, &call.name, &call.args)?;
+            tool_results.push_str(&format!("<tool_result>{rendered}</tool_result>\n"));
         }
+        messages.push(serde_json::json!({ "role": "user", "content": tool_results }));
     }
 
-    finalize_answer(&ctx, agent_run, messages, &client, &endpoint).await
+    // Round cap reached while the model still wanted tools — force a final answer
+    // (no tools offered) so it commits to prose instead of looping forever.
+    compact_history(ctx.app, ctx.activity_event_id, agent_run, &mut messages, char_budget);
+    let (content, reasoning) = force_final_answer(&ctx, &client, &endpoint, &messages).await?;
+    build_unified_answer(&ctx, agent_run, &content, &reasoning)
+}
+
+/// A tool call parsed out of DeepSeek's DSML text format.
+struct DsmlCall {
+    name: String,
+    args: serde_json::Value,
+}
+
+/// Parse DSML tool calls that a model emitted as plain text in `content`
+/// (DeepSeek V4 "Tool Calling (DSML Format)"). Delimiters use ASCII `|` or
+/// full-width `｜` (U+FF5C), sometimes doubled, e.g. `<｜DSML｜invoke name="…">`.
+/// A `string="true"` parameter is a raw string; `string="false"` is JSON.
+///
+/// Fallback only: this exists for endpoints that don't parse DSML server-side
+/// (the official DeepSeek API and vLLM/SGLang with the deepseek_v4 tool parser
+/// already expose structured `tool_calls`). It is called only when native
+/// `tool_calls` were absent, and returns an empty vec for ordinary prose — so it
+/// never interferes with other models' normal tool calling.
+fn parse_dsml_tool_calls(content: &str) -> Vec<DsmlCall> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static INVOKE_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    static PARAM_RE: OnceLock<Option<Regex>> = OnceLock::new();
+    let invoke_re = INVOKE_RE
+        .get_or_init(|| {
+            Regex::new(
+                r#"(?s)<[|\x{ff5c}]+[^|\x{ff5c}>]*[|\x{ff5c}]+invoke\s+name="([^"]+)"\s*>(.*?)</[|\x{ff5c}]+[^|\x{ff5c}>]*[|\x{ff5c}]+invoke>"#,
+            )
+            .ok()
+        })
+        .as_ref();
+    let param_re = PARAM_RE
+        .get_or_init(|| {
+            Regex::new(
+                r#"(?s)<[|\x{ff5c}]+[^|\x{ff5c}>]*[|\x{ff5c}]+parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>(.*?)</[|\x{ff5c}]+[^|\x{ff5c}>]*[|\x{ff5c}]+parameter>"#,
+            )
+            .ok()
+        })
+        .as_ref();
+    let (Some(invoke_re), Some(param_re)) = (invoke_re, param_re) else {
+        return Vec::new();
+    };
+    let mut calls = Vec::new();
+    for invoke in invoke_re.captures_iter(content) {
+        let name = invoke[1].trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let mut args = serde_json::Map::new();
+        for param in param_re.captures_iter(&invoke[2]) {
+            let key = param[1].trim().to_string();
+            let raw = param[3].trim();
+            let value = if &param[2] == "true" {
+                serde_json::Value::String(raw.to_string())
+            } else {
+                serde_json::from_str(raw)
+                    .unwrap_or_else(|_| serde_json::Value::String(raw.to_string()))
+            };
+            args.insert(key, value);
+        }
+        calls.push(DsmlCall {
+            name,
+            args: serde_json::Value::Object(args),
+        });
+    }
+    calls
+}
+
+/// Execute a single tool call (library-discovery or RAG), emit its trace events,
+/// merge its citations into the run, and return the rendered result text. Shared
+/// by the native-tool-calls and DSML-tool-calls branches.
+fn run_one_tool(
+    ctx: &UnifiedLoopInput<'_>,
+    agent_run: &mut runtime::agent::AgentRunResult,
+    rag_capabilities: runtime::rag::RagToolCapabilities,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let fallback_query = args
+        .get("query")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| ctx.question.to_string());
+
+    let start_event = tool_call_event(
+        name.to_string(),
+        args.clone(),
+        format!("Calling {name}"),
+        String::new(),
+        format!(
+            "unified_loop tool={name} args={}",
+            truncate_for_error(&args.to_string(), 200)
+        ),
+    );
+    emit_activity(ctx.app, ctx.activity_event_id, start_event.clone());
+    agent_run.trace.events.push(start_event);
+
+    // Workspace-level discovery tools (large library): list/search docs. They
+    // produce no citations — the model uses the returned ids to route a normal
+    // retrieval tool to a discovered document.
+    if is_library_tool(name) {
+        let (rendered, count) = {
+            let conn = ctx
+                .database
+                .conn
+                .lock()
+                .map_err(|_| "SQLite lock was poisoned".to_string())?;
+            execute_library_tool(&conn, name, args)
+        };
+        let result_event = runtime::agent::AgentTraceEvent::new(
+            "tool_result",
+            name.to_string(),
+            "completed",
+            format!("{name} result"),
+            format!("{name} returned {count} documents"),
+            format!("unified_loop library tool={name} results={count}"),
+        )
+        .with_tool(name.to_string(), args.clone());
+        emit_activity(ctx.app, ctx.activity_event_id, result_event.clone());
+        agent_run.trace.events.push(result_event);
+        return Ok(rendered);
+    }
+
+    let output = {
+        let conn = ctx
+            .database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        runtime::rag::execute_rag_tool_call_for_capabilities(
+            &conn,
+            ctx.document_id,
+            ctx.visible_document_ids,
+            name,
+            args,
+            &fallback_query,
+            rag_capabilities,
+        )
+    };
+    let result_event = tool_result_event(
+        &output,
+        output.tool_call.tool.clone(),
+        format!(
+            "unified_loop tool={} results={}",
+            output.tool_call.tool, output.tool_call.result_count
+        ),
+    );
+    emit_activity(ctx.app, ctx.activity_event_id, result_event.clone());
+    agent_run.trace.events.push(result_event);
+    let rendered = render_tool_output(name, &output);
+    // Merge the gained citations into the shared run (budget-aware merge +
+    // coverage + trace sync) — the same accounting the M4 loop uses.
+    crate::agent_judge::apply_judge_tool_output(agent_run, &output);
+    Ok(rendered)
 }
 
 /// Build the OpenAI `tools` array from the RAG tool specs, plus the library
@@ -515,7 +629,7 @@ You can call retrieval tools to read the user's PDFs (search passages, open sect
 Call the tools you need to gather evidence, then write the answer. Use only evidence you retrieved or that is already provided below — do not invent facts. \
 When the question is about the user's document library/workspace itself — which documents or papers they have, what is in the sidebar/list, which of their papers is about a topic — the 'Workspace documents' list below is authoritative: answer directly from it (list the relevant titles), no retrieval is needed. \
 Prefer the focus document; only pass another document's id as the `documentId` tool argument when the question genuinely needs cross-document evidence, and only use an id listed in 'Workspace documents'. \
-When you have enough evidence, stop calling tools and reply with a structured Markdown answer (a short direct answer first, then concise paragraphs or lists). Do not return JSON. If the evidence is insufficient, say so clearly and state what is missing."
+When you have enough evidence, stop calling tools and reply with a structured Markdown answer (a short direct answer first, then concise paragraphs or lists). Do not return JSON. The final answer must be plain Markdown prose only — never write tool-call syntax, function calls, or any `<|...|>` markup in the answer itself. If the evidence is insufficient, say so clearly and state what is missing."
     );
 
     let mut context = String::new();
@@ -660,24 +774,17 @@ async fn send_tool_round(
 
 /// Final answer: stream from the SAME full message history (tool results included)
 /// with tools disabled so the model writes prose instead of calling more tools.
-async fn finalize_answer(
+/// Build the final answer from the model's TERMINAL response — the round in which
+/// it stopped requesting tools. There is no second "answer generation" call, so an
+/// interleaved model can't emit a trailing, un-runnable tool call here; the loop
+/// is genuinely closed (keep calling tools, or answer). Any stray tool-call markup
+/// is stripped as a safety net.
+fn build_unified_answer(
     ctx: &UnifiedLoopInput<'_>,
     agent_run: &mut runtime::agent::AgentRunResult,
-    mut messages: Vec<serde_json::Value>,
-    client: &reqwest::Client,
-    endpoint: &str,
+    content: &str,
+    reasoning: &str,
 ) -> Result<AskAnswerResult, String> {
-    // The final answer call sends the whole history — compact it one last time so
-    // it stays within the model's context window even after a long tool loop.
-    let char_budget = history_char_budget(&agent_run.retrieval_run.context_budget);
-    compact_history(
-        ctx.app,
-        ctx.activity_event_id,
-        agent_run,
-        &mut messages,
-        char_budget,
-    );
-
     if let Some(event_id) = ctx.activity_event_id {
         let _ = ctx.app.emit(
             "lumenfolio://agent-activity",
@@ -688,66 +795,21 @@ async fn finalize_answer(
                     "generate_answer",
                     "running",
                     "Generating answer",
-                    "Streaming answer from the unified agent loop",
-                    "unified_loop streaming final answer",
+                    "Composing the answer from the gathered evidence",
+                    "unified_loop building final answer",
                 ),
             },
         );
     }
 
-    let tools = build_openai_tools(
-        ctx.provider
-            .capabilities
-            .iter()
-            .any(|capability| capability == "vision"),
-        ctx.library_is_large,
-    );
-    let request = serde_json::json!({
-        "model": ctx.provider.model,
-        "messages": messages,
-        "temperature": 0.2,
-        "stream": true,
-        // Keep `tools` present but force prose so providers that validate
-        // tool_call_id references against a tool list stay happy.
-        "tools": tools,
-        "tool_choice": "none",
-    });
-
-    let mut builder = client
-        .post(endpoint)
-        .header("Accept", "text/event-stream")
-        .header("Cache-Control", "no-cache")
-        .json(&request);
-    if let Some(api_key) = &ctx.provider.api_key {
-        builder = builder.bearer_auth(api_key);
-    }
-    let response = builder
-        .send()
-        .await
-        .map_err(|err| format!("Agent loop answer request failed: {err}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Agent loop answer provider returned {status}: {}",
-            truncate_for_error(&body, 600)
-        ));
-    }
-
-    let streamed = llm::openai_stream::read_openai_answer_stream(
-        response,
-        ctx.app,
-        ctx.activity_event_id,
-    )
-    .await?;
-    let answer = streamed.answer.trim().to_string();
+    let answer = llm::openai_stream::strip_tool_call_markup(content);
     if answer.is_empty() {
-        return Err("Agent loop returned an empty answer".to_string());
+        return Err("Agent loop produced an empty answer".to_string());
     }
+    let reasoning = llm::openai_stream::strip_tool_call_markup(reasoning);
 
-    // Stamp an answerable gate so downstream persistence/UI treats this turn as
-    // answered via the unified runtime — a first-class verdict alongside the M4
-    // judge (see FinalizeRuntime::is_verdict).
+    // Answerable gate — a first-class verdict alongside the M4 judge
+    // (see FinalizeRuntime::is_verdict).
     let gate = serde_json::json!({
         "status": runtime::agent::FinalizeStatus::Answerable.as_str(),
         "reason": "Answered via the unified tool-calling agent loop.",
@@ -759,17 +821,52 @@ async fn finalize_answer(
     agent_run.retrieval_run.trace.finalize_gate = gate.clone();
     agent_run.trace.finalize_gate = gate;
 
-    let claims = llm::claims::fallback_claims_from_answer(&answer, &agent_run.retrieval_run.citations);
-    let answer = llm::claims::strip_known_inline_citation_labels(
-        &answer,
-        &agent_run.retrieval_run.citations,
-    );
+    let claims =
+        llm::claims::fallback_claims_from_answer(&answer, &agent_run.retrieval_run.citations);
+    let answer =
+        llm::claims::strip_known_inline_citation_labels(&answer, &agent_run.retrieval_run.citations);
+
+    // Push the answer to the UI in one shot — the tool rounds are non-streamed, so
+    // there are no token deltas; the frontend renders this delta as the answer.
+    if let Some(event_id) = ctx.activity_event_id {
+        let _ = ctx.app.emit(
+            "lumenfolio://answer-delta",
+            AnswerDeltaEventOutput {
+                event_id: event_id.to_string(),
+                delta: answer.clone(),
+            },
+        );
+    }
 
     Ok(AskAnswerResult {
         answer,
-        reasoning_content: optional_non_empty(streamed.reasoning_content),
+        reasoning_content: optional_non_empty(reasoning),
         claims,
     })
+}
+
+/// Last resort when the round cap is hit while the model still wants tools: one
+/// non-streaming call with NO tools offered, so it commits to a prose answer
+/// instead of requesting yet another tool. Returns (content, reasoning).
+async fn force_final_answer(
+    ctx: &UnifiedLoopInput<'_>,
+    client: &reqwest::Client,
+    endpoint: &str,
+    messages: &[serde_json::Value],
+) -> Result<(String, String), String> {
+    let request = serde_json::json!({
+        "model": ctx.provider.model,
+        "messages": messages,
+        "temperature": 0.2,
+        "stream": false,
+    });
+    let response = send_tool_round(client, endpoint, ctx.provider, &request).await?;
+    let Some(choice) = response.choices.into_iter().next() else {
+        return Err("Agent loop forced-answer response had no choices".to_string());
+    };
+    let content = llm::chat::extract_chat_response_text(&choice.message.content);
+    let reasoning = choice.message.reasoning_content.clone().unwrap_or_default();
+    Ok((content, reasoning))
 }
 
 fn emit_activity(
@@ -924,6 +1021,27 @@ mod tests {
             message["tool_calls"][0]["function"]["arguments"],
             "{\"query\":\"x\"}"
         );
+    }
+
+    #[test]
+    fn parses_dsml_tool_calls() {
+        // Exact delimiter form observed from deepseek-v4-flash (doubled full-width ｜).
+        let p = "\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}";
+        let content = format!(
+            "<{p}tool_calls>\n\
+             <{p}invoke name=\"search_chunks\">\n\
+             <{p}parameter name=\"query\" string=\"true\">DR Tulu results</{p}parameter>\n\
+             <{p}parameter name=\"limit\" string=\"false\">5</{p}parameter>\n\
+             </{p}invoke>\n\
+             </{p}tool_calls>"
+        );
+        let calls = parse_dsml_tool_calls(&content);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "search_chunks");
+        assert_eq!(calls[0].args["query"], "DR Tulu results");
+        assert_eq!(calls[0].args["limit"], 5); // string="false" -> JSON number
+        // Normal prose yields no tool calls.
+        assert!(parse_dsml_tool_calls("This is a normal answer with no markup.").is_empty());
     }
 
     #[test]
