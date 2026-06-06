@@ -21,13 +21,15 @@ pub(crate) fn strip_tool_call_markup(text: &str) -> String {
     use std::sync::OnceLock;
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
+        // Delimiters seen in the wild use ASCII `|` or full-width `｜` (U+FF5C),
+        // sometimes doubled, e.g. `<｜｜DSML｜｜tool_calls>`. `[|｜]+` matches any run.
         [
-            // <|…|tool_calls> … </|…|tool_calls> (pipe-delimited markup as text)
-            r"(?s)<\|[^|>]*\|tool_calls>.*?</\|[^|>]*\|tool_calls>",
+            // <…|tool_calls> … </…|tool_calls> (whole pipe-delimited block)
+            r"(?s)<[|\x{ff5c}]+[^|\x{ff5c}>]*[|\x{ff5c}]+tool_calls>.*?</[|\x{ff5c}]+[^|\x{ff5c}>]*[|\x{ff5c}]+tool_calls>",
             // DeepSeek special tokens (full-width pipe + ▁ separators)
             "(?s)<\u{ff5c}tool\u{2581}calls\u{2581}begin\u{ff5c}>.*?<\u{ff5c}tool\u{2581}calls\u{2581}end\u{ff5c}>",
             // stray leftover markup tags (unterminated blocks / individual tags)
-            r"</?\|[^|>]*\|(?:tool_calls|invoke|parameter|tool_call|tool_sep)[^>]*>",
+            r"</?[|\x{ff5c}]+[^|\x{ff5c}>]*[|\x{ff5c}]+(?:tool_calls|invoke|parameter|tool_call|tool_sep)[^>]*>",
         ]
         .iter()
         .filter_map(|pattern| Regex::new(pattern).ok())
@@ -552,6 +554,22 @@ mod tests {
         assert_eq!(cleaned, "Here is the answer.");
         assert!(!cleaned.contains("DSML"));
         assert!(!cleaned.contains("tool_calls"));
+    }
+
+    #[test]
+    fn strips_fullwidth_doubled_pipe_markup() {
+        // Exact format observed from deepseek-v4-flash (full-width ｜, doubled).
+        let p = "\u{ff5c}\u{ff5c}DSML\u{ff5c}\u{ff5c}";
+        let raw = format!(
+            "<{p}tool_calls>\n<{p}invoke name=\"search_chunks\">\n<{p}parameter name=\"query\" string=\"true\">DR Tulu-8B outperforms</{p}parameter>\n</{p}invoke>\n</{p}tool_calls>"
+        );
+        let cleaned = strip_tool_call_markup(&raw);
+        assert_eq!(cleaned, "");
+        assert!(!cleaned.contains("tool_calls"));
+        assert!(!cleaned.contains("DSML"));
+        // With surrounding prose, only the markup block is removed.
+        let mixed = format!("Here is the summary.\n{raw}");
+        assert_eq!(strip_tool_call_markup(&mixed), "Here is the summary.");
     }
 
     #[test]

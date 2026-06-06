@@ -695,22 +695,16 @@ async fn finalize_answer(
         );
     }
 
-    let tools = build_openai_tools(
-        ctx.provider
-            .capabilities
-            .iter()
-            .any(|capability| capability == "vision"),
-        ctx.library_is_large,
-    );
+    // Deliberately send NO `tools` for the final answer. Some providers return a
+    // model's tool call as plain TEXT (e.g. DeepSeek-style `<｜｜DSML｜｜tool_calls>…`)
+    // rather than structured tool_calls; if `tools` are present here the model
+    // emits another such text tool-call AS the answer instead of prose. With no
+    // tools advertised it answers from the gathered evidence.
     let request = serde_json::json!({
         "model": ctx.provider.model,
         "messages": messages,
         "temperature": 0.2,
         "stream": true,
-        // Keep `tools` present but force prose so providers that validate
-        // tool_call_id references against a tool list stay happy.
-        "tools": tools,
-        "tool_choice": "none",
     });
 
     let mut builder = client
