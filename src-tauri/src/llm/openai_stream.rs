@@ -9,6 +9,39 @@ use crate::{
 const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
 
+/// Strip leaked tool-call markup from an answer/reasoning string.
+///
+/// Some tool-calling models (e.g. DeepSeek "interleaved" reasoning models) emit
+/// their tool-call syntax as plain text — `<|DSML|tool_calls>…</|DSML|tool_calls>`
+/// or the DeepSeek special tokens — inside `content`/`reasoning_content`. Without
+/// this, that raw markup shows up in the answer or the "Thinking" drawer as
+/// garbage. The patterns are specific enough not to touch normal prose.
+pub(crate) fn strip_tool_call_markup(text: &str) -> String {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            // <|…|tool_calls> … </|…|tool_calls> (pipe-delimited markup as text)
+            r"(?s)<\|[^|>]*\|tool_calls>.*?</\|[^|>]*\|tool_calls>",
+            // DeepSeek special tokens (full-width pipe + ▁ separators)
+            "(?s)<\u{ff5c}tool\u{2581}calls\u{2581}begin\u{ff5c}>.*?<\u{ff5c}tool\u{2581}calls\u{2581}end\u{ff5c}>",
+            // stray leftover markup tags (unterminated blocks / individual tags)
+            r"</?\|[^|>]*\|(?:tool_calls|invoke|parameter|tool_call|tool_sep)[^>]*>",
+        ]
+        .iter()
+        .filter_map(|pattern| Regex::new(pattern).ok())
+        .collect()
+    });
+    let mut cleaned = std::borrow::Cow::Borrowed(text);
+    for re in patterns {
+        if let std::borrow::Cow::Owned(next) = re.replace_all(&cleaned, "") {
+            cleaned = std::borrow::Cow::Owned(next);
+        }
+    }
+    cleaned.trim().to_string()
+}
+
 /// Splits inline `<think>…</think>` reasoning out of the assistant `content`
 /// stream, for providers (Qwen, GLM, many OpenAI-compatible endpoints) that
 /// embed reasoning in the content instead of a separate `reasoning_content`
@@ -161,9 +194,12 @@ pub(crate) async fn read_openai_answer_stream(
         answer.chars().count(),
         reasoning_content.chars().count()
     );
+    // Strip any tool-call markup the model leaked into the answer or its reasoning
+    // (interleaved tool-calling models emit it as plain text). The live deltas may
+    // have shown it briefly, but the final/persisted value is clean.
     Ok(StreamedChatText {
-        answer,
-        reasoning_content,
+        answer: strip_tool_call_markup(&answer),
+        reasoning_content: strip_tool_call_markup(&reasoning_content),
     })
 }
 
@@ -502,6 +538,33 @@ mod tests {
         reasoning.push_str(&r);
         assert_eq!(answer, "Hello  world");
         assert_eq!(reasoning, "reason here");
+    }
+
+    #[test]
+    fn strips_leaked_tool_call_markup() {
+        let dsml = "Here is the answer.\n\
+            <|DSML|tool_calls>\n\
+            <|DSML|invoke name=\"search_chunks\">\n\
+            <|DSML|parameter name=\"query\" string=\"true\">DR Tulu</|DSML|parameter>\n\
+            </|DSML|invoke>\n\
+            </|DSML|tool_calls>";
+        let cleaned = strip_tool_call_markup(dsml);
+        assert_eq!(cleaned, "Here is the answer.");
+        assert!(!cleaned.contains("DSML"));
+        assert!(!cleaned.contains("tool_calls"));
+    }
+
+    #[test]
+    fn strips_deepseek_tool_call_tokens() {
+        // Block delimited by DeepSeek <｜tool▁calls▁begin｜> … <｜tool▁calls▁end｜>.
+        let wrapped = "答案。<\u{ff5c}tool\u{2581}calls\u{2581}begin\u{ff5c}>foo<\u{ff5c}tool\u{2581}calls\u{2581}end\u{ff5c}>";
+        assert_eq!(strip_tool_call_markup(wrapped), "答案。");
+    }
+
+    #[test]
+    fn tool_call_stripper_leaves_normal_prose() {
+        let prose = "We compare A | B, and note x < y in Table 2.";
+        assert_eq!(strip_tool_call_markup(prose), prose);
     }
 
     #[test]

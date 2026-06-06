@@ -2368,6 +2368,7 @@ dependencies = [
  "log",
  "ort",
  "pdfium-render",
+ "regex",
  "reqwest 0.12.28",
  "rfd",
  "rusqlite",

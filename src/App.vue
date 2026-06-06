@@ -1717,7 +1717,9 @@ function clearAssistantStreamState(eventId) {
 function applyAskDocumentMetadata(message, result) {
   message.claims = result?.claims || []
   message.provider = result?.provider || ''
-  message.reasoningContent = result?.reasoningContent || message.reasoningContent || ''
+  // Trust the final (server-cleaned) reasoning over the streamed accumulation, so
+  // leaked tool-call markup stripped on the backend doesn't linger in the drawer.
+  message.reasoningContent = result?.reasoningContent || ''
   message.citations = result?.citations?.length ? result.citations : message.citations || []
   message.retrievalTrace = result?.retrievalTrace || null
   message.activityEvents = result?.retrievalTrace?.events || message.activityEvents || []

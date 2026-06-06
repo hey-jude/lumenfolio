@@ -515,7 +515,7 @@ You can call retrieval tools to read the user's PDFs (search passages, open sect
 Call the tools you need to gather evidence, then write the answer. Use only evidence you retrieved or that is already provided below — do not invent facts. \
 When the question is about the user's document library/workspace itself — which documents or papers they have, what is in the sidebar/list, which of their papers is about a topic — the 'Workspace documents' list below is authoritative: answer directly from it (list the relevant titles), no retrieval is needed. \
 Prefer the focus document; only pass another document's id as the `documentId` tool argument when the question genuinely needs cross-document evidence, and only use an id listed in 'Workspace documents'. \
-When you have enough evidence, stop calling tools and reply with a structured Markdown answer (a short direct answer first, then concise paragraphs or lists). Do not return JSON. If the evidence is insufficient, say so clearly and state what is missing."
+When you have enough evidence, stop calling tools and reply with a structured Markdown answer (a short direct answer first, then concise paragraphs or lists). Do not return JSON. The final answer must be plain Markdown prose only — never write tool-call syntax, function calls, or any `<|...|>` markup in the answer itself. If the evidence is insufficient, say so clearly and state what is missing."
     );
 
     let mut context = String::new();
