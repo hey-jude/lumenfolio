@@ -1489,25 +1489,6 @@ function evidenceSourceLabel(source) {
               <path d="M8 9h8M8 13h8M8 17h5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
             </svg>
           </button>
-          <button
-            type="button"
-            class="chat-icon-btn"
-            :disabled="!hasChatHistory"
-            :title="ui.clearChatHistory"
-            :aria-label="ui.clearChatHistory"
-            @click="emit('clear-history')"
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M4 7h16M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1Zm-3 3 1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M10 11v6M14 11v6"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-          </button>
         </div>
       </div>
       <div class="chat-subtitle-row" data-tauri-drag-region @mousedown="startWindowDrag">
@@ -1517,8 +1498,29 @@ function evidenceSourceLabel(source) {
           type="button"
           class="focus-switch-btn"
           :title="`${ui.focusOnCurrent}: ${viewedDocName}`"
+          @mousedown.stop
           @click="emit('set-focus-doc', viewedDocId)"
         >{{ ui.focusOnCurrent }}</button>
+        <button
+          type="button"
+          class="chat-icon-btn focus-clear-btn"
+          :disabled="!hasChatHistory"
+          :title="ui.clearChatHistory"
+          :aria-label="ui.clearChatHistory"
+          @mousedown.stop
+          @click="emit('clear-history')"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M4 7h16M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1Zm-3 3 1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M10 11v6M14 11v6"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+        </button>
       </div>
       <div
         v-if="historyOpen"
@@ -2087,6 +2089,19 @@ function evidenceSourceLabel(source) {
 .focus-switch-btn:hover {
   color: var(--text-primary);
   background: rgba(106, 169, 255, 0.18);
+}
+
+/* Clear-history button lives at the far right of the Focus row. */
+.focus-clear-btn {
+  margin-left: auto;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+}
+
+.focus-clear-btn svg {
+  width: 13px;
+  height: 13px;
 }
 
 /* Session tabs ---------------------------------------------------------- */
