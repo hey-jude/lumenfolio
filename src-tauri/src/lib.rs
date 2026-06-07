@@ -26,6 +26,7 @@ mod providers;
 mod runtime;
 mod storage;
 mod translation;
+mod trending;
 mod vision;
 mod visual_index;
 
@@ -4572,6 +4573,8 @@ pub fn run() {
             pdf_layout_dump::dump_pdf_layout,
             scan_workspace_pdfs,
             import_workspace_paths,
+            trending::fetch_trending_papers,
+            trending::add_trending_paper,
             load_last_workspace,
             read_pdf_bytes,
             pdf2zh_sidecar::read_pdf_artifact_bytes,
