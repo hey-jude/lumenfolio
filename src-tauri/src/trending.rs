@@ -26,6 +26,10 @@ struct HfDailyPaperItem {
     paper: HfPaper,
     #[serde(default)]
     upvotes: i64,
+    /// HF's auto-generated card thumbnail (present for almost every paper). The
+    /// real source of the cards' preview images — NOT `paper.mediaUrls`.
+    #[serde(default)]
+    thumbnail: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -75,21 +79,37 @@ fn map_item(item: HfDailyPaperItem) -> TrendingPaper {
         .map(|author| author.name.trim().to_string())
         .filter(|name| !name.is_empty())
         .collect();
+    // Prefer HF's auto-generated card thumbnail; fall back to a submitted media
+    // URL only if it's actually an image (mediaUrls can hold a video).
+    let thumbnail_url = item
+        .thumbnail
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+        .or_else(|| {
+            item.paper
+                .media_urls
+                .iter()
+                .find(|url| is_image_url(url))
+                .map(|url| url.trim().to_string())
+        });
     TrendingPaper {
         title: item.paper.title.trim().to_string(),
         authors,
         summary: item.paper.summary.trim().to_string(),
         upvotes: item.upvotes,
         published_at: item.paper.published_at.unwrap_or_default(),
-        thumbnail_url: item
-            .paper
-            .media_urls
-            .into_iter()
-            .find(|url| !url.trim().is_empty()),
+        thumbnail_url,
         hf_url: format!("https://huggingface.co/papers/{id}"),
         pdf_url: format!("https://arxiv.org/pdf/{id}.pdf"),
         arxiv_id: id,
     }
+}
+
+fn is_image_url(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or(url).to_lowercase();
+    [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+        .iter()
+        .any(|ext| path.ends_with(ext))
 }
 
 /// Fetch the HF trending papers (recency + upvotes). Online-only; returns an
@@ -285,10 +305,10 @@ mod tests {
                 "title": "  BRepCLIP  ",
                 "summary": "An abstract.",
                 "authors": [{"name": "Alice"}, {"name": " "}, {"name": "Bob"}],
-                "publishedAt": "2026-06-03T00:00:00.000Z",
-                "mediaUrls": ["https://img/x.png"]
+                "publishedAt": "2026-06-03T00:00:00.000Z"
             },
-            "upvotes": 42
+            "upvotes": 42,
+            "thumbnail": "https://cdn-thumbnails.huggingface.co/social-thumbnails/papers/2606.05515.png"
         }"#;
         let item: HfDailyPaperItem = serde_json::from_str(json).unwrap();
         let paper = map_item(item);
@@ -298,7 +318,30 @@ mod tests {
         assert_eq!(paper.upvotes, 42);
         assert_eq!(paper.hf_url, "https://huggingface.co/papers/2606.05515");
         assert_eq!(paper.pdf_url, "https://arxiv.org/pdf/2606.05515.pdf");
-        assert_eq!(paper.thumbnail_url.as_deref(), Some("https://img/x.png"));
+        // The top-level `thumbnail` is preferred over mediaUrls.
+        assert_eq!(
+            paper.thumbnail_url.as_deref(),
+            Some("https://cdn-thumbnails.huggingface.co/social-thumbnails/papers/2606.05515.png")
+        );
+    }
+
+    #[test]
+    fn thumbnail_falls_back_to_image_media_url_only() {
+        // No top-level thumbnail; mediaUrls has a video then an image — pick the image.
+        let json = r#"{
+            "paper": {
+                "id": "1",
+                "title": "T",
+                "mediaUrls": ["https://x/clip.mp4", "https://x/fig.jpg"]
+            }
+        }"#;
+        let item: HfDailyPaperItem = serde_json::from_str(json).unwrap();
+        assert_eq!(map_item(item).thumbnail_url.as_deref(), Some("https://x/fig.jpg"));
+
+        // No thumbnail and only a video → no thumbnail (don't put a video in <img>).
+        let json = r#"{ "paper": { "id": "2", "title": "T", "mediaUrls": ["https://x/clip.mp4"] } }"#;
+        let item: HfDailyPaperItem = serde_json::from_str(json).unwrap();
+        assert_eq!(map_item(item).thumbnail_url, None);
     }
 
     #[test]
