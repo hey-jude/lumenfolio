@@ -42,6 +42,12 @@ const ReaderPane = defineAsyncComponent({
   delay: 80,
   timeout: ASYNC_COMPONENT_TIMEOUT_MS,
 })
+const TrendingFeed = defineAsyncComponent({
+  loader: () => import('./components/TrendingFeed.vue'),
+  loadingComponent: AsyncPanelLoading,
+  delay: 80,
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
 const ChatPane = defineAsyncComponent({
   loader: () => import('./components/ChatPane.vue'),
   loadingComponent: AsyncPanelLoading,
@@ -123,6 +129,12 @@ const rightWidth = usePersistedRef('rightWidth', 500, { debounceMs: 300 })
 // exclusive tab), so the conversation stays visible underneath. Default closed.
 const notesDrawerOpen = ref(false)
 const activeNoteId = ref('')
+// Trending Papers (online discovery) state.
+const trendingView = ref(false)
+const trendingPapers = ref([])
+const trendingStatus = ref('idle') // idle | loading | loaded | failed
+const trendingError = ref('')
+const trendingAddingIds = ref([])
 // Note composer state for create/edit.
 const noteComposer = ref({ open: false, mode: 'create', quoteText: '', content: '', noteId: '', selection: null })
 const noteComposerSaving = ref(false)
@@ -624,6 +636,11 @@ const selectedDocument = computed(() => (
   allDocs.value.find((doc) => doc.id === selectedDocId.value)
   || allDocs.value[0]
   || emptyDocument.value
+))
+// Show the Trending discovery feed when explicitly opened, OR when there is no
+// real document to read (empty reader doubles as the discovery surface).
+const showTrending = computed(() => (
+  trendingView.value || selectedDocument.value.id === 'empty'
 ))
 // Tab descriptors for the reader tab bar: resolve each open id to its document,
 // dropping any that no longer exist. Status mirrors the sidebar status dot.
@@ -1426,8 +1443,66 @@ function openTab(docId) {
 // rather than blanking selectedDocId (which would leave the reader showing a doc
 // with no matching active tab). The document itself stays in the sidebar regardless.
 function selectDoc(docId) {
+  // Selecting a document leaves the Trending discovery feed.
+  trendingView.value = false
   openTab(docId)
 }
+
+// ---- Trending Papers (online discovery) ----
+
+async function fetchTrending() {
+  trendingStatus.value = 'loading'
+  trendingError.value = ''
+  try {
+    const papers = await invoke('fetch_trending_papers', { limit: 30 })
+    trendingPapers.value = Array.isArray(papers) ? papers : []
+    trendingStatus.value = 'loaded'
+  } catch (err) {
+    trendingError.value = err?.message || String(err)
+    trendingStatus.value = 'failed'
+  }
+}
+
+function handleOpenTrending() {
+  trendingView.value = true
+  if (trendingStatus.value === 'idle' || trendingStatus.value === 'failed') {
+    fetchTrending()
+  }
+}
+
+async function handleAddTrendingPaper(paper) {
+  const arxivId = String(paper?.arxivId || '').trim()
+  if (!arxivId || trendingAddingIds.value.includes(arxivId)) return
+  trendingAddingIds.value = [...trendingAddingIds.value, arxivId]
+  try {
+    const result = await invoke('add_trending_paper', {
+      arxivId,
+      title: paper?.title || null,
+    })
+    if (result?.snapshot) upsertWorkspaceRootSnapshot(result.snapshot)
+    if (result?.documentId) selectDoc(result.documentId) // opens it; leaves the feed
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  } finally {
+    trendingAddingIds.value = trendingAddingIds.value.filter((id) => id !== arxivId)
+  }
+}
+
+function handleOpenHf(url) {
+  if (!url) return
+  invoke('open_external_url', { url }).catch((err) => {
+    workspaceError.value = err?.message || String(err)
+  })
+}
+
+// Fetch when the discovery feed is shown (explicit open OR empty-reader default).
+watch(
+  showTrending,
+  (visible) => {
+    if (visible && trendingStatus.value === 'idle') fetchTrending()
+  },
+  { immediate: true },
+)
 
 function handleCitationClick(citation) {
   // A citation may belong to an @-referenced document the user isn't reading. In
@@ -3946,7 +4021,9 @@ onMounted(() => {
       :ui="ui"
       :drop-active="workspaceDropActive"
       :drop-target-root-id="workspaceDropTargetRootId"
+      :trending-active="showTrending"
       @update:filter="filter = $event"
+      @open-trending="handleOpenTrending"
       @select-doc="selectDoc"
       @add-folder="chooseWorkspace"
       @add-pdfs="addPdfsToRoot"
@@ -3972,7 +4049,21 @@ onMounted(() => {
       {{ leftCollapsed ? '❯' : '❮' }}
     </button>
 
+    <TrendingFeed
+      v-if="showTrending"
+      :papers="trendingPapers"
+      :status="trendingStatus"
+      :error="trendingError"
+      :adding-ids="trendingAddingIds"
+      :ui="ui"
+      :locale="locale"
+      @refresh="fetchTrending"
+      @add-paper="handleAddTrendingPaper"
+      @open-hf="handleOpenHf"
+    />
+
     <ReaderPane
+      v-if="!showTrending"
       :key="`${selectedDocument.id}:${viewerReloadKey}`"
       :document="selectedDocument"
       :translation-languages="translationLanguages"
