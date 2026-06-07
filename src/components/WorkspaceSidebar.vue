@@ -48,10 +48,19 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  trendingActive: {
+    type: Boolean,
+    default: false,
+  },
+  trendingEnabled: {
+    type: Boolean,
+    default: true,
+  },
 })
 
 const emit = defineEmits([
   'update:filter',
+  'open-trending',
   'select-doc',
   'add-folder',
   'add-pdfs',
@@ -373,6 +382,18 @@ function triggerDeleteRoot(root, event = null) {
     </label>
 
     <div class="tree-area">
+      <button
+        v-if="trendingEnabled"
+        type="button"
+        class="trending-entry"
+        :class="{ active: trendingActive }"
+        :title="ui.trendingPapersHint"
+        @click="emit('open-trending')"
+      >
+        <span class="trending-entry-icon" aria-hidden="true">🔥</span>
+        <span class="trending-entry-label">{{ ui.trendingPapers }}</span>
+      </button>
+
       <section
         v-for="workspaceRoot in roots"
         :key="workspaceRoot.id || workspaceRoot.path"
@@ -841,6 +862,45 @@ function triggerDeleteRoot(root, event = null) {
   overflow-x: hidden;
   overflow-y: auto;
   padding-right: 4px;
+}
+
+/* "Trending Papers" discovery entry, pinned above the local folders. */
+.trending-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.trending-entry:hover {
+  border-color: rgba(106, 169, 255, 0.4);
+  color: var(--text-primary);
+}
+
+.trending-entry.active {
+  border-color: rgba(106, 169, 255, 0.45);
+  background: rgba(106, 169, 255, 0.12);
+  color: var(--text-primary);
+}
+
+.trending-entry-icon {
+  font-size: 14px;
+}
+
+.trending-entry-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Slim, transparent scrollbar (hover-revealed). No scrollbar-width here — that

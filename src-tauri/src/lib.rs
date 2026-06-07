@@ -26,6 +26,7 @@ mod providers;
 mod runtime;
 mod storage;
 mod translation;
+mod trending;
 mod vision;
 mod visual_index;
 
@@ -777,6 +778,43 @@ fn open_path_in_file_manager(path: String) -> Result<(), String> {
         .map_err(|err| format!("Failed to resolve path: {err}"))?;
 
     open_file_manager_target(&target)
+}
+
+/// Open an http(s) URL in the user's default browser (e.g. a Trending paper's
+/// Hugging Face page). Restricted to http/https so it can't launch arbitrary
+/// commands or local files.
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only http(s) URLs can be opened".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|err| format!("Failed to open URL: {err}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .map_err(|err| format!("Failed to open URL: {err}"))?;
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|err| format!("Failed to open URL: {err}"))?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("Opening a URL is not supported on this platform".to_string())
 }
 
 fn open_file_manager_target(target: &Path) -> Result<(), String> {
@@ -4572,6 +4610,9 @@ pub fn run() {
             pdf_layout_dump::dump_pdf_layout,
             scan_workspace_pdfs,
             import_workspace_paths,
+            trending::fetch_trending_papers,
+            trending::add_trending_paper,
+            open_external_url,
             load_last_workspace,
             read_pdf_bytes,
             pdf2zh_sidecar::read_pdf_artifact_bytes,
