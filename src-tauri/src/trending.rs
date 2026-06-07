@@ -166,22 +166,17 @@ pub(crate) async fn add_trending_paper(
         .await?;
     }
 
-    // (Re)scan the whole folder — reuses the directory-import pipeline, so the new
-    // file is indexed and every previously-added paper is preserved.
+    // Register just this paper additively — never a full-folder reconcile, which
+    // would DELETE a previously-added paper that happens to be transiently
+    // unscannable (cloud-synced/locked) at this moment. The doc id comes from the
+    // same builder that creates it, so it always matches the snapshot.
     let workspace_root_id = documents::stable_path_id("root", &dir);
-    let mut docs = Vec::new();
-    documents::collect_pdfs(&dir, &workspace_root_id, &mut docs)?;
-    docs.sort_by(|left, right| {
-        left.short_title
-            .to_lowercase()
-            .cmp(&right.short_title.to_lowercase())
-    });
-    documents::persist_workspace_scan(&database, &workspace_root_id, &dir, &docs)?;
+    let doc = documents::build_document_for_path(&file_path, &workspace_root_id)?
+        .ok_or_else(|| "Failed to read the downloaded paper".to_string())?;
+    let document_id = doc.id.clone();
+    documents::additive_upsert_documents(&database, &workspace_root_id, &dir, &[doc])?;
     let snapshot_docs = documents::load_documents_for_root(&database, &workspace_root_id)?;
     documents::upsert_registry_paths(&registry, &snapshot_docs)?;
-
-    let canonical = file_path.canonicalize().unwrap_or(file_path);
-    let document_id = documents::stable_path_id("pdf", &canonical);
 
     Ok(AddTrendingResult {
         snapshot: WorkspaceRootSnapshot {

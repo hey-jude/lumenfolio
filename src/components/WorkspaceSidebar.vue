@@ -52,6 +52,10 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  trendingEnabled: {
+    type: Boolean,
+    default: true,
+  },
 })
 
 const emit = defineEmits([
@@ -379,6 +383,7 @@ function triggerDeleteRoot(root, event = null) {
 
     <div class="tree-area">
       <button
+        v-if="trendingEnabled"
         type="button"
         class="trending-entry"
         :class="{ active: trendingActive }"

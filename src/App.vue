@@ -130,10 +130,14 @@ const rightWidth = usePersistedRef('rightWidth', 500, { debounceMs: 300 })
 const notesDrawerOpen = ref(false)
 const activeNoteId = ref('')
 // Trending Papers (online discovery) state.
+// Opt-out for the local-first audience: when off, nothing is fetched and the
+// discovery entry/feed are hidden.
+const trendingEnabled = usePersistedRef('trendingEnabled', true)
 const trendingView = ref(false)
 const trendingPapers = ref([])
 const trendingStatus = ref('idle') // idle | loading | loaded | failed
 const trendingError = ref('')
+const trendingAddError = ref('')
 const trendingAddingIds = ref([])
 // Note composer state for create/edit.
 const noteComposer = ref({ open: false, mode: 'create', quoteText: '', content: '', noteId: '', selection: null })
@@ -638,9 +642,11 @@ const selectedDocument = computed(() => (
   || emptyDocument.value
 ))
 // Show the Trending discovery feed when explicitly opened, OR when there is no
-// real document to read (empty reader doubles as the discovery surface).
+// real document to read (empty reader doubles as the discovery surface). Never
+// when the user has disabled online discovery.
 const showTrending = computed(() => (
-  trendingView.value || selectedDocument.value.id === 'empty'
+  trendingEnabled.value
+  && (trendingView.value || selectedDocument.value.id === 'empty')
 ))
 // Tab descriptors for the reader tab bar: resolve each open id to its document,
 // dropping any that no longer exist. Status mirrors the sidebar status dot.
@@ -1464,6 +1470,7 @@ async function fetchTrending() {
 }
 
 function handleOpenTrending() {
+  if (!trendingEnabled.value) return
   trendingView.value = true
   if (trendingStatus.value === 'idle' || trendingStatus.value === 'failed') {
     fetchTrending()
@@ -1473,6 +1480,7 @@ function handleOpenTrending() {
 async function handleAddTrendingPaper(paper) {
   const arxivId = String(paper?.arxivId || '').trim()
   if (!arxivId || trendingAddingIds.value.includes(arxivId)) return
+  trendingAddError.value = ''
   trendingAddingIds.value = [...trendingAddingIds.value, arxivId]
   try {
     const result = await invoke('add_trending_paper', {
@@ -1482,7 +1490,8 @@ async function handleAddTrendingPaper(paper) {
     if (result?.snapshot) upsertWorkspaceRootSnapshot(result.snapshot)
     if (result?.documentId) selectDoc(result.documentId) // opens it; leaves the feed
   } catch (err) {
-    workspaceError.value = err?.message || String(err)
+    // Surfaced in the discovery view (where the user is), not just the sidebar.
+    trendingAddError.value = err?.message || String(err)
   } finally {
     trendingAddingIds.value = trendingAddingIds.value.filter((id) => id !== arxivId)
   }
@@ -1491,18 +1500,24 @@ async function handleAddTrendingPaper(paper) {
 function handleOpenHf(url) {
   if (!url) return
   invoke('open_external_url', { url }).catch((err) => {
-    workspaceError.value = err?.message || String(err)
+    trendingAddError.value = err?.message || String(err)
   })
 }
 
-// Fetch when the discovery feed is shown (explicit open OR empty-reader default).
-watch(
-  showTrending,
-  (visible) => {
-    if (visible && trendingStatus.value === 'idle') fetchTrending()
-  },
-  { immediate: true },
-)
+// Fetch when the discovery feed BECOMES visible (explicit open, or the user
+// closes their last document). NOT { immediate } — that fired on every cold start
+// (the workspace loads async, so the reader is briefly empty), leaking a network
+// call for users who never use the feature. The genuinely-empty-workspace startup
+// case is handled after the workspace finishes loading (loadLastWorkspace).
+watch(showTrending, (visible) => {
+  if (visible && trendingStatus.value === 'idle') fetchTrending()
+})
+
+// Any path that selects a document leaves the discovery feed (drag-drop import,
+// the "+" picker, add-folder/scan — not just selectDoc).
+watch(selectedDocId, () => {
+  trendingView.value = false
+})
 
 function handleCitationClick(citation) {
   // A citation may belong to an @-referenced document the user isn't reading. In
@@ -3838,6 +3853,10 @@ function scheduleIdleTask(task, timeout = 1200) {
 function loadLastWorkspaceAfterFirstPaint() {
   return loadLastWorkspace().finally(() => {
     markStartup('workspace-loaded')
+    // Only NOW (workspace settled) decide whether to fetch trending: if the user
+    // genuinely has no documents the empty reader is the discovery surface, so
+    // load it. Users who have documents never trigger a startup network call.
+    if (showTrending.value && trendingStatus.value === 'idle') fetchTrending()
   })
 }
 
@@ -4022,6 +4041,7 @@ onMounted(() => {
       :drop-active="workspaceDropActive"
       :drop-target-root-id="workspaceDropTargetRootId"
       :trending-active="showTrending"
+      :trending-enabled="trendingEnabled"
       @update:filter="filter = $event"
       @open-trending="handleOpenTrending"
       @select-doc="selectDoc"
@@ -4054,6 +4074,7 @@ onMounted(() => {
       :papers="trendingPapers"
       :status="trendingStatus"
       :error="trendingError"
+      :add-error="trendingAddError"
       :adding-ids="trendingAddingIds"
       :ui="ui"
       :locale="locale"
@@ -4355,6 +4376,12 @@ onMounted(() => {
               </select>
             </label>
             <div class="settings-note full">{{ ui.interfaceLanguageHint }}</div>
+
+            <label class="settings-field full settings-toggle">
+              <input v-model="trendingEnabled" type="checkbox" />
+              <span>{{ ui.trendingDiscovery }}</span>
+            </label>
+            <div class="settings-note full">{{ ui.trendingDiscoveryHint }}</div>
           </div>
 
           <div v-if="settingsSection === 'chat'" class="settings-panel provider-settings-panel">

@@ -3,6 +3,7 @@ const props = defineProps({
   papers: { type: Array, default: () => [] },
   status: { type: String, default: 'idle' }, // idle | loading | loaded | failed
   error: { type: String, default: '' },
+  addError: { type: String, default: '' },
   addingIds: { type: Array, default: () => [] },
   ui: { type: Object, required: true },
   locale: { type: String, default: 'en' },
@@ -35,6 +36,7 @@ function isAdding(paper) {
         class="trending-refresh"
         :disabled="status === 'loading'"
         :title="ui.refresh"
+        @mousedown.stop
         @click="emit('refresh')"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -46,6 +48,8 @@ function isAdding(paper) {
     </div>
 
     <div class="trending-body">
+      <div v-if="addError" class="trending-add-error">{{ addError }}</div>
+
       <div v-if="status === 'loading'" class="trending-state">{{ ui.trendingLoading }}</div>
 
       <div v-else-if="status === 'failed'" class="trending-state trending-state-error">
@@ -158,6 +162,17 @@ function isAdding(paper) {
   min-height: 0;
   overflow-y: auto;
   padding: 16px 18px 28px;
+}
+
+.trending-add-error {
+  max-width: 860px;
+  margin: 0 auto 12px;
+  padding: 8px 12px;
+  border: 1px solid rgba(198, 73, 73, 0.4);
+  border-radius: 8px;
+  background: rgba(198, 73, 73, 0.12);
+  color: #ffb3b3;
+  font-size: 12px;
 }
 
 .trending-state {
