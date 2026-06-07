@@ -69,6 +69,7 @@ function isAdding(paper) {
             alt=""
             loading="lazy"
           />
+          <div v-else class="trending-thumb trending-thumb-empty" aria-hidden="true"></div>
           <div class="trending-card-main">
             <div class="trending-card-title">{{ paper.title }}</div>
             <div v-if="authorLine(paper)" class="trending-card-authors">{{ authorLine(paper) }}</div>
@@ -165,7 +166,7 @@ function isAdding(paper) {
 }
 
 .trending-add-error {
-  max-width: 860px;
+  max-width: 1400px;
   margin: 0 auto 12px;
   padding: 8px 12px;
   border: 1px solid rgba(198, 73, 73, 0.4);
@@ -211,34 +212,40 @@ function isAdding(paper) {
 }
 
 .trending-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  max-width: 860px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+  align-items: start;
+  max-width: 1400px;
   margin: 0 auto;
 }
 
 .trending-card {
   display: flex;
-  gap: 14px;
-  padding: 14px;
+  flex-direction: column;
   border: 1px solid var(--line-soft);
   border-radius: 12px;
   background: var(--bg-panel);
+  overflow: hidden;
 }
 
 .trending-thumb {
-  width: 116px;
-  height: 76px;
+  display: block;
+  width: 100%;
+  height: 156px;
   object-fit: cover;
-  border-radius: 8px;
-  flex-shrink: 0;
+  object-position: top center;
   background: var(--bg-elevated);
+}
+
+.trending-thumb-empty {
+  background: linear-gradient(135deg, var(--bg-elevated), var(--bg-panel));
 }
 
 .trending-card-main {
   min-width: 0;
   flex: 1;
+  padding: 14px;
 }
 
 .trending-card-title {
