@@ -136,7 +136,10 @@ const activeNoteId = ref('')
 // Opt-out for the local-first audience: when off, nothing is fetched and the
 // discovery entry/feed are hidden.
 const trendingEnabled = usePersistedRef('trendingEnabled', true)
-const trendingView = ref(false)
+// Persisted so the discovery feed re-opens on next launch if that's where the
+// user left off. Note: restoring the last document flips this off mid-load, so
+// the value is re-applied after the workspace settles (loadLastWorkspaceAfterFirstPaint).
+const trendingView = usePersistedRef('trendingView', false)
 const trendingPapers = ref([])
 const trendingStatus = ref('idle') // idle | loading | loaded | failed
 const trendingError = ref('')
@@ -3884,8 +3887,15 @@ function scheduleIdleTask(task, timeout = 1200) {
 }
 
 function loadLastWorkspaceAfterFirstPaint() {
+  // Capture the saved discovery-view flag BEFORE loadLastWorkspace runs: selecting
+  // the restored document inside it flips trendingView off (watch on selectedDocId),
+  // and that write would clobber the persisted value before we can restore it.
+  const wantTrending = readPersisted('trendingView', false)
   return loadLastWorkspace().finally(() => {
     markStartup('workspace-loaded')
+    // Re-open the discovery feed if that's where the user left off (the doc-restore
+    // above turned it off). Gated on trendingEnabled via showTrending semantics.
+    if (wantTrending && trendingEnabled.value) trendingView.value = true
     // Only NOW (workspace settled) decide whether to fetch trending: if the user
     // genuinely has no documents the empty reader is the discovery surface, so
     // load it. Users who have documents never trigger a startup network call.
