@@ -1818,28 +1818,15 @@ watch(translationArtifactActivePage, async () => {
   margin: 6px 8px 8px;
   padding: 0;
   overflow: auto;
-  /* No scrollbar-width/scrollbar-color: those make WebKit ignore the
-     ::-webkit-scrollbar rules below and use a native scrollbar instead. */
   border-radius: 6px;
   background: #f4f1e8;
   color: #1d2126;
   box-shadow: none;
 }
 
-.translation-page::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-.translation-page::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.translation-page::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background-color: transparent;
-}
-
+/* Shape (slim/hover-reveal) comes from the global scrollbar style; only the
+   thumb COLOR is overridden here — a white thumb would be invisible on this
+   cream "paper" background, so use a dark one instead. */
 .translation-page:hover::-webkit-scrollbar-thumb,
 .translation-page.is-scrolling::-webkit-scrollbar-thumb {
   background-color: rgba(29, 33, 38, 0.24);

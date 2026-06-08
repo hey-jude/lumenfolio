@@ -124,6 +124,9 @@ const activeTranslation = ref(null)
 const inlineTranslateOpen = ref(false)
 const leftCollapsed = usePersistedRef('leftCollapsed', false)
 const rightCollapsed = usePersistedRef('rightCollapsed', false)
+// Per-root folder collapse state, keyed by root id (path as fallback). Survives
+// restarts so a folder the user collapsed stays collapsed next launch.
+const collapsedRoots = usePersistedRef('collapsedRoots', {})
 const rightWidth = usePersistedRef('rightWidth', 500, { debounceMs: 300 })
 // Notes is a floating drawer that slides in over the Agent pane (not a mutually
 // exclusive tab), so the conversation stays visible underneath. Default closed.
@@ -1452,6 +1455,11 @@ function selectDoc(docId) {
   // Selecting a document leaves the Trending discovery feed.
   trendingView.value = false
   openTab(docId)
+  // Explicit selection (sidebar / tab) retargets the active conversation's focus
+  // to the chosen document, so "Focus" tracks what you're reading. Citation jumps
+  // go through openTab() directly (handleCitationClick) and intentionally keep the
+  // current focus — you can peek at a cited paper without losing the thread.
+  void handleSetSessionFocus(docId)
 }
 
 // ---- Trending Papers (online discovery) ----
@@ -2154,6 +2162,15 @@ function confirmRemoveWorkspaceRoot() {
       }
       if (removedIndex >= 0) {
         workspace.roots.splice(removedIndex, 1)
+      }
+
+      // Drop the removed root from the persisted collapse map so it doesn't
+      // accumulate stale keys.
+      const staleKeys = [removedRootId, target.path].map(String).filter(Boolean)
+      if (staleKeys.some((key) => key in (collapsedRoots.value || {}))) {
+        const next = { ...collapsedRoots.value }
+        staleKeys.forEach((key) => { delete next[key] })
+        collapsedRoots.value = next
       }
 
       if (!workspace.roots.length) {
@@ -3420,10 +3437,20 @@ async function openWorkspaceInFileManager(rootId = '') {
   }
 }
 
+function rootCollapseKey(root) {
+  return String(root?.id || root?.path || '')
+}
+
 function toggleWorkspaceRoot(rootId) {
   const workspaceRoot = workspace.roots.find((item) => item.id === rootId)
   if (!workspaceRoot) return
   workspaceRoot.collapsed = !workspaceRoot.collapsed
+  const key = rootCollapseKey(workspaceRoot)
+  if (key) {
+    // Replace the whole object: usePersistedRef watches with deep:false, so a
+    // nested mutation would not be written back to localStorage.
+    collapsedRoots.value = { ...collapsedRoots.value, [key]: workspaceRoot.collapsed }
+  }
 }
 
 async function reindexSelectedDocument() {
@@ -3618,6 +3645,12 @@ function createWorkspaceRoot(snapshot) {
   const docs = Array.isArray(snapshot?.documents)
     ? snapshot.documents.map(createLocalDocument)
     : []
+  // Mid-session (re-scan) keep the live in-memory state; on a fresh load
+  // (no existing root) seed from the persisted collapse map.
+  const persistedKey = rootId || path
+  const collapsed = existing
+    ? Boolean(existing.collapsed)
+    : Boolean(persistedKey && collapsedRoots.value?.[persistedKey])
   return {
     id: rootId,
     name: {
@@ -3625,7 +3658,7 @@ function createWorkspaceRoot(snapshot) {
       zh: workspaceRootName(path),
     },
     path,
-    collapsed: Boolean(existing?.collapsed),
+    collapsed,
     folders: [{
       id: `${rootId || path || 'workspace'}-pdfs`,
       name: { en: 'PDFs', zh: 'PDF 文件' },

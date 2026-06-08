@@ -2202,36 +2202,9 @@ function evidenceSourceLabel(source) {
      when content overflows, which grew the strip's height the moment tabs
      overflowed and bumped the centered header icons down a couple px. A always
      reserved lane keeps the row height constant. */
+  /* `scroll` keeps the 8px scrollbar lane reserved at all times (see comment
+     above). Scrollbar look comes from the global style in styles/main.css. */
   overflow-x: scroll;
-  /* Cursor-style scrollbar: invisible track, thumb hidden until the strip is
-     hovered, then a subtle rounded bar. */
-}
-
-.session-tabs::-webkit-scrollbar {
-  height: 8px;
-}
-
-.session-tabs::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-/* Slim floating thumb: a 3px transparent border + padding-box clip shrinks the
-   visible bar to ~2px, hidden until the strip is hovered. */
-.session-tabs::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background: transparent;
-  background-clip: padding-box;
-}
-
-.session-tabs:hover::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.22);
-  background-clip: padding-box;
-}
-
-.session-tabs::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.34);
-  background-clip: padding-box;
 }
 
 .session-tab {
@@ -2520,39 +2493,14 @@ function evidenceSourceLabel(source) {
   position: relative;
   flex: 1;
   min-height: 0;
+  /* Scrollbar look (slim, transparent, hover/.is-scrolling reveal) comes from
+     the global style in styles/main.css. Do not set scrollbar-width here — it
+     makes WebKit ignore the global ::-webkit-scrollbar rules. */
   overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
   padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.message-list::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.message-list::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.message-list::-webkit-scrollbar-thumb {
-  border: 2px solid transparent;
-  border-radius: 999px;
-  background: transparent;
-  background-clip: padding-box;
-}
-
-.message-list:hover::-webkit-scrollbar-thumb,
-.message-list.is-scrolling::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-.message-list:hover,
-.message-list.is-scrolling {
-  scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
 }
 
 .jump-to-latest {
@@ -2578,6 +2526,7 @@ function evidenceSourceLabel(source) {
 
 .message-card,
 .prepare-card {
+  position: relative;
   border: 1px solid var(--line-soft);
   border-radius: 16px;
   padding: 14px;
@@ -2689,8 +2638,12 @@ function evidenceSourceLabel(source) {
 }
 
 .message-edit-affordance {
+  /* Pinned to the card's top-right corner, aligned with the "USER" label row. */
+  position: absolute;
+  top: 10px;
+  right: 12px;
   display: flex;
-  margin-top: 6px;
+  margin: 0;
 }
 
 .message-edit-btn {

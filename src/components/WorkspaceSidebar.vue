@@ -447,6 +447,7 @@ function triggerDeleteRoot(root, event = null) {
               :key="doc.id"
               class="doc-row"
               :class="{ active: doc.id === selectedDocId }"
+              :title="compactDocTitle(doc)"
               :draggable="doc.chatReady ? 'true' : 'false'"
               @click="emit('select-doc', doc.id)"
               @dragstart="handleDocDragStart($event, doc)"
@@ -903,26 +904,7 @@ function triggerDeleteRoot(root, event = null) {
   white-space: nowrap;
 }
 
-/* Slim, transparent scrollbar (hover-revealed). No scrollbar-width here — that
-   would make WebKit ignore these ::-webkit-scrollbar rules. A narrow lane with a
-   thumb that fills it is used instead of the border/background-clip trick, which
-   renders inconsistently on ::-webkit-scrollbar-thumb. */
-.tree-area::-webkit-scrollbar {
-  width: 6px;
-}
-
-.tree-area::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.tree-area::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background-color: transparent;
-}
-
-.tree-area:hover::-webkit-scrollbar-thumb {
-  background-color: rgba(255, 255, 255, 0.2);
-}
+/* Scrollbar look comes from the global style in styles/main.css. */
 
 .folder-group + .folder-group {
   margin-top: 0px;
@@ -1055,6 +1037,11 @@ function triggerDeleteRoot(root, event = null) {
   border-radius: 12px;
   margin-bottom: 6px;
   border: 1px solid transparent;
+  /* WKWebView (Tauri/Safari) sizes <button> to its min-content width and won't
+     honor width:100% shrink, breaking the ellipsis chain. Force shrink + clip. */
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .doc-row:hover {
@@ -1077,6 +1064,7 @@ function triggerDeleteRoot(root, event = null) {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  flex: 1;
   min-width: 0;
 }
 
@@ -1117,6 +1105,8 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 .doc-name {
+  flex: 1;
+  min-width: 0;
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.35;
@@ -1126,6 +1116,7 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 .doc-time {
+  flex-shrink: 0;
   color: var(--text-muted);
   font-size: 12px;
   white-space: nowrap;

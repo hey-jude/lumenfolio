@@ -2214,35 +2214,11 @@ defineExpose({
   min-height: 0;
   overflow: auto;
   padding: 18px 18px 28px;
-  /* NOTE: do NOT set scrollbar-width/scrollbar-color here — when those standard
-     properties are present, WebKit (WKWebView) ignores the ::-webkit-scrollbar
-     rules below entirely and falls back to a native scrollbar. We rely on the
-     ::-webkit-scrollbar styling for the slim, transparent look. */
+  /* Scrollbar look (slim, transparent, hover/.is-scrolling reveal) comes from
+     the global style in styles/main.css. */
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 120px),
     var(--bg-app);
-}
-
-.pdf-scroll::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-.pdf-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.pdf-scroll::-webkit-scrollbar-thumb {
-  /* Narrow lane + thumb that fills it (transparent track, hover-revealed).
-     Avoids the border/background-clip trick, which renders inconsistently. */
-  border-radius: 999px;
-  background-color: transparent;
-  transition: background-color 0.18s ease;
-}
-
-.pdf-scroll:hover::-webkit-scrollbar-thumb,
-.pdf-scroll.is-scrolling::-webkit-scrollbar-thumb {
-  background-color: rgba(255, 255, 255, 0.22);
 }
 
 .pdf-pages {
@@ -2582,30 +2558,7 @@ defineExpose({
   white-space: pre-wrap;
 }
 
-/* Slim, transparent, hover-revealed scrollbar — consistent with the rest of the
-   app. No scrollbar-width (it makes WebKit ignore these ::-webkit-scrollbar
-   rules and fall back to the native wide bar). */
-.translation-popover-body::-webkit-scrollbar,
-.translation-popover-error::-webkit-scrollbar {
-  width: 6px;
-}
-
-.translation-popover-body::-webkit-scrollbar-track,
-.translation-popover-error::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.translation-popover-body::-webkit-scrollbar-thumb,
-.translation-popover-error::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background-color: transparent;
-}
-
-.translation-popover-body:hover::-webkit-scrollbar-thumb,
-.translation-popover-error:hover::-webkit-scrollbar-thumb {
-  background-color: rgba(255, 255, 255, 0.22);
-}
-
+/* Scrollbar look comes from the global style in styles/main.css. */
 .translation-popover-error {
   color: #ffb3b3;
 }
