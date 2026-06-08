@@ -1824,12 +1824,16 @@ watch(translationArtifactActivePage, async () => {
   box-shadow: none;
 }
 
-/* Shape (slim/hover-reveal) comes from the global scrollbar style; only the
-   thumb COLOR is overridden here — a white thumb would be invisible on this
-   cream "paper" background, so use a dark one instead. */
+/* Shape comes from the global scrollbar style; only the thumb COLOR is
+   overridden here — a white thumb would be invisible on this cream "paper"
+   background, so use a dark one (faint by default, deeper on hover/scroll). */
+.translation-page::-webkit-scrollbar-thumb {
+  background-color: rgba(29, 33, 38, 0.12);
+}
+
 .translation-page:hover::-webkit-scrollbar-thumb,
 .translation-page.is-scrolling::-webkit-scrollbar-thumb {
-  background-color: rgba(29, 33, 38, 0.24);
+  background-color: rgba(29, 33, 38, 0.28);
 }
 
 .translation-page.wide {
