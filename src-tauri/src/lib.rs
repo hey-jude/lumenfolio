@@ -27,6 +27,7 @@ mod runtime;
 mod storage;
 mod translation;
 mod trending;
+mod update_check;
 mod vision;
 mod visual_index;
 
@@ -4612,6 +4613,7 @@ pub fn run() {
             import_workspace_paths,
             trending::fetch_trending_papers,
             trending::add_trending_paper,
+            update_check::check_for_update,
             open_external_url,
             load_last_workspace,
             read_pdf_bytes,

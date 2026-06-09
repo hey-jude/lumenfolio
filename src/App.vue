@@ -145,6 +145,14 @@ const trendingStatus = ref('idle') // idle | loading | loaded | failed
 const trendingError = ref('')
 const trendingAddError = ref('')
 const trendingAddingIds = ref([])
+// Update notification (notify-only): checked once after startup. The banner is
+// suppressed once the user dismisses a given version (persisted), so it won't nag.
+const updateInfo = ref(null) // { current, latest, hasUpdate, url }
+const dismissedUpdateVersion = usePersistedRef('dismissedUpdateVersion', '')
+const showUpdateBanner = computed(() => (
+  Boolean(updateInfo.value?.hasUpdate)
+  && updateInfo.value.latest !== dismissedUpdateVersion.value
+))
 // Note composer state for create/edit.
 const noteComposer = ref({ open: false, mode: 'create', quoteText: '', content: '', noteId: '', selection: null })
 const noteComposerSaving = ref(false)
@@ -1513,6 +1521,26 @@ function handleOpenHf(url) {
   invoke('open_external_url', { url }).catch((err) => {
     trendingAddError.value = err?.message || String(err)
   })
+}
+
+// ---- Update notification (notify-only) ----
+
+async function checkForUpdate() {
+  try {
+    const info = await invoke('check_for_update')
+    if (info?.hasUpdate) updateInfo.value = info
+  } catch {
+    // Offline / rate-limited / network error: no banner, never blocks startup.
+  }
+}
+
+function openUpdatePage() {
+  const url = updateInfo.value?.url
+  if (url) invoke('open_external_url', { url }).catch(() => {})
+}
+
+function dismissUpdateBanner() {
+  if (updateInfo.value?.latest) dismissedUpdateVersion.value = updateInfo.value.latest
 }
 
 // Fetch when the discovery feed BECOMES visible (explicit open, or the user
@@ -3900,6 +3928,8 @@ function loadLastWorkspaceAfterFirstPaint() {
     // genuinely has no documents the empty reader is the discovery surface, so
     // load it. Users who have documents never trigger a startup network call.
     if (showTrending.value && trendingStatus.value === 'idle') fetchTrending()
+    // Best-effort "newer version?" check — silent on failure, off the critical path.
+    checkForUpdate()
   })
 }
 
@@ -4071,6 +4101,17 @@ onMounted(() => {
 
 <template>
   <div class="app-shell" :class="{ 'left-collapsed': leftCollapsed }">
+    <div v-if="showUpdateBanner" class="update-banner" role="status">
+      <span class="update-banner-icon" aria-hidden="true">⬆</span>
+      <span class="update-banner-text">{{ ui.updateAvailable }} v{{ updateInfo.latest }}</span>
+      <button type="button" class="update-banner-view" @click="openUpdatePage">{{ ui.updateView }}</button>
+      <button
+        type="button"
+        class="update-banner-dismiss"
+        :aria-label="ui.dismiss || 'Dismiss'"
+        @click="dismissUpdateBanner"
+      >×</button>
+    </div>
     <WorkspaceSidebar
       :roots="workspace.roots"
       :selected-doc-id="selectedDocId"
@@ -4746,6 +4787,75 @@ onMounted(() => {
   overflow: hidden;
   /* Positioning context for the floating Notes drawer. */
   position: relative;
+}
+
+/* Update notification: a small floating toast at the bottom-center. Notify-only
+   — links out to the tags page; the user updates manually. */
+.update-banner {
+  position: absolute;
+  z-index: 60;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100vw - 48px);
+  padding: 8px 10px 8px 14px;
+  border: 1px solid rgba(106, 169, 255, 0.4);
+  border-radius: 999px;
+  background: rgba(29, 31, 35, 0.96);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.update-banner-icon {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.update-banner-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.update-banner-view {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  border: 1px solid rgba(106, 169, 255, 0.5);
+  border-radius: 999px;
+  background: rgba(106, 169, 255, 0.16);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.update-banner-view:hover {
+  background: rgba(106, 169, 255, 0.26);
+}
+
+.update-banner-dismiss {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.update-banner-dismiss:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
 }
 
 /* Notes drawer: an absolutely-positioned wrapper that floats over the Agent
