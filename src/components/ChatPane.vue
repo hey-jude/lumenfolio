@@ -161,6 +161,9 @@ const showJumpToLatest = ref(false)
 const messageListScrolling = ref(false)
 const expandedAgentStages = ref({})
 const expandedAgentPanels = ref({})
+// Message ids whose evidence chips are expanded to the full chain (vs the "+N"
+// preview). The full chain is already in memory, so expanding is instant.
+const expandedEvidence = ref(new Set())
 let messageScrollFrame = 0
 let messageScrollbarTimer = null
 let lastMessageScrollTop = 0
@@ -609,27 +612,39 @@ function updateMessageScrollState() {
   }, 760)
 
   const scrollTop = element.scrollTop
-  const atBottom = messageListAtBottom()
-  // Direction-aware stick-to-bottom: an actual upward scroll detaches
-  // auto-follow so streaming output never yanks the view back down. Content
-  // growth during streaming keeps scrollTop unchanged (only scrollHeight
-  // grows), so it can't be mistaken for a user scrolling up.
-  if (scrollTop < lastMessageScrollTop - 1 && !atBottom) {
+  const distance = element.scrollHeight - element.scrollTop - element.clientHeight
+  const nearBottom = distance <= 64
+  const pinnedToBottom = distance <= 4
+  // Direction-aware stick-to-bottom: ANY real upward scroll detaches auto-follow
+  // so streaming output never yanks the view back down — even a light wheel-up
+  // while still inside the 64px "near bottom" band (the old `&& !atBottom` guard
+  // swallowed those, so you had to scroll hard to escape). Content growth during
+  // streaming keeps scrollTop unchanged (only scrollHeight grows), so it is never
+  // mistaken for a user scrolling up.
+  if (scrollTop < lastMessageScrollTop - 1) {
     autoFollowMessages.value = false
     userScrolledMessages.value = true
-  } else if (atBottom) {
-    // Returning to the bottom re-attaches auto-follow.
+  } else if (pinnedToBottom) {
+    // Re-attach only when TRULY at the bottom, not merely near it — otherwise a
+    // momentum settle a few px above the bottom would re-pin against the user.
     autoFollowMessages.value = true
     userScrolledMessages.value = false
   }
   lastMessageScrollTop = scrollTop
-  showJumpToLatest.value = !atBottom && visibleMessages.value.length > 0
+  showJumpToLatest.value = !nearBottom && visibleMessages.value.length > 0
 }
 
-function markUserScrolledMessages() {
-  // A manual gesture (wheel/touch/pointer/key) while not pinned to the bottom
-  // detaches auto-follow immediately. The scroll handler then refines the
-  // state using scroll position/direction.
+function markUserScrolledMessages(event) {
+  // An upward wheel gesture detaches auto-follow IMMEDIATELY, even when pinned to
+  // the bottom — otherwise a light scroll-up during streaming is undone by the
+  // next chunk's stick-to-bottom before the scroll handler can react.
+  if (event && event.type === 'wheel' && event.deltaY < 0) {
+    autoFollowMessages.value = false
+    userScrolledMessages.value = true
+    return
+  }
+  // Other gestures (touch/pointer/key) while not pinned to the bottom detach too;
+  // the scroll handler then refines the state using scroll position/direction.
   if (!messageListAtBottom()) {
     autoFollowMessages.value = false
     userScrolledMessages.value = true
@@ -1320,32 +1335,107 @@ function evidenceItems(message) {
   return items?.length ? items : fallbackEvidenceChain(message)
 }
 
-function evidencePreviewItems(message) {
-  const items = evidenceItems(message)
-  const docs = answerSourceDocs(message)
-  // Single-document answer: the simple first-N preview.
-  if (docs.length <= 1) return items.slice(0, 4)
-  // Multi-document answer: guarantee each source document shows at least its
-  // first citation, so cross-document evidence is never buried under the "+N".
-  const cap = Math.max(4, docs.length)
-  const firstPerDoc = []
-  const seenDocs = new Set()
-  for (const item of items) {
-    const docId = resolveCitation(message, item)?.documentId
-    if (docId && !seenDocs.has(docId)) {
-      seenDocs.add(docId)
-      firstPerDoc.push(item)
+function isEvidenceExpanded(message) {
+  return expandedEvidence.value.has(message.id)
+}
+
+// Group the evidence chain by (document, page): the chain is often very granular
+// (many citations on the same page), which clutters the strip. One chip per page
+// — clicking it highlights ALL of that page's evidence at once — is far cleaner.
+function evidenceGroups(message) {
+  const groups = []
+  const byKey = new Map()
+  for (const item of evidenceItems(message)) {
+    const citation = resolveCitation(message, item)
+    const documentId = citation?.documentId || ''
+    const page = Number(item.page || citation?.page || 0)
+    const key = `${documentId}::${page}`
+    let group = byKey.get(key)
+    if (!group) {
+      group = {
+        key,
+        documentId,
+        page,
+        // Identity reuses the page's FIRST real citation id, so the active-source
+        // tracking (activeSourceDocId) and inline-marker highlighting still resolve.
+        citationId: item.citationId,
+        citationIds: [],
+        bboxList: [],
+        blockId: citation?.blockId || '',
+        quote: item.quote || citation?.quote || '',
+        source: item.source,
+        sectionTitle: item.sectionTitle || '',
+        crossDocName: citationCrossDocName(message, item),
+      }
+      byKey.set(key, group)
+      groups.push(group)
     }
+    group.citationIds.push(item.citationId)
+    if (citation?.bboxList?.length) group.bboxList.push(...citation.bboxList)
+    if (!group.sectionTitle && item.sectionTitle) group.sectionTitle = item.sectionTitle
   }
-  const result = []
-  const usedIds = new Set()
-  for (const item of [...firstPerDoc, ...items]) {
-    if (usedIds.has(item.citationId)) continue
-    usedIds.add(item.citationId)
-    result.push(item)
-    if (result.length >= cap) break
+  return groups
+}
+
+// Collapsed preview: first-per-document guaranteed (so cross-doc pages aren't
+// buried under "+N"), capped. Independent of expand state so the +N/Collapse
+// toggle stays visible while expanded.
+function evidenceGroupPreview(message) {
+  const groups = evidenceGroups(message)
+  const docs = answerSourceDocs(message)
+  if (docs.length <= 1) return groups.slice(0, 6)
+  const cap = Math.max(6, docs.length)
+  const seen = new Set()
+  const firstPerDoc = groups.filter((g) => {
+    if (!g.documentId || seen.has(g.documentId)) return false
+    seen.add(g.documentId)
+    return true
+  })
+  const used = new Set()
+  const out = []
+  for (const g of [...firstPerDoc, ...groups]) {
+    if (used.has(g.key)) continue
+    used.add(g.key)
+    out.push(g)
+    if (out.length >= cap) break
   }
-  return result
+  return out
+}
+
+// Chips actually rendered: every page when expanded, else the preview.
+function evidenceDisplayGroups(message) {
+  return isEvidenceExpanded(message) ? evidenceGroups(message) : evidenceGroupPreview(message)
+}
+
+function evidenceHiddenCount(message) {
+  return evidenceGroups(message).length - evidenceGroupPreview(message).length
+}
+
+function isEvidenceGroupActive(group) {
+  return Boolean(props.activeCitationId) && group.citationIds.includes(props.activeCitationId)
+}
+
+// Highlight EVERY piece of evidence on the page at once: merge all the page's
+// citation rects into one highlight payload and reuse the normal citation jump
+// (which handles cross-document tab switching + painting).
+function clickEvidenceGroup(message, group) {
+  emit('citation-click', {
+    id: group.citationId,
+    documentId: group.documentId,
+    page: group.page,
+    blockId: group.blockId,
+    bboxList: group.bboxList,
+    quote: group.quote,
+    source: group.source,
+  })
+}
+
+function toggleEvidenceExpanded(message) {
+  // Reassign a new Set so the ref's watchers fire (Set mutation alone wouldn't).
+  const next = new Set(expandedEvidence.value)
+  if (next.has(message.id)) next.delete(message.id)
+  else next.add(message.id)
+  expandedEvidence.value = next
 }
 
 function resolveCitation(message, evidence) {
@@ -1817,27 +1907,35 @@ function evidenceSourceLabel(source) {
                 >{{ src.name }}</button>
               </div>
               <div class="evidence-strip">
-                <span class="evidence-strip-label">{{ ui.evidence }}</span>
-                <button
-                  v-for="evidence in evidencePreviewItems(message)"
-                  :key="`${message.id}-preview-${evidence.citationId}`"
-                  class="evidence-chip"
-                  :class="{ active: evidence.citationId === activeCitationId }"
-                  :title="evidence.quote"
-                  @click="resolveCitation(message, evidence) && emit('citation-click', resolveCitation(message, evidence))"
-                >
-                  <span>{{ evidence.label }}</span>
-                  <span
-                    v-if="citationCrossDocName(message, evidence)"
-                    class="evidence-doc-badge"
-                    :title="citationCrossDocName(message, evidence)"
-                  >@{{ citationCrossDocName(message, evidence) }}</span>
-                  <span v-if="evidence.page > 0">{{ locale === 'zh' ? `${ui.page}${evidence.page}` : `p${evidence.page}` }}</span>
-                  <span>{{ evidence.sectionTitle || evidenceSourceLabel(evidence.source) }}</span>
-                </button>
-                <span v-if="evidenceItems(message).length > evidencePreviewItems(message).length" class="evidence-more">
-                  +{{ evidenceItems(message).length - evidencePreviewItems(message).length }}
-                </span>
+                <div class="evidence-strip-head">
+                  <span class="evidence-strip-label">{{ ui.evidence }}</span>
+                  <button
+                    v-if="evidenceHiddenCount(message) > 0"
+                    type="button"
+                    class="evidence-more"
+                    :aria-expanded="isEvidenceExpanded(message)"
+                    @click="toggleEvidenceExpanded(message)"
+                  >{{ isEvidenceExpanded(message) ? ui.evidenceCollapse : `+${evidenceHiddenCount(message)}` }}</button>
+                </div>
+                <div class="evidence-chips">
+                  <button
+                    v-for="group in evidenceDisplayGroups(message)"
+                    :key="`${message.id}-grp-${group.key}`"
+                    class="evidence-chip"
+                    :class="{ active: isEvidenceGroupActive(group) }"
+                    :title="group.quote"
+                    @click="clickEvidenceGroup(message, group)"
+                  >
+                    <span
+                      v-if="group.crossDocName"
+                      class="evidence-doc-badge"
+                      :title="group.crossDocName"
+                    >@{{ group.crossDocName }}</span>
+                    <span v-if="group.page > 0" class="evidence-chip-page">{{ locale === 'zh' ? `${ui.page}${group.page}` : `p${group.page}` }}</span>
+                    <span class="evidence-chip-title">{{ group.sectionTitle || evidenceSourceLabel(group.source) }}</span>
+                    <span v-if="group.citationIds.length > 1" class="evidence-chip-count">×{{ group.citationIds.length }}</span>
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -2843,9 +2941,18 @@ function evidenceSourceLabel(source) {
 
 .evidence-strip {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 6px;
+}
+
+/* Header row: the EVIDENCE label on the left, the expand/collapse toggle on the
+   right. Keeping the toggle here (not in the chip grid) avoids it landing alone
+   on its own row when the preview chip count is even. */
+.evidence-strip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .evidence-strip-label {
@@ -2854,29 +2961,58 @@ function evidenceSourceLabel(source) {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  margin-right: 2px;
+}
+
+/* Auto-fill grid: chips become equal-width columns that fill the row edge to
+   edge, so the right side is no longer left empty. Falls to fewer columns as
+   the pane narrows. */
+.evidence-chips {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px;
+  align-content: start;
 }
 
 .evidence-chip {
   display: inline-flex;
   align-items: center;
-  max-width: 100%;
+  min-width: 0;
   min-height: 28px;
-  gap: 6px;
+  gap: 5px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.035);
   color: var(--text-secondary);
   cursor: pointer;
-  padding: 0 9px;
+  padding: 0 10px;
   font-size: 11px;
 }
 
-.evidence-chip span:last-child {
+.evidence-chip-page {
+  flex-shrink: 0;
+}
+
+/* Per-page evidence count ("×8"): a subtle pill at the chip's tail. */
+.evidence-chip-count {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The section title is the only flexible part: it takes the remaining cell width
+   and truncates, so every chip stays within its grid column. */
+.evidence-chip-title {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 150px;
 }
 
 .evidence-chip:hover,
@@ -2887,8 +3023,25 @@ function evidenceSourceLabel(source) {
 }
 
 .evidence-more {
-  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 22px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
   font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.evidence-more:hover {
+  border-color: rgba(245, 180, 24, 0.4);
+  background: rgba(245, 180, 24, 0.12);
+  color: var(--text-primary);
 }
 
 .evidence-doc-badge {

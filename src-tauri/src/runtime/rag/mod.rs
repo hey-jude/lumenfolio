@@ -1585,6 +1585,69 @@ fn append_unique_tree_nodes(
     }
 }
 
+/// How many neighbouring blocks (above + below, same page) to fold into an FTS /
+/// literal hit. FTS indexes one block per chunk, so a raw hit shows the model —
+/// and highlights — a single line/paragraph. A radius of 1 gives a readable
+/// context window without ballooning tokens.
+const CHUNK_CONTEXT_RADIUS: i64 = 1;
+
+/// Widen a single-block FTS/literal hit to include its immediate neighbours on
+/// the same page (±`radius` blocks by `block_index`). The `quote` (what the LLM
+/// is shown) and the `bbox_list` (what the reader highlights) are expanded
+/// TOGETHER, so the marked region always equals the model-visible range. The hit
+/// keeps its original `block_id`/`page` (identity, scroll anchor) — only the text
+/// and geometry grow. A no-op when the block has no neighbours.
+fn expand_candidate_to_window(conn: &Connection, candidate: &mut EvidenceCandidate, radius: i64) {
+    if candidate.block_id.is_empty() || radius <= 0 {
+        return;
+    }
+    let mut stmt = match conn.prepare(
+        "SELECT b2.text, b2.bbox_json
+         FROM document_blocks b1
+         JOIN document_blocks b2
+           ON b2.document_id = b1.document_id
+          AND b2.page_no = b1.page_no
+          AND b2.block_index BETWEEN b1.block_index - ?2 AND b1.block_index + ?2
+         WHERE b1.id = ?1
+         ORDER BY b2.block_index",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return,
+    };
+    let collected = stmt.query_map(params![candidate.block_id, radius], |row| {
+        let text: String = row.get(0)?;
+        let bbox_json: String = row.get(1)?;
+        Ok((text, bbox_json))
+    });
+    let rows: Vec<(String, String)> = match collected {
+        Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+        Err(_) => return,
+    };
+    // Only the hit block itself (or nothing) — leave it untouched.
+    if rows.len() <= 1 {
+        return;
+    }
+    let mut texts: Vec<String> = Vec::with_capacity(rows.len());
+    let mut bboxes: Vec<serde_json::Value> = Vec::new();
+    for (text, bbox_json) in rows {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            texts.push(trimmed.to_string());
+        }
+        if let Ok(serde_json::Value::Array(list)) =
+            serde_json::from_str::<serde_json::Value>(&bbox_json)
+        {
+            bboxes.extend(list);
+        }
+    }
+    if !texts.is_empty() {
+        candidate.quote = texts.join("\n");
+    }
+    if !bboxes.is_empty() {
+        candidate.bbox_list = serde_json::Value::Array(bboxes);
+    }
+}
+
 pub fn search_chunks(
     conn: &Connection,
     document_id: &str,
@@ -1610,7 +1673,7 @@ pub fn search_chunks(
         )
         .map_err(|err| format!("Failed to prepare chunk search: {err}"))?;
 
-    let rows = stmt
+    let mut rows = stmt
         .query_map(
             params![document_id, escape_fts_query(query), limit],
             |row| {
@@ -1638,6 +1701,11 @@ pub fn search_chunks(
         .map_err(|err| format!("Failed to search chunks: {err}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("Failed to read chunk search results: {err}"))?;
+    // Fold ±1 neighbouring block into each hit so the LLM-visible range (and the
+    // reader highlight) is a real context window, not a single line.
+    for candidate in rows.iter_mut() {
+        expand_candidate_to_window(conn, candidate, CHUNK_CONTEXT_RADIUS);
+    }
     Ok(rows)
 }
 
@@ -1673,7 +1741,7 @@ pub fn search_chunks_literal(
         )
         .map_err(|err| format!("Failed to prepare literal chunk search: {err}"))?;
 
-    let rows = stmt
+    let mut rows = stmt
         .query_map(params![document_id, query, limit], |row| {
             let block_ids_json: String = row.get(3)?;
             let bbox_refs_json: String = row.get(5)?;
@@ -1698,6 +1766,10 @@ pub fn search_chunks_literal(
         .map_err(|err| format!("Failed to run literal chunk search: {err}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| format!("Failed to read literal chunk search results: {err}"))?;
+    // Match search_chunks: widen each hit to a ±1-block context window.
+    for candidate in rows.iter_mut() {
+        expand_candidate_to_window(conn, candidate, CHUNK_CONTEXT_RADIUS);
+    }
     Ok(rows)
 }
 
