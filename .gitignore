@@ -57,6 +57,8 @@ docs/assets/*
 !docs/assets/lumenfolio-translation-split.png
 !docs/assets/lumenfolio-rag-chat.png
 !docs/assets/lumenfolio-technical-architecture.png
+!docs/assets/lumenfolio-knowledge-graph.png
+!docs/assets/lumenfolio-trending-papers.png
 sotarium-api/src/sotarium_api.egg-info
 scripts/.embedding-venv
 articles/

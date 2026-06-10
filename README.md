@@ -29,6 +29,14 @@ It is not just "chat over a PDF". Lumenfolio is built around local document evid
 
 ![Lumenfolio agentic RAG chat with evidence trace](./docs/assets/lumenfolio-rag-chat.png)
 
+**Cross-document knowledge graph**
+
+![Lumenfolio cross-document knowledge graph](./docs/assets/lumenfolio-knowledge-graph.png)
+
+**Trending papers, queryable by the agent**
+
+![Lumenfolio trending papers with a context-aware agent](./docs/assets/lumenfolio-trending-papers.png)
+
 ## Why Lumenfolio
 
 Most PDF AI tools optimize for quick answers. Lumenfolio is designed for deep reading: following claims, checking citations, translating difficult sections, and keeping notes tied to the exact place where an idea appears.
@@ -142,6 +150,31 @@ The notes workflow is designed for paper reading:
 - click a note to return to the original page and highlight
 - keep notes alongside chat and translation, not in a separate app
 
+## Knowledge Precipitation and Cross-Document Graph
+
+Lumenfolio turns a growing PDF library into a connected knowledge base instead of a folder of isolated files.
+
+- **Knowledge precipitation** distills each document into a summary, entities, concepts, and keywords. It runs on two streams: a single sampled LLM pass after indexing, and a near-zero-cost conversation stream that reuses the structured outputs of each chat turn — both fully local and cached.
+- A reader-side **Knowledge tab** shows the current paper as a concept-bridge graph: the paper in the centre, its salient concepts around it, and related papers on the outer ring, with the shared concepts drawn as the bridge so "why related" is visible at a glance.
+- A full-screen **Knowledge Graph** view renders the whole library (concepts and documents) with communities, focus/ego mode, search, and structural insights (surprising connections, bridge documents, knowledge gaps).
+- Documents are linked by **shared concepts** and by **conversation co-citation** (papers the agent cited together in one answer), so relationships reflect both content and how you actually read.
+
+## Trending Papers
+
+An optional, local-first discovery feed of trending academic papers from Hugging Face.
+
+- **Daily / Weekly / Monthly** tabs, each scoped to that period and ranked by upvotes.
+- One click adds a paper into a managed "Trending Papers" folder, where it is indexed and behaves like any other document (chat, notes, translation).
+- Nothing is fetched until you open the feed, and a PDF is downloaded only on an explicit "add".
+
+## Context-Aware Agent Tools
+
+The agent is aware of what you are looking at and can reach beyond the focused PDF — from any view.
+
+- **`search_library_knowledge`**: search the whole library by topic/concept ("which of my papers are about X"), not just the current document.
+- **`list_trending_papers`**: answer questions about the trending list you are browsing ("which trending papers are about LLM training"), defaulting to the period you are viewing.
+- **`query_knowledge_graph`**: discover documents related to the focus paper and route retrieval across them.
+
 ## Features
 
 - Three-pane reading workspace:
@@ -154,6 +187,10 @@ The notes workflow is designed for paper reading:
 - Workspace-aware retrieval: the agent can see and answer about your whole indexed library, with on-demand discovery for large libraries
 - Native tool-calling agent loop for capable models, with a rule-driven fallback for weaker/local models
 - Cross-document chat: `@`-mention up to 4 other indexed papers in one question
+- Knowledge precipitation (summary, entities, concepts, keywords) per document, fully local
+- Cross-document knowledge graph: reader-side concept-bridge graph + full-screen library graph with communities and insights
+- Trending papers feed (Hugging Face) with Daily/Weekly/Monthly scopes, one-click add into the workspace
+- Context-aware agent tools: search the whole library by concept, query the trending list, and route across related documents
 - Evidence chain and foldable agent trace in chat
 - Provider-based chat and translation configuration, with per-model context window auto-detected from the provider (manual override available)
 - Visual/table-aware retrieval path with rendered crops and TSR-ready table evidence
