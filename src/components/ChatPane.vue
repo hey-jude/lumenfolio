@@ -44,6 +44,12 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  // When set, the user is browsing a non-reader surface (e.g. "Daily Trending");
+  // the focus row shows this instead of a stale focus-document label.
+  browsingLabel: {
+    type: String,
+    default: '',
+  },
   allDocuments: {
     type: Array,
     default: () => [],
@@ -1349,7 +1355,13 @@ function evidenceGroups(message) {
     const citation = resolveCitation(message, item)
     const documentId = citation?.documentId || ''
     const page = Number(item.page || citation?.page || 0)
-    const key = `${documentId}::${page}`
+    // Group same-document, same-page evidence together. Discovery-tool results
+    // (trending / library) have no documentId and page 0; keying them by
+    // citation id keeps each referenced paper its own chip instead of collapsing
+    // every result into a single "::0" group.
+    const key = documentId
+      ? `${documentId}::${page}`
+      : `nodoc::${item.citationId || citation?.id || groups.length}`
     let group = byKey.get(key)
     if (!group) {
       group = {
@@ -1629,9 +1641,10 @@ function evidenceSourceLabel(source) {
         </div>
       </div>
       <div class="chat-subtitle-row" data-tauri-drag-region @mousedown="startWindowDrag">
-        <span class="chat-focus-label">{{ ui.focusDoc }}: {{ document.shortTitle }}</span>
+        <span v-if="browsingLabel" class="chat-focus-label">{{ ui.browsing }}: {{ browsingLabel }}</span>
+        <span v-else class="chat-focus-label">{{ ui.focusDoc }}: {{ document.shortTitle }}</span>
         <button
-          v-if="focusDiffersFromView"
+          v-if="focusDiffersFromView && !browsingLabel"
           type="button"
           class="focus-switch-btn"
           :title="`${ui.focusOnCurrent}: ${viewedDocName}`"

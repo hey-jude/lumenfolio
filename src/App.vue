@@ -48,8 +48,8 @@ const TrendingFeed = defineAsyncComponent({
   delay: 80,
   timeout: ASYNC_COMPONENT_TIMEOUT_MS,
 })
-const KnowledgeCard = defineAsyncComponent({
-  loader: () => import('./components/KnowledgeCard.vue'),
+const KnowledgePane = defineAsyncComponent({
+  loader: () => import('./components/KnowledgePane.vue'),
   delay: 120,
   timeout: ASYNC_COMPONENT_TIMEOUT_MS,
 })
@@ -152,19 +152,40 @@ const trendingEnabled = usePersistedRef('trendingEnabled', true)
 const knowledgeEnabled = usePersistedRef('knowledgeEnabled', true)
 // Knowledge card for the currently-open document (loaded from get_document_knowledge).
 const knowledgeCard = ref(null) // { status, summary, entities[], concepts[], keywords[], error }
+// Reader-area 阅读/知识 tab: true shows the full-area knowledge view over the
+// PDF. Sticky across document switches so graph-hopping (click a related paper
+// → land on ITS knowledge page) works as a navigation flow.
+const knowledgeView = ref(false)
 // Related papers for the open document (P3a): [{ documentId, title, score, sharedConcepts[], coCitation }].
 const relatedDocs = ref([])
+// Inter-links among those related docs (mini ego-graph cluster structure).
+const relatedLinks = ref([])
 // Knowledge graph view (P3b): full-screen force graph in the reader area.
 const graphView = ref(false)
+// When opened from the knowledge card's "view in graph" button, start the graph
+// focused (ego view) on the current document instead of the whole library.
+const graphFocusOnOpen = ref(false)
 const graphData = ref(null)
 const graphStatus = ref('idle') // idle | loading | loaded | failed
 const graphError = ref('')
 let knowledgeConsolidated = false // run alias consolidation at most once per session
 const showGraph = computed(() => graphView.value && !showTrending.value)
+// When browsing a non-reader surface, the chat focus row shows this instead of a
+// stale focus-document title (the agent still has the trending/graph tools).
+const chatBrowsingLabel = computed(() => {
+  if (showTrending.value) {
+    const periodLabel = ui.value[`trending${trendingPeriod.value.charAt(0).toUpperCase()}${trendingPeriod.value.slice(1)}`] || ''
+    return `${periodLabel} ${ui.value.trendingPapers}`.trim()
+  }
+  if (showGraph.value) return ui.value.knowledgeGraph
+  return ''
+})
 // Persisted so the discovery feed re-opens on next launch if that's where the
 // user left off. Note: restoring the last document flips this off mid-load, so
 // the value is re-applied after the workspace settles (loadLastWorkspaceAfterFirstPaint).
 const trendingView = usePersistedRef('trendingView', false)
+// daily | weekly | monthly — which HF papers feed the Trending view shows.
+const trendingPeriod = usePersistedRef('trendingPeriod', 'daily')
 const trendingPapers = ref([])
 const trendingStatus = ref('idle') // idle | loading | loaded | failed
 const trendingError = ref('')
@@ -194,6 +215,9 @@ const noteDeleteTarget = ref({
 const chatFocusRequest = ref(0)
 const viewerReloadKey = ref(0)
 const selectedChatModelId = ref(UNCONFIGURED_CHAT_MODEL_ID)
+// Last chat model the user explicitly picked, persisted so reopening the app
+// restores it instead of falling back to the default provider's first model.
+const lastChatModelId = usePersistedRef('lastChatModelId', '')
 const translationProvider = ref('google-web')
 let syncingTranslationLangFromDocument = false
 const translationFallbackEnabled = ref(true)
@@ -729,6 +753,10 @@ const providerConnectionSummary = computed(() => {
 
 function defaultConfiguredChatModelId() {
   if (!chatModelConfigured.value) return UNCONFIGURED_CHAT_MODEL_ID
+  // Prefer the user's last explicit pick if it's still a configured/enabled model.
+  if (lastChatModelId.value && configuredChatModels.value.some((model) => model.id === lastChatModelId.value)) {
+    return lastChatModelId.value
+  }
   const hasEnabledModel = (provider) => (provider?.models || []).some((model) => model.enabled)
   const defaultProvider = modelProviders.value.find((provider) => provider.isDefault && hasEnabledModel(provider))
     || modelProviders.value.find(hasEnabledModel)
@@ -826,6 +854,18 @@ watch(selectedChatModelId, (modelId) => {
     selectedDocument.value.chatModelId = nextModelId
   }
 })
+
+// Persist the model ONLY when the user explicitly picks one (not on the
+// programmatic per-document restore that runs while switching documents —
+// otherwise opening a doc that carries its own model would clobber the user's
+// last deliberate choice).
+function handleSelectChatModel(modelId) {
+  selectedChatModelId.value = modelId
+  const resolved = resolveChatModelId(modelId)
+  if (resolved && resolved !== UNCONFIGURED_CHAT_MODEL_ID) {
+    lastChatModelId.value = resolved
+  }
+}
 
 watch(availableChatModels, () => {
   applySelectedChatModel(selectedDocument.value?.chatModelId || selectedChatModelId.value)
@@ -1061,7 +1101,9 @@ async function loadModelProviders() {
       || modelProviders.value[0]
     if (defaultProvider) {
       resetProviderForm(defaultProvider)
-      selectedChatModelId.value = defaultChatModelOptionId(defaultProvider)
+      // Restore the user's last-picked model (defaultConfiguredChatModelId
+      // prefers lastChatModelId) instead of forcing the provider default.
+      selectedChatModelId.value = defaultConfiguredChatModelId()
     } else {
       selectedChatModelId.value = UNCONFIGURED_CHAT_MODEL_ID
     }
@@ -1509,17 +1551,58 @@ function selectDoc(docId) {
 
 // ---- Trending Papers (online discovery) ----
 
+// ISO-8601 week string (YYYY-Www) for HF's /papers/week scope. Computed locally
+// so the backend needs no date dependency; matches huggingface.co's week ids.
+function isoWeekValue(now) {
+  const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()))
+  const dayNum = (d.getUTCDay() + 6) % 7 // Mon=0 … Sun=6
+  d.setUTCDate(d.getUTCDate() - dayNum + 3) // move to the week's Thursday
+  const firstThursday = new Date(Date.UTC(d.getUTCFullYear(), 0, 4))
+  const fd = (firstThursday.getUTCDay() + 6) % 7
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - fd + 3)
+  const week = 1 + Math.round((d - firstThursday) / (7 * 864e5))
+  return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`
+}
+
+function trendingScopeValue(period, now = new Date()) {
+  if (period === 'weekly') return isoWeekValue(now)
+  // Use UTC consistently with isoWeekValue and HF's UTC-based scopes (the daily
+  // backend falls back to the latest published day if today isn't up yet).
+  const y = now.getUTCFullYear()
+  const m = String(now.getUTCMonth() + 1).padStart(2, '0')
+  if (period === 'monthly') return `${y}-${m}`
+  return `${y}-${m}-${String(now.getUTCDate()).padStart(2, '0')}`
+}
+
+// Monotonic token so an out-of-order fetch response (fast tab switching) can't
+// overwrite the list for the period the user is actually viewing.
+let trendingFetchToken = 0
+
 async function fetchTrending() {
+  const token = ++trendingFetchToken
+  const period = trendingPeriod.value
   trendingStatus.value = 'loading'
   trendingError.value = ''
   try {
-    const papers = await invoke('fetch_trending_papers', { limit: 30 })
+    const papers = await invoke('fetch_trending_papers', {
+      period,
+      value: trendingScopeValue(period),
+      limit: 30,
+    })
+    if (token !== trendingFetchToken) return // a newer fetch superseded this one
     trendingPapers.value = Array.isArray(papers) ? papers : []
     trendingStatus.value = 'loaded'
   } catch (err) {
+    if (token !== trendingFetchToken) return
     trendingError.value = err?.message || String(err)
     trendingStatus.value = 'failed'
   }
+}
+
+function handleTrendingPeriod(period) {
+  if (!['daily', 'weekly', 'monthly'].includes(period) || period === trendingPeriod.value) return
+  trendingPeriod.value = period
+  fetchTrending()
 }
 
 async function fetchKnowledgeGraph() {
@@ -1542,6 +1625,28 @@ async function fetchKnowledgeGraph() {
 }
 
 function handleOpenGraph() {
+  // Clicking the sidebar entry again while the graph is open toggles it closed.
+  if (graphView.value) {
+    handleCloseGraph()
+    return
+  }
+  graphFocusOnOpen.value = false
+  openGraphView()
+}
+
+// Exit the global graph back to the reader (close button / ESC / sidebar toggle).
+function handleCloseGraph() {
+  graphView.value = false
+}
+
+// "View in graph" from the knowledge card: same view, but pre-focused on the
+// document being read (one click instead of sidebar → graph → Focus current).
+function handleOpenGraphFocused() {
+  graphFocusOnOpen.value = true
+  openGraphView()
+}
+
+function openGraphView() {
   graphView.value = true
   trendingView.value = false
   if (graphStatus.value === 'idle' || graphStatus.value === 'failed') {
@@ -1631,6 +1736,17 @@ watch(knowledgeEnabled, (enabled) => {
 })
 
 function handleCitationClick(citation) {
+  // Discovery-tool results (list_trending_papers / search_library_knowledge) are
+  // reference chips, not PDF anchors: page 0, no block. Never jump the reader to
+  // page 0 or paint a bogus highlight — just open the referenced library doc if
+  // there is one (trending has no documentId, so this is a no-op for it).
+  const anchored = Number(citation.page) > 0 || Boolean(citation.blockId)
+  if (!anchored) {
+    if (citation.documentId && citation.documentId !== selectedDocId.value) {
+      openTab(citation.documentId)
+    }
+    return
+  }
   // A citation may belong to an @-referenced document the user isn't reading. In
   // that case switch to (or open) its tab first; the actual page/highlight is
   // applied after watch(selectedDocument) resets reader state (see pendingCitationJump).
@@ -1770,6 +1886,12 @@ async function handleSend(payload, selection = null) {
         retrievalAttemptOffset,
         activityEventId,
         knowledgeEnabled: knowledgeEnabled.value,
+        // Ambient surface so the agent can resolve "the current trending papers"
+        // and knows when the question isn't about the focus PDF.
+        viewContext: {
+          surface: showTrending.value ? 'trending' : (showGraph.value ? 'graph' : 'reader'),
+          trendingPeriod: trendingPeriod.value,
+        },
       },
     })
   } catch (err) {
@@ -3166,6 +3288,7 @@ async function loadKnowledgeCard(documentId) {
   if (!documentId || documentId === 'empty') {
     knowledgeCard.value = null
     relatedDocs.value = []
+    relatedLinks.value = []
     return
   }
   try {
@@ -3179,16 +3302,22 @@ async function loadKnowledgeCard(documentId) {
 async function loadRelatedDocuments(documentId) {
   if (!documentId || documentId === 'empty') {
     relatedDocs.value = []
+    relatedLinks.value = []
     return
   }
   try {
-    const related = await invoke('get_related_documents', { documentId })
+    const payload = await invoke('get_related_documents', { documentId })
     // Guard against a stale response after the user switched documents.
     if (selectedDocId.value === documentId) {
-      relatedDocs.value = Array.isArray(related) ? related : []
+      relatedDocs.value = Array.isArray(payload?.related) ? payload.related : []
+      relatedLinks.value = Array.isArray(payload?.links) ? payload.links : []
     }
   } catch {
+    // Same stale guard: a late rejection for a previous document must not wipe
+    // the current document's related panel.
+    if (selectedDocId.value !== documentId) return
     relatedDocs.value = []
+    relatedLinks.value = []
   }
 }
 
@@ -4174,7 +4303,16 @@ onBeforeUnmount(() => {
   if (dragLeaveUnlisten) dragLeaveUnlisten()
   if (dragDropUnlisten) dragDropUnlisten()
   if (fileDropIgnoreTimer) clearTimeout(fileDropIgnoreTimer)
+  window.removeEventListener('keydown', handleGlobalKeydown)
 })
+
+// ESC exits the full-screen global knowledge graph back to the reader. Guarded
+// to graph-open so it never swallows ESC from inputs/other views.
+function handleGlobalKeydown(event) {
+  if (event.key === 'Escape' && graphView.value) {
+    handleCloseGraph()
+  }
+}
 
 onMounted(() => {
   // TEMP: report any main-thread long task (>200ms). If pdf.js used a real
@@ -4193,6 +4331,7 @@ onMounted(() => {
   } catch (err) {
     // longtask API unavailable — ignore
   }
+  window.addEventListener('keydown', handleGlobalKeydown)
   markStartup('app-mounted')
   afterFirstPaint(() => {
     markStartup('app-first-frame')
@@ -4376,7 +4515,9 @@ onMounted(() => {
       :adding-ids="trendingAddingIds"
       :ui="ui"
       :locale="locale"
+      :period="trendingPeriod"
       @refresh="fetchTrending"
+      @set-period="handleTrendingPeriod"
       @add-paper="handleAddTrendingPaper"
       @open-hf="handleOpenHf"
     />
@@ -4387,21 +4528,14 @@ onMounted(() => {
       :status="graphStatus"
       :error="graphError"
       :selected-doc-id="selectedDocId"
+      :initial-focus="graphFocusOnOpen"
       :ui="ui"
       @open-doc="selectDoc"
       @refresh="fetchKnowledgeGraph"
+      @close="handleCloseGraph"
     />
 
     <div v-if="!showTrending && !showGraph" class="reader-column">
-    <KnowledgeCard
-      v-if="knowledgeEnabled && selectedDocument.id !== 'empty'"
-      :card="knowledgeCard"
-      :related="relatedDocs"
-      :live-status="knowledgeByDoc[selectedDocument.id]?.status || ''"
-      :ui="ui"
-      @reprecipitate="reprecipitateCurrentDocument"
-      @open-doc="selectDoc"
-    />
     <ReaderPane
       :key="`${selectedDocument.id}:${viewerReloadKey}`"
       :document="selectedDocument"
@@ -4418,6 +4552,9 @@ onMounted(() => {
       :selection-locked="Boolean(lastSelection)"
       :inline-translate-open="inlineTranslateOpen"
       :locale="locale"
+      :knowledge-tab="knowledgeEnabled && selectedDocument.id !== 'empty'"
+      :knowledge-active="knowledgeView"
+      :knowledge-status="knowledgeByDoc[selectedDocument.id]?.status || knowledgeCard?.status || ''"
       :ui="ui"
       @update:translationLang="translationLang = $event"
       @translation-action="handleTranslationAction"
@@ -4440,7 +4577,23 @@ onMounted(() => {
       @close-translation="clearActiveTranslation"
       @retry-translation="retryActiveTranslation"
       @realign="handleRealign"
-    />
+      @set-knowledge-view="knowledgeView = $event"
+    >
+      <template #overlay>
+        <KnowledgePane
+          v-if="knowledgeEnabled && knowledgeView && selectedDocument.id !== 'empty'"
+          :card="knowledgeCard"
+          :related="relatedDocs"
+          :related-links="relatedLinks"
+          :document-title="selectedDocument.title || ''"
+          :live-status="knowledgeByDoc[selectedDocument.id]?.status || ''"
+          :ui="ui"
+          @reprecipitate="reprecipitateCurrentDocument"
+          @open-doc="selectDoc"
+          @open-graph="handleOpenGraphFocused"
+        />
+      </template>
+    </ReaderPane>
     </div>
 
     <div v-if="!rightCollapsed" class="drag-handle" @mousedown.prevent="startResize" />
@@ -4450,6 +4603,7 @@ onMounted(() => {
       :document="activeFocusDoc"
       :viewed-doc-id="selectedDocId"
       :viewed-doc-name="selectedDocument.shortTitle || selectedDocument.title || ''"
+      :browsing-label="chatBrowsingLabel"
       :all-documents="allDocs"
       :collapsed="rightCollapsed"
       :width="rightWidth"
@@ -4468,7 +4622,7 @@ onMounted(() => {
       :ui="ui"
       @toggle-collapse="toggleCollapse"
       @citation-click="handleCitationClick"
-      @update:model-id="selectedChatModelId = $event"
+      @update:model-id="handleSelectChatModel"
       @clear-selection="clearPendingSelection"
       @clear-history="openClearChatHistoryConfirm"
       @new-session="handleNewSession"

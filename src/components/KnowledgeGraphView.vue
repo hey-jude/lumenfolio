@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import Graph from 'graphology'
 import Sigma from 'sigma'
 import forceAtlas2 from 'graphology-layout-forceatlas2'
@@ -11,15 +11,19 @@ const props = defineProps({
   status: { type: String, default: 'idle' }, // idle | loading | loaded | failed
   error: { type: String, default: '' },
   selectedDocId: { type: String, default: '' },
+  // Start in focus (ego) mode around selectedDocId — used by the knowledge
+  // card's "view in graph" shortcut. Read once at mount (the view remounts on
+  // every open, so a reactive watch would be redundant).
+  initialFocus: { type: Boolean, default: false },
   ui: { type: Object, required: true },
 })
 
-const emit = defineEmits(['open-doc', 'refresh'])
+const emit = defineEmits(['open-doc', 'refresh', 'close'])
 
 const containerRef = ref(null)
 const mode = ref('concept') // 'concept' | 'document'
 const colorBy = ref('type') // 'type' | 'community'
-const focusMode = ref(false) // ego-graph around the open document
+const focusMode = ref(props.initialFocus && Boolean(props.selectedDocId)) // ego-graph around the open document
 const collapseCommunities = ref(false) // render communities as super-nodes
 const expandedCommunities = ref(new Set()) // communities shown in detail
 const showInsights = ref(false)
@@ -401,17 +405,27 @@ function colorForNode(attrs, community) {
   return NODE_COLORS[attrs.kind] || '#94a3b8'
 }
 
-function render() {
+async function render() {
   if (!containerRef.value) return
   const g = buildGraph()
   graph.value = g
   hasNodes.value = g.order > 0
-  if (sigma) {
-    sigma.kill()
-    sigma = null
+  if (g.order === 0) {
+    if (sigma) { sigma.kill(); sigma = null }
+    return
   }
-  if (g.order === 0) return
+  // The canvas is `display:none` while !hasNodes; we just set hasNodes=true, but
+  // Vue applies that class change on the next tick. Wait for it so the container
+  // is laid out (has width) before Sigma reads its size — otherwise Sigma throws
+  // "Container has no width". allowInvalidContainer is a belt-and-suspenders for
+  // the case where the whole graph view is itself still 0-size at first paint.
+  await nextTick()
+  if (!containerRef.value) return
+  // Kill AFTER the await (not before) so two render() calls racing through the
+  // tick can't both create a Sigma and leak the first.
+  if (sigma) { sigma.kill(); sigma = null }
   sigma = new Sigma(g, containerRef.value, {
+    allowInvalidContainer: true,
     renderLabels: true,
     labelDensity: 0.6,
     labelRenderedSizeThreshold: 7,
@@ -549,6 +563,7 @@ watch(colorBy, () => {
           @click="showInsights = !showInsights"
         >{{ ui.graphInsights }} {{ insightsCount }}</button>
         <button class="graph-refresh" :disabled="status === 'loading'" @click="emit('refresh')">{{ ui.refresh }}</button>
+        <button class="graph-close" :title="ui.graphClose" :aria-label="ui.graphClose" @click="emit('close')">✕</button>
       </div>
     </div>
 
@@ -686,6 +701,26 @@ watch(colorBy, () => {
   border-color: rgba(106, 169, 255, 0.5) !important;
   background: rgba(106, 169, 255, 0.16) !important;
   color: var(--text-primary) !important;
+}
+
+.graph-close {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+  margin-left: 2px;
+}
+
+.graph-close:hover {
+  color: var(--text-primary);
+  border-color: rgba(255, 120, 120, 0.5);
+  background: rgba(255, 120, 120, 0.12);
 }
 
 .graph-legend {

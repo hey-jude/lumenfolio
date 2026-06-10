@@ -89,6 +89,20 @@ const props = defineProps({
     type: String,
     required: true,
   },
+  // Toolbar 阅读/知识 tabs: show the switch, which side is active, and the
+  // precipitation status (drives the small "working" dot on the 知识 tab).
+  knowledgeTab: {
+    type: Boolean,
+    default: false,
+  },
+  knowledgeActive: {
+    type: Boolean,
+    default: false,
+  },
+  knowledgeStatus: {
+    type: String,
+    default: '',
+  },
   ui: {
     type: Object,
     required: true,
@@ -117,6 +131,7 @@ const emit = defineEmits([
   'close-translation',
   'retry-translation',
   'realign',
+  'set-knowledge-view',
 ])
 
 const showSource = ref(false)
@@ -963,6 +978,24 @@ watch(translationArtifactActivePage, async () => {
       <!-- Row 2: translation/page/zoom controls (right). Document switching is
            driven entirely by the left sidebar — there is no separate tab strip. -->
       <div class="reader-tabrow">
+        <div v-if="knowledgeTab" class="reader-mode-tabs">
+          <button
+            type="button"
+            :class="{ active: !knowledgeActive }"
+            @click="emit('set-knowledge-view', false)"
+          >{{ ui.readerTabRead }}</button>
+          <button
+            type="button"
+            :class="{ active: knowledgeActive }"
+            @click="emit('set-knowledge-view', true)"
+          >
+            {{ ui.knowledge }}
+            <span
+              v-if="knowledgeStatus === 'running' || knowledgeStatus === 'pending'"
+              class="knowledge-working-dot"
+            ></span>
+          </button>
+        </div>
         <div class="reader-tab-controls">
           <select
             class="toolbar-select"
@@ -1361,6 +1394,10 @@ watch(translationArtifactActivePage, async () => {
           </div>
         </div>
       </template>
+
+      <!-- Knowledge view overlay (toolbar 知识 tab). Rendered above the viewer
+           so toggling never unmounts the PDF (reading position survives). -->
+      <slot name="overlay"></slot>
     </div>
   </section>
 </template>
@@ -1369,6 +1406,12 @@ watch(translationArtifactActivePage, async () => {
 .reader-pane {
   flex: 1;
   min-width: 0;
+  /* min-height:0 lets this flex item shrink to the viewport-bounded column
+     instead of growing to its content (the full multi-page PDF). Without it,
+     .viewer-stage stretches to the whole PDF height — breaking PdfViewer's
+     internal scroll AND the absolutely-positioned knowledge overlay, which
+     then fills tens of thousands of px tall. */
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-app);
@@ -1419,6 +1462,41 @@ watch(translationArtifactActivePage, async () => {
   gap: 8px;
   margin-left: auto;
   flex-shrink: 0;
+}
+
+/* 阅读/知识 mode switch, far left of the toolbar row. */
+.reader-mode-tabs {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.reader-mode-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.reader-mode-tabs button.active {
+  background: rgba(106, 169, 255, 0.16);
+  color: var(--text-primary);
+}
+
+.knowledge-working-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f0b54a;
 }
 
 .toolbar-select,
@@ -1613,6 +1691,8 @@ watch(translationArtifactActivePage, async () => {
   flex: 1;
   min-height: 0;
   padding: 0;
+  /* Anchor for the knowledge-view overlay slot. */
+  position: relative;
 }
 
 .empty-stage,

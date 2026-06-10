@@ -7,9 +7,16 @@ const props = defineProps({
   addingIds: { type: Array, default: () => [] },
   ui: { type: Object, required: true },
   locale: { type: String, default: 'en' },
+  period: { type: String, default: 'daily' }, // daily | weekly | monthly
 })
 
-const emit = defineEmits(['refresh', 'add-paper', 'open-hf'])
+const emit = defineEmits(['refresh', 'add-paper', 'open-hf', 'set-period'])
+
+const PERIODS = [
+  { key: 'daily', labelKey: 'trendingDaily' },
+  { key: 'weekly', labelKey: 'trendingWeekly' },
+  { key: 'monthly', labelKey: 'trendingMonthly' },
+]
 
 function authorLine(paper) {
   const authors = Array.isArray(paper.authors) ? paper.authors : []
@@ -31,20 +38,33 @@ function isAdding(paper) {
   <div class="trending">
     <div class="trending-head" data-tauri-drag-region>
       <div class="trending-title">{{ ui.trendingPapers }}</div>
-      <button
-        type="button"
-        class="trending-refresh"
-        :disabled="status === 'loading'"
-        :title="ui.refresh"
-        @mousedown.stop
-        @click="emit('refresh')"
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M20 11a8 8 0 1 0-.6 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
-          <path d="M20 4v6h-6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
-        </svg>
-        <span>{{ ui.refresh }}</span>
-      </button>
+      <div class="trending-actions">
+        <div class="trending-tabs" @mousedown.stop>
+          <button
+            v-for="item in PERIODS"
+            :key="item.key"
+            type="button"
+            class="trending-tab"
+            :class="{ active: period === item.key }"
+            :disabled="status === 'loading'"
+            @click="emit('set-period', item.key)"
+          >{{ ui[item.labelKey] }}</button>
+        </div>
+        <button
+          type="button"
+          class="trending-refresh"
+          :disabled="status === 'loading'"
+          :title="ui.refresh"
+          @mousedown.stop
+          @click="emit('refresh')"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M20 11a8 8 0 1 0-.6 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+            <path d="M20 4v6h-6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span>{{ ui.refresh }}</span>
+        </button>
+      </div>
     </div>
 
     <div class="trending-body">
@@ -127,6 +147,41 @@ function isAdding(paper) {
   font-size: 16px;
   font-weight: 700;
   color: var(--text-primary);
+}
+
+.trending-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.trending-tabs {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 2px;
+}
+
+.trending-tab {
+  height: 26px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.trending-tab.active {
+  background: rgba(106, 169, 255, 0.16);
+  color: var(--text-primary);
+}
+
+.trending-tab:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .trending-refresh {
