@@ -290,6 +290,9 @@ function applyVisualsAndLayout(g, { runLouvain = true } = {}) {
   g.forEachNode((node) => {
     maxDegree = Math.max(maxDegree, g.degree(node))
   })
+  // Distinct per-node seed angle: using node-id string length collapses many nodes
+  // onto the same start position (forceatlas2 can't separate coincident points).
+  let seed = 0
   g.forEachNode((node, attrs) => {
     const degree = g.degree(node)
     const kind = attrs.kind
@@ -297,8 +300,10 @@ function applyVisualsAndLayout(g, { runLouvain = true } = {}) {
     const growth = kind === 'document' ? 9 : kind === 'community' ? 4 : 5
     const memberBoost = kind === 'community' ? Math.sqrt(attrs.memberCount || 1) * 2 : 0
     if (g.getNodeAttribute(node, 'community') == null) g.setNodeAttribute(node, 'community', 0)
-    g.setNodeAttribute(node, 'x', Math.cos(node.length + degree) + (degree % 7) * 0.13 - 0.4)
-    g.setNodeAttribute(node, 'y', Math.sin(node.length * 1.7 + degree) + (degree % 5) * 0.17 - 0.4)
+    const angle = seed * 2.399963 // golden-angle increment → well-spread seeds
+    seed += 1
+    g.setNodeAttribute(node, 'x', Math.cos(angle) * (1 + (degree % 5) * 0.12))
+    g.setNodeAttribute(node, 'y', Math.sin(angle) * (1 + (degree % 5) * 0.12))
     g.setNodeAttribute(node, 'size', base + memberBoost + Math.sqrt(degree / maxDegree) * growth)
     g.setNodeAttribute(node, 'baseColor', colorForNode(attrs, g.getNodeAttribute(node, 'community')))
     g.setNodeAttribute(node, 'color', g.getNodeAttribute(node, 'baseColor'))
@@ -321,7 +326,7 @@ function collapseGraph(base) {
     try {
       louvain.assign(base, { resolution: 1 })
     } catch {
-      base.forEachNode((node) => base.setNodeAttribute(base, 'community', 0))
+      base.forEachNode((node) => base.setNodeAttribute(node, 'community', 0))
     }
   }
   const communityOf = {}
@@ -370,6 +375,22 @@ function collapseGraph(base) {
   })
   applyVisualsAndLayout(g, { runLouvain: false })
   return g
+}
+
+// Recolour nodes in place without rebuilding/relaying out (used by the Type↔
+// Community toggle, which only changes colour, not topology or position).
+function recolor() {
+  const g = graph.value
+  if (!sigma || !g) {
+    if (props.data) render()
+    return
+  }
+  g.forEachNode((node, attrs) => {
+    const color = colorForNode(attrs, g.getNodeAttribute(node, 'community'))
+    g.setNodeAttribute(node, 'baseColor', color)
+    g.setNodeAttribute(node, 'color', color)
+  })
+  sigma.refresh()
 }
 
 function colorForNode(attrs, community) {
@@ -479,8 +500,12 @@ onBeforeUnmount(() => {
 watch(() => props.data, (data) => {
   if (data) render()
 })
-watch([mode, colorBy, focusMode, collapseCommunities, expandedCommunities], () => {
+// Structural changes rebuild the graph + re-layout; recolouring is cheap.
+watch([mode, focusMode, collapseCommunities, expandedCommunities], () => {
   if (props.data) render()
+})
+watch(colorBy, () => {
+  if (props.data) recolor()
 })
 </script>
 

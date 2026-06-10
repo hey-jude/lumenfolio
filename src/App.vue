@@ -159,6 +159,7 @@ const graphView = ref(false)
 const graphData = ref(null)
 const graphStatus = ref('idle') // idle | loading | loaded | failed
 const graphError = ref('')
+let knowledgeConsolidated = false // run alias consolidation at most once per session
 const showGraph = computed(() => graphView.value && !showTrending.value)
 // Persisted so the discovery feed re-opens on next launch if that's where the
 // user left off. Note: restoring the last document flips this off mid-load, so
@@ -268,6 +269,7 @@ const knowledgeByDoc = reactive({})
 const precipitationQueue = []
 const precipitationQueued = new Set() // doc ids currently queued or in-flight
 let precipitationActive = null
+let precipitationWatchdog = null // frees a stuck slot if its terminal event is lost
 let assistantStreamDrainTimer = null
 
 // ---------------------------------------------------------------------------
@@ -1524,9 +1526,13 @@ async function fetchKnowledgeGraph() {
   graphStatus.value = 'loading'
   graphError.value = ''
   try {
-    // Collapse alias variants across the library first (cheap, no LLM), so the
-    // graph merges e.g. "Models"/"model" into one node.
-    await invoke('consolidate_knowledge').catch(() => {})
+    // Collapse alias variants across the library once per session (normalize_key
+    // is deterministic, so re-running it on every open is a wasted full-table
+    // pass). New artifacts are already normalized at write time.
+    if (!knowledgeConsolidated) {
+      knowledgeConsolidated = true
+      await invoke('consolidate_knowledge').catch(() => {})
+    }
     graphData.value = await invoke('get_knowledge_graph')
     graphStatus.value = 'loaded'
   } catch (err) {
@@ -3213,6 +3219,17 @@ function scheduleDocumentPrecipitation(doc) {
   pumpPrecipitation()
 }
 
+// Free the in-flight slot for `documentId` (if it owns it) and drain the next.
+// Single source of truth for slot release (enqueue failure, terminal event, or
+// watchdog timeout) so the serial queue can never wedge in one place but not another.
+function releasePrecipitationSlot(documentId) {
+  if (precipitationActive !== documentId) return
+  if (precipitationWatchdog) { window.clearTimeout(precipitationWatchdog); precipitationWatchdog = null }
+  precipitationActive = null
+  precipitationQueued.delete(documentId)
+  pumpPrecipitation()
+}
+
 // Run at most one precipitation at a time (serial), draining the queue as each
 // completes (via the lumenfolio://knowledge event).
 function pumpPrecipitation() {
@@ -3220,16 +3237,19 @@ function pumpPrecipitation() {
   if (!knowledgeEnabled.value) { precipitationQueue.length = 0; precipitationQueued.clear(); return }
   const documentId = precipitationQueue.shift()
   precipitationActive = documentId
+  // Watchdog: if no terminal `lumenfolio://knowledge` event arrives (backend crash
+  // before emit, dropped event), free the slot after a timeout so the queue never
+  // wedges for the rest of the session.
+  if (precipitationWatchdog) window.clearTimeout(precipitationWatchdog)
+  precipitationWatchdog = window.setTimeout(() => {
+    console.warn('Knowledge precipitation watchdog fired for', documentId)
+    releasePrecipitationSlot(documentId)
+  }, 120000)
   const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
   invoke('enqueue_document_knowledge', { documentId, modelProviderId: providerId, modelKey })
     .catch((err) => {
       console.warn('Failed to enqueue knowledge precipitation', err)
-      // Release the slot so the queue keeps draining even if one enqueue fails.
-      if (precipitationActive === documentId) {
-        precipitationActive = null
-        precipitationQueued.delete(documentId)
-        pumpPrecipitation()
-      }
+      releasePrecipitationSlot(documentId)
     })
 }
 
@@ -3246,11 +3266,7 @@ function handleKnowledgeEvent(payload) {
       error: payload.error || '',
     }
     // Slot freed: this doc finished (done/failed/skipped) — drain the next.
-    if (precipitationActive === documentId) {
-      precipitationActive = null
-      precipitationQueued.delete(documentId)
-      pumpPrecipitation()
-    }
+    releasePrecipitationSlot(documentId)
     // If the currently-open document just finished, refresh its card. If ANOTHER
     // doc finished, the open doc's related list may have changed (new shared
     // concepts) — refresh just that, cheaply.

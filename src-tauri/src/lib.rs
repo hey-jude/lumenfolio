@@ -2991,24 +2991,25 @@ fn persist_chat_turn(
     // claims + co-citation doc<->doc edges from data we just stored. Gated on the
     // knowledge setting; best-effort (a failure must not fail the turn save).
     if input.knowledge_enabled {
-    let claim_texts: Vec<&str> = input.claims.iter().map(|claim| claim.text.as_str()).collect();
-    let cited_document_ids: Vec<&str> = input
-        .citations
-        .iter()
-        .map(|citation| citation.document_id.as_str())
-        .collect();
-    if let Err(err) = runtime::precipitation::precipitate_turn(
-        &conn,
-        &turn_id,
-        input.session_id,
-        input.document_id,
-        input.user_message,
-        &claim_texts,
-        &cited_document_ids,
-        &citations_json,
-    ) {
-        log::warn!("Stream-2 precipitation failed for turn {turn_id}: {err}");
-    }
+        let claim_texts: Vec<&str> =
+            input.claims.iter().map(|claim| claim.text.as_str()).collect();
+        let cited_document_ids: Vec<&str> = input
+            .citations
+            .iter()
+            .map(|citation| citation.document_id.as_str())
+            .collect();
+        if let Err(err) = runtime::precipitation::precipitate_turn(
+            &conn,
+            &turn_id,
+            input.session_id,
+            input.document_id,
+            input.user_message,
+            &claim_texts,
+            &cited_document_ids,
+            &citations_json,
+        ) {
+            log::warn!("Stream-2 precipitation failed for turn {turn_id}: {err}");
+        }
     }
     Ok(())
 }
