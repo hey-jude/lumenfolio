@@ -299,6 +299,20 @@ struct AskDocumentInput {
     /// sedimentation). Defaults to true for legacy callers.
     #[serde(default)]
     knowledge_enabled: Option<bool>,
+    /// Which app surface the user is on right now (reader / trending / graph),
+    /// so the agent can resolve "the current trending papers" to the right list
+    /// and knows when the question is about something other than the focus PDF.
+    #[serde(default)]
+    view_context: Option<ViewContextInput>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewContextInput {
+    /// "reader" | "trending" | "graph" (free-form; only used for an ambient hint).
+    surface: Option<String>,
+    /// daily | weekly | monthly — the trending period currently shown.
+    trending_period: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

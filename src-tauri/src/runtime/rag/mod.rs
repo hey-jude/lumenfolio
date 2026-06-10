@@ -386,6 +386,8 @@ enum RagToolName {
     OpenVisual,
     RecallChatHistory,
     QueryKnowledgeGraph,
+    SearchLibraryKnowledge,
+    ListTrendingPapers,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -431,6 +433,8 @@ impl RagToolName {
             Self::OpenVisual => "open_visual",
             Self::RecallChatHistory => "recall_chat_history",
             Self::QueryKnowledgeGraph => "query_knowledge_graph",
+            Self::SearchLibraryKnowledge => "search_library_knowledge",
+            Self::ListTrendingPapers => "list_trending_papers",
         }
     }
 }
@@ -631,6 +635,30 @@ pub fn rag_tool_specs_for_capabilities(vision_enabled: bool) -> Vec<RagToolSpec>
                 "type": "object",
                 "properties": {
                     "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max related documents to return (default 8)" }
+                }
+            }),
+        },
+        RagToolSpec {
+            name: "search_library_knowledge",
+            description: "Search the WHOLE workspace library (all documents, not just the focus document) by topic/concept/entity, using the precipitated knowledge graph. Use for questions like \"which of my papers are about X\". Returns matching documents with the matched concepts as the reason; route to one with its documentId for details.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Topic/concept/entity to search for across the library" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max documents to return (default 10)" }
+                },
+                "required": ["query"]
+            }),
+        },
+        RagToolSpec {
+            name: "list_trending_papers",
+            description: "List the Hugging Face trending papers the user is browsing (cached from the Trending view). Use for questions about \"trending papers\" / \"what's trending\" / which trending papers relate to a topic. period defaults to what the user is currently viewing. Optional query filters by title/abstract. Returns titles, abstracts, arXiv ids and HF links. Returns nothing if the user hasn't opened the Trending view yet.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "period": { "type": "string", "enum": ["daily", "weekly", "monthly"], "description": "Which cached trending list (defaults to the user's current period)" },
+                    "query": { "type": "string", "description": "Optional keyword(s) to filter by title/abstract" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 30, "description": "Max papers to return (default 12)" }
                 }
             }),
         },
@@ -916,6 +944,9 @@ pub fn execute_rag_tool_call_for_capabilities(
                 RagToolRegistry::new(conn, document_id, capabilities.max_quote_chars);
             execute_query_knowledge_graph_tool(&primary_registry, args)
         }
+        // Library-wide / cross-surface tools: not scoped to any single document.
+        "search_library_knowledge" => execute_search_library_knowledge_tool(&registry, args),
+        "list_trending_papers" => execute_list_trending_papers_tool(&registry, args),
         _ => execute_search_chunks_tool(&registry, args, fallback_query),
     };
 
@@ -1158,6 +1189,139 @@ fn execute_query_knowledge_graph_tool(
             RagToolName::QueryKnowledgeGraph,
             serde_json::json!({ "documentId": registry.document_id, "limit": limit }),
             related.len(),
+        ),
+    })
+}
+
+fn execute_search_library_knowledge_tool(
+    registry: &RagToolRegistry<'_>,
+    args: &serde_json::Value,
+) -> Result<RagToolExecutionOutput, String> {
+    let query = string_arg(args, "query").unwrap_or_default().to_string();
+    let limit = u32_arg(args, "limit", 10, 1, 20) as usize;
+    let hits =
+        crate::runtime::knowledge_graph::search_library(registry.conn, &query, limit)?;
+    let citations: Vec<Citation> = hits
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let reason = if item.matched_concepts.is_empty() {
+                String::new()
+            } else {
+                format!(" — matches: {}", item.matched_concepts.join(", "))
+            };
+            Citation {
+                id: format!("lib-{index}"),
+                label: format!("[{}]", index + 1),
+                page: 0,
+                block_id: String::new(),
+                section_title: Some("library document".to_string()),
+                quote: format!("Library document: {}{reason}", item.title),
+                bbox_list: serde_json::json!([]),
+                document_id: item.document_id.clone(),
+                source: "knowledge_graph".to_string(),
+            }
+        })
+        .collect();
+    Ok(RagToolExecutionOutput {
+        citations,
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::SearchLibraryKnowledge,
+            serde_json::json!({ "query": query, "limit": limit }),
+            hits.len(),
+        ),
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct CachedTrendingPaper {
+    #[serde(rename = "arxivId", default)]
+    arxiv_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    upvotes: i64,
+}
+
+fn execute_list_trending_papers_tool(
+    registry: &RagToolRegistry<'_>,
+    args: &serde_json::Value,
+) -> Result<RagToolExecutionOutput, String> {
+    let period = match string_arg(args, "period") {
+        Some("weekly") => "weekly",
+        Some("monthly") => "monthly",
+        _ => "daily",
+    };
+    let query = string_arg(args, "query").unwrap_or_default().to_lowercase();
+    let limit = u32_arg(args, "limit", 12, 1, 30) as usize;
+
+    let payload: Option<String> = registry
+        .conn
+        .query_row(
+            "SELECT payload_json FROM trending_cache WHERE period = ?1",
+            rusqlite::params![period],
+            |row| row.get(0),
+        )
+        .ok();
+    let papers: Vec<CachedTrendingPaper> = payload
+        .as_deref()
+        .and_then(|json| serde_json::from_str(json).ok())
+        .unwrap_or_default();
+
+    // Optional keyword filter: keep papers whose title/abstract contains any
+    // query token (≥3 chars). No query → keep all.
+    // Byte length, not char count: a 1–2 character CJK token (e.g. "训练") is ≥3
+    // bytes and must be kept; only short ASCII stopwords (≤2 bytes) are dropped.
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .filter(|t| t.len() >= 3)
+        .map(str::to_string)
+        .collect();
+    let citations: Vec<Citation> = papers
+        .iter()
+        .filter(|paper| {
+            if tokens.is_empty() {
+                return true;
+            }
+            let haystack = format!("{} {}", paper.title, paper.summary).to_lowercase();
+            tokens.iter().any(|token| haystack.contains(token))
+        })
+        .take(limit)
+        .enumerate()
+        .map(|(index, paper)| {
+            let summary = truncate_chars(paper.summary.trim(), registry.max_quote_chars);
+            Citation {
+                id: format!("trending-{period}-{index}"),
+                label: format!("[{}]", index + 1),
+                page: 0,
+                block_id: String::new(),
+                section_title: Some(format!("trending paper ({period})")),
+                quote: format!(
+                    "{} (arXiv:{}, {} upvotes): {}",
+                    paper.title.trim(),
+                    paper.arxiv_id.trim(),
+                    paper.upvotes,
+                    summary
+                ),
+                bbox_list: serde_json::json!([]),
+                document_id: String::new(),
+                source: "trending".to_string(),
+            }
+        })
+        .collect();
+    let count = citations.len();
+    Ok(RagToolExecutionOutput {
+        citations,
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::ListTrendingPapers,
+            serde_json::json!({ "period": period, "query": query, "limit": limit }),
+            count,
         ),
     })
 }
@@ -7209,6 +7373,79 @@ mod tests {
     }
 
     #[test]
+    fn list_trending_papers_reads_cache_and_filters() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE trending_cache (period TEXT PRIMARY KEY, payload_json TEXT NOT NULL, fetched_at INTEGER NOT NULL);",
+        )
+        .unwrap();
+        let payload = serde_json::json!([
+            { "arxivId": "2606.1", "title": "Scaling LLM training", "summary": "About large-model training.", "upvotes": 90 },
+            { "arxivId": "2606.2", "title": "A vision paper", "summary": "About image segmentation.", "upvotes": 10 }
+        ])
+        .to_string();
+        conn.execute(
+            "INSERT INTO trending_cache (period, payload_json, fetched_at) VALUES ('daily', ?1, 0)",
+            rusqlite::params![payload],
+        )
+        .unwrap();
+
+        // No query → both papers.
+        let all = execute_rag_tool_call(&conn, "doc", "list_trending_papers", &serde_json::json!({}), "");
+        assert_eq!(all.tool_call.tool, "list_trending_papers");
+        assert_eq!(all.citations.len(), 2);
+
+        // Keyword filter on title/abstract → only the training paper.
+        let filtered = execute_rag_tool_call(
+            &conn,
+            "doc",
+            "list_trending_papers",
+            &serde_json::json!({ "query": "training" }),
+            "",
+        );
+        assert_eq!(filtered.citations.len(), 1);
+        assert!(filtered.citations[0].quote.contains("Scaling LLM training"));
+
+        // An un-cached period yields nothing (rather than erroring).
+        let empty = execute_rag_tool_call(
+            &conn,
+            "doc",
+            "list_trending_papers",
+            &serde_json::json!({ "period": "weekly" }),
+            "",
+        );
+        assert_eq!(empty.citations.len(), 0);
+    }
+
+    #[test]
+    fn search_library_knowledge_finds_docs_by_concept() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE documents (id TEXT PRIMARY KEY, title TEXT NOT NULL);
+             CREATE TABLE document_artifacts (document_id TEXT, kind TEXT, name TEXT, normalized TEXT);
+             INSERT INTO documents VALUES ('d1','Training methods'), ('d2','Vision models');
+             INSERT INTO document_artifacts VALUES
+               ('d1','concept','model training','model training'),
+               ('d1','entity','GPT','gpt'),
+               ('d2','concept','image segmentation','image segmentation');",
+        )
+        .unwrap();
+
+        let hit = execute_rag_tool_call(
+            &conn,
+            "d2",
+            "search_library_knowledge",
+            &serde_json::json!({ "query": "training" }),
+            "",
+        );
+        assert_eq!(hit.tool_call.tool, "search_library_knowledge");
+        // Whole-library search: finds d1 even though the focus doc is d2.
+        assert_eq!(hit.citations.len(), 1);
+        assert_eq!(hit.citations[0].document_id, "d1");
+        assert!(hit.citations[0].quote.contains("model training"));
+    }
+
+    #[test]
     fn rag_tool_registry_exposes_supported_tools() {
         let names = rag_tool_specs_for_capabilities(false)
             .into_iter()
@@ -7232,7 +7469,9 @@ mod tests {
                 "search_chunks",
                 "search_table_facts",
                 "recall_chat_history",
-                "query_knowledge_graph"
+                "query_knowledge_graph",
+                "search_library_knowledge",
+                "list_trending_papers"
             ])
         );
         let vision_names = rag_tool_specs_for_capabilities(true)

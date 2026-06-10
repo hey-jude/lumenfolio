@@ -158,23 +158,225 @@ pub(crate) struct RelatedDocument {
     pub co_citation: f64,
 }
 
+/// Edge between two RELATED documents (not involving the focus document — those
+/// relations are already carried by the `RelatedDocument` entries themselves).
+/// Lets the reading-time mini ego-graph show cluster structure among neighbours.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RelatedLink {
+    pub doc_a: String,
+    pub doc_b: String,
+    pub shared_count: i64,
+    pub co_citation: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RelatedDocumentsPayload {
+    pub related: Vec<RelatedDocument>,
+    pub links: Vec<RelatedLink>,
+}
+
 /// Documents related to `document_id`, ranked by shared concepts/entities +
-/// co-citation. The shared concept names are the "why related" reason shown in
-/// the reading-time panel.
+/// co-citation, plus the inter-links among those related documents. The shared
+/// concept names are the "why related" reason shown in the reading-time panel.
 #[tauri::command]
 pub(crate) fn get_related_documents(
     document_id: String,
     database: tauri::State<'_, AppDatabase>,
-) -> Result<Vec<RelatedDocument>, String> {
+) -> Result<RelatedDocumentsPayload, String> {
     let document_id = document_id.trim().to_string();
     if document_id.is_empty() {
-        return Ok(Vec::new());
+        return Ok(RelatedDocumentsPayload {
+            related: Vec::new(),
+            links: Vec::new(),
+        });
     }
     let conn = database
         .conn
         .lock()
         .map_err(|_| "SQLite lock was poisoned".to_string())?;
-    related_documents(&conn, &document_id)
+    let related = related_documents(&conn, &document_id)?;
+    let ids: Vec<&str> = related.iter().map(|r| r.document_id.as_str()).collect();
+    let links = related_inter_links(&conn, &ids)?;
+    Ok(RelatedDocumentsPayload { related, links })
+}
+
+/// Inter-links among a small id set (the related list, ≤ RELATED_LIMIT docs):
+/// shared concept/entity counts + co-citation weight per unordered pair.
+fn related_inter_links(
+    conn: &rusqlite::Connection,
+    ids: &[&str],
+) -> Result<Vec<RelatedLink>, String> {
+    use std::collections::HashMap;
+    if ids.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let placeholders = ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let id_params = rusqlite::params_from_iter(ids.iter().chain(ids.iter()));
+
+    let mut pairs: HashMap<(String, String), (i64, f64)> = HashMap::new();
+
+    {
+        let sql = format!(
+            "SELECT a.document_id, b.document_id, COUNT(DISTINCT a.normalized)
+             FROM document_artifacts a
+             JOIN document_artifacts b
+               ON a.normalized = b.normalized
+              AND a.kind = b.kind
+              AND a.document_id < b.document_id
+             WHERE a.kind IN ('entity','concept') AND a.normalized <> ''
+               AND a.document_id IN ({placeholders})
+               AND b.document_id IN ({placeholders})
+             GROUP BY a.document_id, b.document_id"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|err| format!("Failed to prepare inter-links query: {err}"))?;
+        let rows = stmt
+            .query_map(id_params, |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|err| format!("Failed to query inter-links: {err}"))?;
+        for row in rows.filter_map(Result::ok) {
+            let (a, b, count) = row;
+            pairs.entry((a, b)).or_insert((0, 0.0)).0 = count;
+        }
+    }
+
+    {
+        // document_links rows already store doc_a < doc_b, matching the pair key.
+        let sql = format!(
+            "SELECT doc_a, doc_b, weight FROM document_links
+             WHERE basis = 'co_citation'
+               AND doc_a IN ({placeholders})
+               AND doc_b IN ({placeholders})"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|err| format!("Failed to prepare inter co-citation query: {err}"))?;
+        let id_params = rusqlite::params_from_iter(ids.iter().chain(ids.iter()));
+        let rows = stmt
+            .query_map(id_params, |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
+            })
+            .map_err(|err| format!("Failed to query inter co-citation: {err}"))?;
+        for row in rows.filter_map(Result::ok) {
+            let (a, b, weight) = row;
+            pairs.entry((a, b)).or_insert((0, 0.0)).1 += weight;
+        }
+    }
+
+    Ok(pairs
+        .into_iter()
+        .map(|((doc_a, doc_b), (shared_count, co_citation))| RelatedLink {
+            doc_a,
+            doc_b,
+            shared_count,
+            co_citation,
+        })
+        .collect())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LibraryHit {
+    pub document_id: String,
+    pub title: String,
+    pub matched_concepts: Vec<String>,
+    pub score: i64,
+}
+
+/// Whole-library concept/entity search (NOT scoped to any focus document), used
+/// by the `search_library_knowledge` RAG tool. Ranks documents by how many of
+/// their precipitated concepts/entities match the query tokens.
+pub(crate) fn search_library(
+    conn: &rusqlite::Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<LibraryHit>, String> {
+    use std::collections::HashMap;
+    // Byte length, not char count, so short CJK tokens (≥3 bytes) survive while
+    // 1–2 byte ASCII stopwords are dropped.
+    let tokens: Vec<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 3)
+        .map(str::to_string)
+        .collect();
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    struct Acc {
+        title: String,
+        names: Vec<String>,
+        seen: std::collections::HashSet<String>,
+    }
+    let mut acc: HashMap<String, Acc> = HashMap::new();
+
+    // One LIKE pass per token; a matched artifact contributes its document + name.
+    let mut stmt = conn
+        .prepare(
+            "SELECT a.document_id, d.title, a.name, a.normalized
+             FROM document_artifacts a
+             JOIN documents d ON d.id = a.document_id
+             WHERE a.kind IN ('entity','concept')
+               AND (lower(a.name) LIKE ?1 OR a.normalized LIKE ?1)",
+        )
+        .map_err(|err| format!("Failed to prepare library search: {err}"))?;
+    for token in &tokens {
+        let pattern = format!("%{token}%");
+        let rows = stmt
+            .query_map(params![pattern], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|err| format!("Failed to query library search: {err}"))?;
+        for row in rows.filter_map(Result::ok) {
+            let (doc_id, title, name) = row;
+            let entry = acc.entry(doc_id).or_insert_with(|| Acc {
+                title,
+                names: Vec::new(),
+                seen: std::collections::HashSet::new(),
+            });
+            if entry.seen.insert(name.to_lowercase()) && entry.names.len() < 8 {
+                entry.names.push(name);
+            }
+        }
+    }
+
+    let mut hits: Vec<LibraryHit> = acc
+        .into_iter()
+        .map(|(document_id, item)| LibraryHit {
+            document_id,
+            title: item.title,
+            score: item.names.len() as i64,
+            matched_concepts: item.names,
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    hits.truncate(limit);
+    Ok(hits)
 }
 
 /// Core ranking used by both the command and the `query_knowledge_graph` RAG tool.

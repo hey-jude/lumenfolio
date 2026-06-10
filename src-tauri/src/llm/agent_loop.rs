@@ -326,6 +326,32 @@ fn run_one_tool(
     name: &str,
     args: &serde_json::Value,
 ) -> Result<String, String> {
+    // Default list_trending_papers to the period the user is actually viewing.
+    // The model is also hinted in the prompt, but it may omit the arg — the tool
+    // would then fall back to 'daily' and answer about the wrong list.
+    let injected_args;
+    let args = if name == "list_trending_papers"
+        && args.get("period").and_then(|v| v.as_str()).is_none()
+    {
+        match ctx
+            .input
+            .view_context
+            .as_ref()
+            .and_then(|v| v.trending_period.as_deref())
+            .filter(|p| matches!(*p, "daily" | "weekly" | "monthly"))
+        {
+            Some(period) => {
+                let mut obj = args.as_object().cloned().unwrap_or_default();
+                obj.insert("period".to_string(), serde_json::Value::String(period.to_string()));
+                injected_args = serde_json::Value::Object(obj);
+                &injected_args
+            }
+            None => args,
+        }
+    } else {
+        args
+    };
+
     let fallback_query = args
         .get("query")
         .and_then(|value| value.as_str())
@@ -617,6 +643,32 @@ fn execute_library_tool(
     (rendered, hits.len())
 }
 
+/// Ambient one-liner telling the model which app surface the user is on, so
+/// "the current trending papers" resolves to the right cached list and so the
+/// model knows the question may not be about the focus PDF.
+fn current_surface_hint(view: Option<&crate::ViewContextInput>) -> Option<String> {
+    let view = view?;
+    match view.surface.as_deref() {
+        Some("trending") => {
+            let period = match view.trending_period.as_deref() {
+                Some("weekly") => "Weekly",
+                Some("monthly") => "Monthly",
+                _ => "Daily",
+            };
+            Some(format!(
+                "The user is currently browsing the {period} Trending Papers list (Hugging Face). \
+For questions about \"the trending papers\", call list_trending_papers with period=\"{}\".",
+                view.trending_period.as_deref().unwrap_or("daily")
+            ))
+        }
+        Some("graph") => Some(
+            "The user is currently viewing the cross-document Knowledge Graph of their library."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 fn build_initial_messages(
     ctx: &UnifiedLoopInput<'_>,
     agent_run: &runtime::agent::AgentRunResult,
@@ -627,7 +679,7 @@ fn build_initial_messages(
         "You are Lumenfolio, a careful academic PDF reading assistant. Answer in {answer_language}. \
 You can call retrieval tools to read the user's PDFs (search passages, open sections, open tables and pages, inspect the structure, recall prior chat). \
 Call the tools you need to gather evidence, then write the answer. Use only evidence you retrieved or that is already provided below — do not invent facts. \
-When the question is about the user's document library/workspace itself — which documents or papers they have, what is in the sidebar/list, which of their papers is about a topic — the 'Workspace documents' list below is authoritative: answer directly from it (list the relevant titles), no retrieval is needed. \
+When the question is about the user's document library/workspace itself — which documents or papers they have, what is in the sidebar/list, which of their papers is about a topic — the 'Workspace documents' list below is authoritative: answer directly from it (list the relevant titles), no retrieval is needed. Use search_library_knowledge to find library papers by topic across ALL documents, and list_trending_papers for questions about the Hugging Face trending list the user is browsing. \
 Prefer the focus document; only pass another document's id as the `documentId` tool argument when the question genuinely needs cross-document evidence, and only use an id listed in 'Workspace documents'. \
 When you have enough evidence, stop calling tools and reply with a structured Markdown answer (a short direct answer first, then concise paragraphs or lists). Do not return JSON. The final answer must be plain Markdown prose only — never write tool-call syntax, function calls, or any `<|...|>` markup in the answer itself. If the evidence is insufficient, say so clearly and state what is missing."
     );
@@ -652,6 +704,10 @@ When you have enough evidence, stop calling tools and reply with a structured Ma
     }
     if let Some(page) = ctx.input.page {
         context.push_str(&format!("The user is currently viewing page {page}.\n\n"));
+    }
+    if let Some(hint) = current_surface_hint(ctx.input.view_context.as_ref()) {
+        context.push_str(&hint);
+        context.push_str("\n\n");
     }
     context.push_str("Question:\n");
     context.push_str(ctx.question);
