@@ -46,6 +46,10 @@ struct HfPaper {
     published_at: Option<String>,
     #[serde(default)]
     media_urls: Vec<String>,
+    // The date endpoint carries upvotes at the item level; the week/month
+    // endpoints carry it here on the paper instead. map_item reads both.
+    #[serde(default)]
+    upvotes: i64,
 }
 
 #[derive(Deserialize)]
@@ -72,6 +76,9 @@ pub(crate) struct TrendingPaper {
 
 fn map_item(item: HfDailyPaperItem) -> TrendingPaper {
     let id = item.paper.id.trim().to_string();
+    // Upvotes live at the item level (date endpoint) or on the paper (week/month
+    // endpoints); take whichever is present.
+    let upvotes = item.upvotes.max(item.paper.upvotes);
     let authors = item
         .paper
         .authors
@@ -96,7 +103,7 @@ fn map_item(item: HfDailyPaperItem) -> TrendingPaper {
         title: item.paper.title.trim().to_string(),
         authors,
         summary: item.paper.summary.trim().to_string(),
-        upvotes: item.upvotes,
+        upvotes,
         published_at: item.paper.published_at.unwrap_or_default(),
         thumbnail_url,
         hf_url: format!("https://huggingface.co/papers/{id}"),
@@ -112,16 +119,34 @@ fn is_image_url(url: &str) -> bool {
         .any(|ext| path.ends_with(ext))
 }
 
-/// Fetch the HF trending papers (recency + upvotes). Online-only; returns an
-/// error when offline so the frontend can show an offline state.
-#[tauri::command]
-pub(crate) async fn fetch_trending_papers(limit: Option<u32>) -> Result<Vec<TrendingPaper>, String> {
-    let limit = limit.unwrap_or(DEFAULT_TRENDING_LIMIT).clamp(1, 100);
-    let url = format!("https://huggingface.co/api/daily_papers?sort=trending&limit={limit}");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|err| format!("Failed to create trending client: {err}"))?;
+const TRENDING_FALLBACK_QUERY: &str = "sort=trending";
+
+/// Build the HF API query for a period + caller-computed value (everything after
+/// `?`, minus the limit which the caller appends). daily → `date=YYYY-MM-DD`,
+/// weekly → `week=YYYY-Www`, monthly → `month=YYYY-MM`. NOTE: the scoped
+/// (week/month/date) endpoints must NOT carry `sort=trending` — that flag makes
+/// HF ignore the scope and return the global trending list. They're already
+/// ordered by upvotes within the period. A missing/invalid value (or an
+/// unrecognised period) falls back to the latest global trending list. The value
+/// is sanitised to a conservative charset before it reaches the query string.
+fn trending_query(period: Option<&str>, value: Option<&str>) -> String {
+    let value = value
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+    match (period, value) {
+        (Some("daily"), Some(v)) => format!("date={v}"),
+        (Some("weekly"), Some(v)) => format!("week={v}"),
+        (Some("monthly"), Some(v)) => format!("month={v}"),
+        _ => TRENDING_FALLBACK_QUERY.to_string(),
+    }
+}
+
+async fn fetch_trending_query(
+    client: &reqwest::Client,
+    query: &str,
+    limit: u32,
+) -> Result<Vec<TrendingPaper>, String> {
+    let url = format!("https://huggingface.co/api/daily_papers?{query}&limit={limit}");
     let response = client
         .get(&url)
         .header("Accept", "application/json")
@@ -130,10 +155,7 @@ pub(crate) async fn fetch_trending_papers(limit: Option<u32>) -> Result<Vec<Tren
         .await
         .map_err(|err| format!("Trending request failed: {err}"))?;
     if !response.status().is_success() {
-        return Err(format!(
-            "Trending request returned {}",
-            response.status()
-        ));
+        return Err(format!("Trending request returned {}", response.status()));
     }
     let items = response
         .json::<Vec<HfDailyPaperItem>>()
@@ -144,6 +166,74 @@ pub(crate) async fn fetch_trending_papers(limit: Option<u32>) -> Result<Vec<Tren
         .filter(|item| !item.paper.id.trim().is_empty())
         .map(map_item)
         .collect())
+}
+
+/// Fetch the HF trending papers (recency + upvotes). Online-only; returns an
+/// error when offline so the frontend can show an offline state. `period` is
+/// "daily" (default), "weekly", or "monthly"; `value` is the caller-computed
+/// date scope (e.g. "2026-06-10" / "2026-W24" / "2026-06").
+#[tauri::command]
+pub(crate) async fn fetch_trending_papers(
+    period: Option<String>,
+    value: Option<String>,
+    limit: Option<u32>,
+    database: State<'_, AppDatabase>,
+) -> Result<Vec<TrendingPaper>, String> {
+    let limit = limit.unwrap_or(DEFAULT_TRENDING_LIMIT).clamp(1, 100);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|err| format!("Failed to create trending client: {err}"))?;
+    let query = trending_query(period.as_deref(), value.as_deref());
+    let mut papers = fetch_trending_query(&client, &query, limit).await?;
+    // A scoped list (date/week/month) can be empty at a period boundary — today's
+    // daily not published yet, or the first hours of a new ISO week/month. Fall
+    // back to the latest global trending so the view (and the agent's cache) is
+    // never blank. (Skip when we already used the global query.)
+    if papers.is_empty() && query != TRENDING_FALLBACK_QUERY {
+        papers = fetch_trending_query(&client, TRENDING_FALLBACK_QUERY, limit).await?;
+    }
+    // Warm the cache the agent's list_trending_papers tool reads (best-effort:
+    // never fail the user-facing fetch over a cache write).
+    let cache_period = normalize_period(period.as_deref());
+    if let Err(err) = cache_trending(&database, cache_period, &papers) {
+        eprintln!("[trending] cache write failed: {err}");
+    }
+    Ok(papers)
+}
+
+/// Canonical period key for the cache ('daily' | 'weekly' | 'monthly').
+fn normalize_period(period: Option<&str>) -> &'static str {
+    match period {
+        Some("weekly") => "weekly",
+        Some("monthly") => "monthly",
+        _ => "daily",
+    }
+}
+
+fn cache_trending(
+    database: &AppDatabase,
+    period: &str,
+    papers: &[TrendingPaper],
+) -> Result<(), String> {
+    let payload = serde_json::to_string(papers)
+        .map_err(|err| format!("Failed to serialize trending cache: {err}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    conn.execute(
+        "INSERT INTO trending_cache (period, payload_json, fetched_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(period) DO UPDATE SET payload_json = excluded.payload_json, fetched_at = excluded.fetched_at",
+        rusqlite::params![period, payload, now],
+    )
+    .map_err(|err| format!("Failed to write trending cache: {err}"))?;
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -323,6 +413,30 @@ mod tests {
             paper.thumbnail_url.as_deref(),
             Some("https://cdn-thumbnails.huggingface.co/social-thumbnails/papers/2606.05515.png")
         );
+    }
+
+    #[test]
+    fn upvotes_fall_back_to_paper_level_for_week_month_endpoints() {
+        // week/month responses omit the item-level upvotes and put it on the paper.
+        let json = r#"{
+            "paper": { "id": "2606.00001", "title": "T", "upvotes": 90 }
+        }"#;
+        let item: HfDailyPaperItem = serde_json::from_str(json).unwrap();
+        assert_eq!(map_item(item).upvotes, 90);
+    }
+
+    #[test]
+    fn trending_query_maps_period_and_sanitises_value() {
+        assert_eq!(trending_query(Some("daily"), Some("2026-06-10")), "date=2026-06-10");
+        assert_eq!(trending_query(Some("weekly"), Some("2026-W24")), "week=2026-W24");
+        assert_eq!(trending_query(Some("monthly"), Some("2026-06")), "month=2026-06");
+        // No sort=trending on the scoped queries (it would override the scope).
+        assert!(!trending_query(Some("weekly"), Some("2026-W24")).contains("sort"));
+        // Missing value or unrecognised period → latest global trending.
+        assert_eq!(trending_query(None, None), "sort=trending");
+        assert_eq!(trending_query(Some("weekly"), None), "sort=trending");
+        // A value with unexpected characters is rejected (no query injection).
+        assert_eq!(trending_query(Some("weekly"), Some("2026-W24&x=1")), "sort=trending");
     }
 
     #[test]

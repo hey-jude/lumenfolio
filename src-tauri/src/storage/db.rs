@@ -348,6 +348,16 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_document_links_a ON document_links(doc_a);
         CREATE INDEX IF NOT EXISTS idx_document_links_b ON document_links(doc_b);
 
+        -- Cached HF trending-papers list per period, so the agent's
+        -- list_trending_papers tool can read it synchronously (the live fetch is
+        -- async network I/O that doesn't fit the sync tool dispatch). Refreshed
+        -- by fetch_trending_papers whenever the user views the Trending feed.
+        CREATE TABLE IF NOT EXISTS trending_cache (
+          period TEXT PRIMARY KEY,          -- 'daily' | 'weekly' | 'monthly'
+          payload_json TEXT NOT NULL,       -- serialized Vec<TrendingPaper>
+          fetched_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS translations (
           document_id TEXT NOT NULL,
           page_no INTEGER NOT NULL,
