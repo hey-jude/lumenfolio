@@ -281,6 +281,73 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_structure_tree_nodes_document_order
           ON structure_tree_nodes(document_id, order_index);
 
+        -- Knowledge precipitation (Stream 1): per-document derived artifacts.
+        CREATE TABLE IF NOT EXISTS document_artifacts (
+          id TEXT PRIMARY KEY,
+          document_id TEXT NOT NULL,
+          kind TEXT NOT NULL,            -- 'summary' | 'entity' | 'concept' | 'keyword'
+          name TEXT NOT NULL DEFAULT '',
+          normalized TEXT NOT NULL DEFAULT '',
+          detail TEXT NOT NULL DEFAULT '',
+          salience REAL NOT NULL DEFAULT 0,
+          metadata_json TEXT NOT NULL DEFAULT '{}',
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_document_artifacts_doc
+          ON document_artifacts(document_id, kind);
+        CREATE INDEX IF NOT EXISTS idx_document_artifacts_norm
+          ON document_artifacts(normalized, kind);
+
+        -- Precipitation progress + SHA256 cache (one row per document).
+        CREATE TABLE IF NOT EXISTS document_knowledge (
+          document_id TEXT PRIMARY KEY,
+          status TEXT NOT NULL DEFAULT 'pending', -- pending|running|done|failed|skipped
+          source_hash TEXT NOT NULL DEFAULT '',
+          artifact_version INTEGER NOT NULL DEFAULT 0,
+          summary TEXT NOT NULL DEFAULT '',
+          error TEXT NOT NULL DEFAULT '',
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+
+        -- Knowledge precipitation (Stream 2): claims distilled from chat turns.
+        CREATE TABLE IF NOT EXISTS knowledge_claims (
+          id TEXT PRIMARY KEY,
+          document_id TEXT NOT NULL,
+          turn_id TEXT NOT NULL,
+          session_id TEXT NOT NULL DEFAULT '',
+          claim TEXT NOT NULL,
+          question TEXT NOT NULL DEFAULT '',
+          doc_ids_json TEXT NOT NULL DEFAULT '[]',
+          citations_json TEXT NOT NULL DEFAULT '[]',
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_knowledge_claims_doc
+          ON knowledge_claims(document_id);
+        CREATE INDEX IF NOT EXISTS idx_knowledge_claims_turn
+          ON knowledge_claims(turn_id);
+
+        -- Undirected doc<->doc relationship edges (co_citation from chat, shared_concept from artifacts).
+        CREATE TABLE IF NOT EXISTS document_links (
+          id TEXT PRIMARY KEY,
+          doc_a TEXT NOT NULL,             -- convention: doc_a < doc_b
+          doc_b TEXT NOT NULL,
+          basis TEXT NOT NULL,             -- 'co_citation' | 'shared_concept'
+          weight REAL NOT NULL DEFAULT 0,
+          evidence_json TEXT NOT NULL DEFAULT '{}',
+          updated_at INTEGER NOT NULL,
+          UNIQUE(doc_a, doc_b, basis),
+          FOREIGN KEY(doc_a) REFERENCES documents(id) ON DELETE CASCADE,
+          FOREIGN KEY(doc_b) REFERENCES documents(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_document_links_a ON document_links(doc_a);
+        CREATE INDEX IF NOT EXISTS idx_document_links_b ON document_links(doc_b);
+
         CREATE TABLE IF NOT EXISTS translations (
           document_id TEXT NOT NULL,
           page_no INTEGER NOT NULL,

@@ -369,6 +369,7 @@ fn upsert_document_index_job_with_progress(
     }
     runtime::rag::rebuild_structure_tree(&tx, &document_id, &structure_blocks, &outlines)?;
     visual_index::queue_visual_index_job(&tx, &document_id)?;
+    runtime::precipitation::queue_precipitation_job(&tx, &document_id)?;
 
     let tree_ready = visual_index::document_tree_ready(&tx, &document_id)?;
     let visual_index = visual_index::visual_index_job_state(&tx, &document_id)?;
@@ -1162,6 +1163,7 @@ fn repair_document_index_from_cache_job(
 
     runtime::rag::rebuild_structure_tree(&tx, document_id, &blocks, &outlines)?;
     visual_index::queue_visual_index_job(&tx, document_id)?;
+    runtime::precipitation::queue_precipitation_job(&tx, document_id)?;
     let tree_ready = visual_index::document_tree_ready(&tx, document_id)?;
     let visual_index = visual_index::visual_index_job_state(&tx, document_id)?;
     let updated = tx

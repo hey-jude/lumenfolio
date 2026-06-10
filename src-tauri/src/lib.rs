@@ -295,6 +295,10 @@ struct AskDocumentInput {
     /// documentId routing). Normalized + capped at MAX_REFERENCE_DOCS before use.
     #[serde(default)]
     reference_document_ids: Option<Vec<String>>,
+    /// Whether knowledge precipitation is enabled (Stream 2 conversation
+    /// sedimentation). Defaults to true for legacy callers.
+    #[serde(default)]
+    knowledge_enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -2776,6 +2780,7 @@ async fn run_ask_document(
                     claims: &[],
                     retrieval_trace: &agent_run.trace,
                     referenced_document_ids: &reference_document_ids,
+                    knowledge_enabled: input.knowledge_enabled.unwrap_or(true),
                 },
             ) {
                 log::warn!("Failed to persist insufficient-evidence chat turn: {err}");
@@ -2875,6 +2880,7 @@ async fn run_ask_document(
             claims: &answer_result.claims,
             retrieval_trace: &agent_run.trace,
             referenced_document_ids: &reference_document_ids,
+            knowledge_enabled: input.knowledge_enabled.unwrap_or(true),
         },
     ) {
         log::warn!("Failed to persist chat turn: {err}");
@@ -2908,6 +2914,7 @@ struct ChatTurnPersistInput<'a> {
     claims: &'a [AskDocumentClaim],
     retrieval_trace: &'a runtime::agent::AgentTrace,
     referenced_document_ids: &'a [String],
+    knowledge_enabled: bool,
 }
 
 fn persist_chat_turn(
@@ -2979,6 +2986,30 @@ fn persist_chat_turn(
         params![input.session_id],
     )
     .map_err(|err| format!("Failed to bump chat session recency: {err}"))?;
+
+    // Knowledge precipitation — Stream 2 (zero extra LLM): distill this turn's
+    // claims + co-citation doc<->doc edges from data we just stored. Gated on the
+    // knowledge setting; best-effort (a failure must not fail the turn save).
+    if input.knowledge_enabled {
+    let claim_texts: Vec<&str> = input.claims.iter().map(|claim| claim.text.as_str()).collect();
+    let cited_document_ids: Vec<&str> = input
+        .citations
+        .iter()
+        .map(|citation| citation.document_id.as_str())
+        .collect();
+    if let Err(err) = runtime::precipitation::precipitate_turn(
+        &conn,
+        &turn_id,
+        input.session_id,
+        input.document_id,
+        input.user_message,
+        &claim_texts,
+        &cited_document_ids,
+        &citations_json,
+    ) {
+        log::warn!("Stream-2 precipitation failed for turn {turn_id}: {err}");
+    }
+    }
     Ok(())
 }
 
@@ -4613,6 +4644,12 @@ pub fn run() {
             import_workspace_paths,
             trending::fetch_trending_papers,
             trending::add_trending_paper,
+            runtime::precipitation::enqueue_document_knowledge,
+            runtime::precipitation::get_document_knowledge,
+            runtime::precipitation::reprecipitate_document,
+            runtime::precipitation::consolidate_knowledge,
+            runtime::knowledge_graph::get_knowledge_graph,
+            runtime::knowledge_graph::get_related_documents,
             update_check::check_for_update,
             open_external_url,
             load_last_workspace,

@@ -56,11 +56,20 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
+  graphActive: {
+    type: Boolean,
+    default: false,
+  },
+  graphEnabled: {
+    type: Boolean,
+    default: true,
+  },
 })
 
 const emit = defineEmits([
   'update:filter',
   'open-trending',
+  'open-graph',
   'select-doc',
   'add-folder',
   'add-pdfs',
@@ -392,6 +401,18 @@ function triggerDeleteRoot(root, event = null) {
       >
         <span class="trending-entry-icon" aria-hidden="true">🔥</span>
         <span class="trending-entry-label">{{ ui.trendingPapers }}</span>
+      </button>
+
+      <button
+        v-if="graphEnabled"
+        type="button"
+        class="trending-entry"
+        :class="{ active: graphActive }"
+        :title="ui.knowledgeGraph"
+        @click="emit('open-graph')"
+      >
+        <span class="trending-entry-icon" aria-hidden="true">🕸</span>
+        <span class="trending-entry-label">{{ ui.knowledgeGraph }}</span>
       </button>
 
       <section

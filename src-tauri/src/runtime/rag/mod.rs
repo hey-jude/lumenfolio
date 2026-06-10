@@ -385,6 +385,7 @@ enum RagToolName {
     InspectVisuals,
     OpenVisual,
     RecallChatHistory,
+    QueryKnowledgeGraph,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -429,6 +430,7 @@ impl RagToolName {
             Self::InspectVisuals => "inspect_visuals",
             Self::OpenVisual => "open_visual",
             Self::RecallChatHistory => "recall_chat_history",
+            Self::QueryKnowledgeGraph => "query_knowledge_graph",
         }
     }
 }
@@ -619,6 +621,16 @@ pub fn rag_tool_specs_for_capabilities(vision_enabled: bool) -> Vec<RagToolSpec>
                     "query": { "type": "string" },
                     "mode": { "type": "string", "enum": ["keyword", "literal"], "description": "keyword=term-overlap ranked (default); literal=exact substring" },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 8 }
+                }
+            }),
+        },
+        RagToolSpec {
+            name: "query_knowledge_graph",
+            description: "Find OTHER workspace documents related to the focus document via the knowledge graph (shared concepts/entities + conversation co-citation). Use to discover and then route to related papers (call other tools with their documentId) when the answer likely spans multiple documents. Returns related documents with the shared concepts as the reason.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max related documents to return (default 8)" }
                 }
             }),
         },
@@ -897,6 +909,13 @@ pub fn execute_rag_tool_call_for_capabilities(
                 RagToolRegistry::new(conn, document_id, capabilities.max_quote_chars);
             execute_recall_chat_history_tool(&primary_registry, args)
         }
+        // Cross-document discovery is always scoped to the PRIMARY document (its
+        // relations), never a routed referenced doc.
+        "query_knowledge_graph" => {
+            let primary_registry =
+                RagToolRegistry::new(conn, document_id, capabilities.max_quote_chars);
+            execute_query_knowledge_graph_tool(&primary_registry, args)
+        }
         _ => execute_search_chunks_tool(&registry, args, fallback_query),
     };
 
@@ -1090,6 +1109,55 @@ fn execute_recall_chat_history_tool(
             RagToolName::RecallChatHistory,
             serde_json::json!({ "query": query, "limit": limit, "mode": mode }),
             candidates.len(),
+        ),
+    })
+}
+
+/// Cross-document discovery: return documents related to the focus document as
+/// pseudo-citations (page 0, no bbox) whose quote names the shared concepts. The
+/// agent can read these and then route to a related doc via its `documentId`.
+/// Also surfaces a "gap" note when the focus document has no relations yet.
+fn execute_query_knowledge_graph_tool(
+    registry: &RagToolRegistry<'_>,
+    args: &serde_json::Value,
+) -> Result<RagToolExecutionOutput, String> {
+    let limit = u32_arg(args, "limit", 8, 1, 20) as usize;
+    let related =
+        crate::runtime::knowledge_graph::related_documents(registry.conn, registry.document_id)?;
+    let citations: Vec<Citation> = related
+        .iter()
+        .take(limit)
+        .enumerate()
+        .map(|(index, item)| {
+            let mut reason = if item.shared_concepts.is_empty() {
+                String::new()
+            } else {
+                format!(" — shares: {}", item.shared_concepts.join(", "))
+            };
+            if item.co_citation > 0.0 {
+                reason.push_str(&format!("; co-cited x{}", item.co_citation as i64));
+            }
+            Citation {
+                id: format!("kg-{}-{index}", registry.document_id),
+                label: format!("[{}]", index + 1),
+                page: 0,
+                block_id: String::new(),
+                section_title: Some("related document".to_string()),
+                quote: format!("Related document: {}{reason}", item.title),
+                bbox_list: serde_json::json!([]),
+                document_id: item.document_id.clone(),
+                source: "knowledge_graph".to_string(),
+            }
+        })
+        .collect();
+    Ok(RagToolExecutionOutput {
+        citations,
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::QueryKnowledgeGraph,
+            serde_json::json!({ "documentId": registry.document_id, "limit": limit }),
+            related.len(),
         ),
     })
 }
@@ -7163,7 +7231,8 @@ mod tests {
                 "resolve_visual_anchor",
                 "search_chunks",
                 "search_table_facts",
-                "recall_chat_history"
+                "recall_chat_history",
+                "query_knowledge_graph"
             ])
         );
         let vision_names = rag_tool_specs_for_capabilities(true)

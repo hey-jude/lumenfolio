@@ -114,6 +114,7 @@ pub async fn run_from_env() -> Result<(), String> {
         retrieval_attempt_offset: None,
         activity_event_id: None,
         reference_document_ids: None,
+        knowledge_enabled: None,
     };
     let current_view_metadata = crate::build_current_view_gate_metadata(
         &database,

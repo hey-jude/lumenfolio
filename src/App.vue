@@ -48,6 +48,17 @@ const TrendingFeed = defineAsyncComponent({
   delay: 80,
   timeout: ASYNC_COMPONENT_TIMEOUT_MS,
 })
+const KnowledgeCard = defineAsyncComponent({
+  loader: () => import('./components/KnowledgeCard.vue'),
+  delay: 120,
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
+const KnowledgeGraphView = defineAsyncComponent({
+  loader: () => import('./components/KnowledgeGraphView.vue'),
+  loadingComponent: AsyncPanelLoading,
+  delay: 80,
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
 const ChatPane = defineAsyncComponent({
   loader: () => import('./components/ChatPane.vue'),
   loadingComponent: AsyncPanelLoading,
@@ -136,6 +147,19 @@ const activeNoteId = ref('')
 // Opt-out for the local-first audience: when off, nothing is fetched and the
 // discovery entry/feed are hidden.
 const trendingEnabled = usePersistedRef('trendingEnabled', true)
+// Knowledge precipitation (Stream 1 LLM extraction). Default on; when off, no
+// per-document LLM extraction is triggered. Turning it on triggers a backfill.
+const knowledgeEnabled = usePersistedRef('knowledgeEnabled', true)
+// Knowledge card for the currently-open document (loaded from get_document_knowledge).
+const knowledgeCard = ref(null) // { status, summary, entities[], concepts[], keywords[], error }
+// Related papers for the open document (P3a): [{ documentId, title, score, sharedConcepts[], coCitation }].
+const relatedDocs = ref([])
+// Knowledge graph view (P3b): full-screen force graph in the reader area.
+const graphView = ref(false)
+const graphData = ref(null)
+const graphStatus = ref('idle') // idle | loading | loaded | failed
+const graphError = ref('')
+const showGraph = computed(() => graphView.value && !showTrending.value)
 // Persisted so the discovery feed re-opens on next launch if that's where the
 // user left off. Note: restoring the last document flips this off mid-load, so
 // the value is re-applied after the workspace settles (loadLastWorkspaceAfterFirstPaint).
@@ -226,6 +250,7 @@ let askDocumentDoneUnlisten = null
 let askDocumentErrorUnlisten = null
 let documentIndexUnlisten = null
 let visualIndexUnlisten = null
+let knowledgeUnlisten = null
 let translationJobUnlisten = null
 let pdfTranslationUnlisten = null
 let localMessageCounter = 0
@@ -237,6 +262,12 @@ let fileDropIgnoreTimer = null
 const clearedActivityEventIds = new Map()
 const assistantStreamTargets = new Map()
 const visualIndexRuns = new Set()
+// Knowledge precipitation (Stream 1) — front-end orchestration. Serial queue so a
+// bulk import never fires N concurrent LLM extractions; the card reads knowledgeByDoc.
+const knowledgeByDoc = reactive({})
+const precipitationQueue = []
+const precipitationQueued = new Set() // doc ids currently queued or in-flight
+let precipitationActive = null
 let assistantStreamDrainTimer = null
 
 // ---------------------------------------------------------------------------
@@ -1463,8 +1494,9 @@ function openTab(docId) {
 // rather than blanking selectedDocId (which would leave the reader showing a doc
 // with no matching active tab). The document itself stays in the sidebar regardless.
 function selectDoc(docId) {
-  // Selecting a document leaves the Trending discovery feed.
+  // Selecting a document leaves the Trending feed / knowledge graph.
   trendingView.value = false
+  graphView.value = false
   openTab(docId)
   // Explicit selection (sidebar / tab) retargets the active conversation's focus
   // to the chosen document, so "Focus" tracks what you're reading. Citation jumps
@@ -1488,8 +1520,32 @@ async function fetchTrending() {
   }
 }
 
+async function fetchKnowledgeGraph() {
+  graphStatus.value = 'loading'
+  graphError.value = ''
+  try {
+    // Collapse alias variants across the library first (cheap, no LLM), so the
+    // graph merges e.g. "Models"/"model" into one node.
+    await invoke('consolidate_knowledge').catch(() => {})
+    graphData.value = await invoke('get_knowledge_graph')
+    graphStatus.value = 'loaded'
+  } catch (err) {
+    graphError.value = err?.message || String(err)
+    graphStatus.value = 'failed'
+  }
+}
+
+function handleOpenGraph() {
+  graphView.value = true
+  trendingView.value = false
+  if (graphStatus.value === 'idle' || graphStatus.value === 'failed') {
+    fetchKnowledgeGraph()
+  }
+}
+
 function handleOpenTrending() {
   if (!trendingEnabled.value) return
+  graphView.value = false
   trendingView.value = true
   if (trendingStatus.value === 'idle' || trendingStatus.value === 'failed') {
     fetchTrending()
@@ -1554,8 +1610,18 @@ watch(showTrending, (visible) => {
 
 // Any path that selects a document leaves the discovery feed (drag-drop import,
 // the "+" picker, add-folder/scan — not just selectDoc).
-watch(selectedDocId, () => {
+watch(selectedDocId, (documentId) => {
   trendingView.value = false
+  graphView.value = false
+  // Show the open document's knowledge card; ensure it gets precipitated.
+  loadKnowledgeCard(documentId)
+  const doc = allDocs.value.find((item) => item.id === documentId)
+  if (doc) scheduleDocumentPrecipitation(doc)
+})
+
+// Turning the feature on retroactively precipitates the existing library.
+watch(knowledgeEnabled, (enabled) => {
+  if (enabled) backfillPrecipitation()
 })
 
 function handleCitationClick(citation) {
@@ -1697,6 +1763,7 @@ async function handleSend(payload, selection = null) {
         maxRetrievalSteps,
         retrievalAttemptOffset,
         activityEventId,
+        knowledgeEnabled: knowledgeEnabled.value,
       },
     })
   } catch (err) {
@@ -3087,6 +3154,114 @@ function scheduleDocumentVisualIndex(doc) {
     })
 }
 
+// ---- Knowledge precipitation (Stream 1) front-end orchestration ----
+
+async function loadKnowledgeCard(documentId) {
+  if (!documentId || documentId === 'empty') {
+    knowledgeCard.value = null
+    relatedDocs.value = []
+    return
+  }
+  try {
+    knowledgeCard.value = await invoke('get_document_knowledge', { documentId })
+  } catch {
+    knowledgeCard.value = null
+  }
+  loadRelatedDocuments(documentId)
+}
+
+async function loadRelatedDocuments(documentId) {
+  if (!documentId || documentId === 'empty') {
+    relatedDocs.value = []
+    return
+  }
+  try {
+    const related = await invoke('get_related_documents', { documentId })
+    // Guard against a stale response after the user switched documents.
+    if (selectedDocId.value === documentId) {
+      relatedDocs.value = Array.isArray(related) ? related : []
+    }
+  } catch {
+    relatedDocs.value = []
+  }
+}
+
+async function reprecipitateCurrentDocument() {
+  const documentId = selectedDocId.value
+  if (!documentId || documentId === 'empty') return
+  const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
+  knowledgeByDoc[documentId] = { ...(knowledgeByDoc[documentId] || {}), status: 'running' }
+  if (knowledgeCard.value) knowledgeCard.value.status = 'running'
+  try {
+    await invoke('reprecipitate_document', { documentId, modelProviderId: providerId, modelKey })
+  } catch (err) {
+    console.warn('Failed to reprecipitate document', err)
+  }
+}
+
+// Enqueue a document for precipitation. Gated on the setting + a configured chat
+// model + an indexed/tree-ready local doc. The backend SHA256-skips unchanged
+// docs, so re-enqueuing a done doc is cheap (no LLM).
+function scheduleDocumentPrecipitation(doc) {
+  if (!knowledgeEnabled.value || !chatModelConfigured.value) return
+  if (!doc || doc.id === 'empty') return
+  if (doc.source !== 'local' || doc.indexStatus !== 'indexed' || !doc.treeReady) return
+  if (precipitationQueued.has(doc.id)) return
+  if (knowledgeByDoc[doc.id]?.status === 'running') return
+  precipitationQueued.add(doc.id)
+  precipitationQueue.push(doc.id)
+  pumpPrecipitation()
+}
+
+// Run at most one precipitation at a time (serial), draining the queue as each
+// completes (via the lumenfolio://knowledge event).
+function pumpPrecipitation() {
+  if (precipitationActive || !precipitationQueue.length) return
+  if (!knowledgeEnabled.value) { precipitationQueue.length = 0; precipitationQueued.clear(); return }
+  const documentId = precipitationQueue.shift()
+  precipitationActive = documentId
+  const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
+  invoke('enqueue_document_knowledge', { documentId, modelProviderId: providerId, modelKey })
+    .catch((err) => {
+      console.warn('Failed to enqueue knowledge precipitation', err)
+      // Release the slot so the queue keeps draining even if one enqueue fails.
+      if (precipitationActive === documentId) {
+        precipitationActive = null
+        precipitationQueued.delete(documentId)
+        pumpPrecipitation()
+      }
+    })
+}
+
+function handleKnowledgeEvent(payload) {
+  const documentId = payload?.documentId
+  if (!documentId) return
+  if (payload.status && payload.status !== 'queued') {
+    knowledgeByDoc[documentId] = {
+      status: payload.status,
+      summary: payload.summary || '',
+      entities: Number(payload.entities || 0),
+      concepts: Number(payload.concepts || 0),
+      keywords: Number(payload.keywords || 0),
+      error: payload.error || '',
+    }
+    // Slot freed: this doc finished (done/failed/skipped) — drain the next.
+    if (precipitationActive === documentId) {
+      precipitationActive = null
+      precipitationQueued.delete(documentId)
+      pumpPrecipitation()
+    }
+    // If the currently-open document just finished, refresh its card. If ANOTHER
+    // doc finished, the open doc's related list may have changed (new shared
+    // concepts) — refresh just that, cheaply.
+    if (selectedDocId.value === documentId) {
+      loadKnowledgeCard(documentId)
+    } else if (payload.status === 'done' && selectedDocId.value) {
+      loadRelatedDocuments(selectedDocId.value)
+    }
+  }
+}
+
 function handleVisualIndexEvent(payload) {
   const documentId = payload?.documentId
   if (!documentId) return
@@ -3550,6 +3725,7 @@ function handleDocumentIndexEvent(payload) {
     target.visualIndexError = payload.visualIndexError || ''
     if (selectedDocId.value === documentId) workspaceError.value = ''
     scheduleDocumentVisualIndex(target)
+    scheduleDocumentPrecipitation(target)
     return
   }
   if (payload.status === 'failed') {
@@ -3930,7 +4106,18 @@ function loadLastWorkspaceAfterFirstPaint() {
     if (showTrending.value && trendingStatus.value === 'idle') fetchTrending()
     // Best-effort "newer version?" check — silent on failure, off the critical path.
     checkForUpdate()
+    // Knowledge precipitation backfill: enqueue every already-indexed document so
+    // the existing library gets sedimented (the serial queue + backend SHA256-skip
+    // keep it cheap — done docs cost only a hash compare, no LLM).
+    backfillPrecipitation()
   })
+}
+
+function backfillPrecipitation() {
+  if (!knowledgeEnabled.value || !chatModelConfigured.value) return
+  for (const doc of allDocs.value) {
+    scheduleDocumentPrecipitation(doc)
+  }
 }
 
 async function probePdfTranslationRuntime() {
@@ -3963,6 +4150,7 @@ onBeforeUnmount(() => {
   if (askDocumentErrorUnlisten) askDocumentErrorUnlisten()
   if (documentIndexUnlisten) documentIndexUnlisten()
   if (visualIndexUnlisten) visualIndexUnlisten()
+  if (knowledgeUnlisten) knowledgeUnlisten()
   if (translationJobUnlisten) translationJobUnlisten()
   if (pdfTranslationUnlisten) pdfTranslationUnlisten()
   if (dragEnterUnlisten) dragEnterUnlisten()
@@ -4049,6 +4237,13 @@ onMounted(() => {
   }).catch((err) => {
     console.warn('Failed to listen for visual index events', err)
   })
+  listen('lumenfolio://knowledge', (event) => {
+    handleKnowledgeEvent(event.payload)
+  }).then((unlisten) => {
+    knowledgeUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for knowledge events', err)
+  })
   listen('lumenfolio://translation-job', (event) => {
     handleTranslationJobEvent(event.payload)
   }).then((unlisten) => {
@@ -4126,8 +4321,11 @@ onMounted(() => {
       :drop-target-root-id="workspaceDropTargetRootId"
       :trending-active="showTrending"
       :trending-enabled="trendingEnabled"
+      :graph-active="showGraph"
+      :graph-enabled="knowledgeEnabled"
       @update:filter="filter = $event"
       @open-trending="handleOpenTrending"
+      @open-graph="handleOpenGraph"
       @select-doc="selectDoc"
       @add-folder="chooseWorkspace"
       @add-pdfs="addPdfsToRoot"
@@ -4167,8 +4365,28 @@ onMounted(() => {
       @open-hf="handleOpenHf"
     />
 
+    <KnowledgeGraphView
+      v-if="showGraph"
+      :data="graphData"
+      :status="graphStatus"
+      :error="graphError"
+      :selected-doc-id="selectedDocId"
+      :ui="ui"
+      @open-doc="selectDoc"
+      @refresh="fetchKnowledgeGraph"
+    />
+
+    <div v-if="!showTrending && !showGraph" class="reader-column">
+    <KnowledgeCard
+      v-if="knowledgeEnabled && selectedDocument.id !== 'empty'"
+      :card="knowledgeCard"
+      :related="relatedDocs"
+      :live-status="knowledgeByDoc[selectedDocument.id]?.status || ''"
+      :ui="ui"
+      @reprecipitate="reprecipitateCurrentDocument"
+      @open-doc="selectDoc"
+    />
     <ReaderPane
-      v-if="!showTrending"
       :key="`${selectedDocument.id}:${viewerReloadKey}`"
       :document="selectedDocument"
       :translation-languages="translationLanguages"
@@ -4207,6 +4425,7 @@ onMounted(() => {
       @retry-translation="retryActiveTranslation"
       @realign="handleRealign"
     />
+    </div>
 
     <div v-if="!rightCollapsed" class="drag-handle" @mousedown.prevent="startResize" />
 
@@ -4466,6 +4685,12 @@ onMounted(() => {
               <span>{{ ui.trendingDiscovery }}</span>
             </label>
             <div class="settings-note full">{{ ui.trendingDiscoveryHint }}</div>
+
+            <label class="settings-field full settings-toggle">
+              <input v-model="knowledgeEnabled" type="checkbox" />
+              <span>{{ ui.knowledgePrecipitation }}</span>
+            </label>
+            <div class="settings-note full">{{ ui.knowledgePrecipitationHint }}</div>
           </div>
 
           <div v-if="settingsSection === 'chat'" class="settings-panel provider-settings-panel">
@@ -4787,6 +5012,15 @@ onMounted(() => {
   overflow: hidden;
   /* Positioning context for the floating Notes drawer. */
   position: relative;
+}
+
+/* Center column: optional knowledge card pinned above the reader. */
+.reader-column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* Update notification: a small floating toast at the bottom-center. Notify-only

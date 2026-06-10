@@ -85,6 +85,81 @@ pub(crate) fn extract_chat_response_text(content: &serde_json::Value) -> String 
     }
 }
 
+/// Minimal non-streaming chat completion: one system + one user message → the
+/// assistant's text. Retries once on transient (429 / 5xx / network / decode)
+/// failures. Used where we need a single one-shot reply (e.g. knowledge
+/// precipitation's JSON extraction), not a token stream.
+pub(crate) async fn run_simple_completion(
+    provider: &OpenAiCompatibleProvider,
+    system: &str,
+    user: &str,
+    temperature: f32,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .build()
+        .map_err(|err| format!("Failed to create completion client: {err}"))?;
+    let endpoint = format!("{}/chat/completions", normalize_base_url(&provider.base_url));
+    let request = OpenAiChatRequest {
+        model: provider.model.clone(),
+        temperature,
+        stream: None,
+        messages: vec![
+            text_message("system", system.to_string()),
+            text_message("user", user.to_string()),
+        ],
+    };
+    let mut last_error = String::new();
+    for retry in 0..2 {
+        let mut builder = client.post(&endpoint).json(&request);
+        if let Some(api_key) = &provider.api_key {
+            builder = builder.bearer_auth(api_key);
+        }
+        let response = match builder.send().await {
+            Ok(response) => response,
+            Err(err) => {
+                last_error = format!("Completion request failed: {err}");
+                continue;
+            }
+        };
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            last_error = format!(
+                "Completion returned {status}: {}",
+                truncate_for_error(&body, 600)
+            );
+            if status.as_u16() == 429 || status.is_server_error() {
+                continue;
+            }
+            break;
+        }
+        match serde_json::from_str::<OpenAiChatResponse>(&body) {
+            Ok(decoded) => {
+                let text = decoded
+                    .choices
+                    .into_iter()
+                    .next()
+                    .map(|choice| extract_chat_response_text(&choice.message.content))
+                    .filter(|text| !text.trim().is_empty());
+                if let Some(text) = text {
+                    return Ok(text);
+                }
+                last_error = "Completion returned an empty response".to_string();
+            }
+            Err(err) => {
+                last_error = format!(
+                    "Failed to decode completion on attempt {}: {err}; body={}",
+                    retry + 1,
+                    truncate_for_error(&body, 600)
+                );
+            }
+        }
+    }
+    Err(last_error)
+}
+
 pub(crate) async fn judge_answerability_with_openai_compatible(
     question: &str,
     intent: &str,
