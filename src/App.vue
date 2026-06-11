@@ -910,6 +910,19 @@ function handleSelectChatModel(modelId) {
 }
 
 watch(availableChatModels, () => {
+  // A late-arriving option (local agents finish detecting ~after startup) can make
+  // the user's persisted pick selectable only now. If we're sitting on a fallback
+  // (e.g. an HTTP default chosen before detection landed), restore the saved pick.
+  // Safe against in-session choices: an explicit pick keeps lastChatModelId in sync
+  // with the selection, so this branch only fires for programmatic fallbacks.
+  if (
+    lastChatModelId.value &&
+    lastChatModelId.value !== selectedChatModelId.value &&
+    configuredChatModels.value.some((model) => model.id === lastChatModelId.value)
+  ) {
+    applySelectedChatModel(lastChatModelId.value)
+    return
+  }
   applySelectedChatModel(selectedDocument.value?.chatModelId || selectedChatModelId.value)
 })
 
@@ -4415,7 +4428,10 @@ onMounted(() => {
     loadLastWorkspaceAfterFirstPaint()
     loadSessionList()
     scheduleIdleTask(() => loadModelProviders(), 1200)
-    scheduleIdleTask(() => refreshLocalAgentStatus(), 1600)
+    // If the persisted pick is a local agent, detect sooner so the model selector
+    // restores it with minimal flash; otherwise detect on the usual idle cadence.
+    const localPickPending = String(lastChatModelId.value || '').startsWith('local-agent-')
+    scheduleIdleTask(() => refreshLocalAgentStatus(), localPickPending ? 200 : 1600)
     scheduleIdleTask(() => probePdfTranslationRuntime(), 2000)
   })
   listen('lumenfolio://agent-activity', (event) => {
