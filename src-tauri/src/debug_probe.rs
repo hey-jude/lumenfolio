@@ -654,23 +654,29 @@ pub async fn run_agentic_probe_from_env() -> Result<(), String> {
     )
     .await?;
 
-    println!("CITATIONS_CAPTURED={}", outcome.citations.len());
+    println!(
+        "CITATIONS_CAPTURED={} CANDIDATES_CAPTURED={}",
+        outcome.citations.len(),
+        outcome.candidates.len()
+    );
+    // Mirror build_evidence_chain's block-match to confirm section titles now resolve.
     for c in outcome.citations.iter().take(8) {
         let bbox_len = c.bbox_list.as_array().map(|a| a.len()).unwrap_or(0);
+        let section = c.section_title.clone().or_else(|| {
+            outcome
+                .candidates
+                .iter()
+                .find(|cand| !c.block_id.is_empty() && cand.block_id == c.block_id)
+                .and_then(|cand| cand.section_title.clone())
+        });
         println!(
-            "- [{}] p{} src={} block={:?} bbox_items={} : {}",
+            "- [{}] p{} src={} bbox_items={} section={:?} : {}",
             c.label,
             c.page,
             c.source,
-            c.block_id,
             bbox_len,
-            truncate_for_error(&c.quote, 80)
-        );
-    }
-    if let Some(first) = outcome.citations.first() {
-        println!(
-            "FIRST_CITATION_JSON={}",
-            serde_json::to_string(first).unwrap_or_default()
+            section.as_deref().unwrap_or("<none>"),
+            truncate_for_error(&c.quote, 60)
         );
     }
     println!("\nANSWER:\n{}", outcome.answer);

@@ -375,6 +375,9 @@ fn parse_codex_jsonl(kind: AgentKind, stdout: &str) -> Result<String, String> {
 pub(crate) struct AgenticOutcome {
     pub answer: String,
     pub citations: Vec<Citation>,
+    /// Trace candidates the server served (carry `section_title` per block), so the
+    /// dispatch can label the rebuilt evidence chips.
+    pub candidates: Vec<crate::runtime::rag::RetrievalTraceCandidate>,
 }
 
 /// A tool-call step observed in the CLI's event stream, reported live so the caller
@@ -449,16 +452,25 @@ where
     .await
     .map_err(|err| format!("Local-agent task failed: {err}"));
 
-    // Snapshot the citations the server collected before tearing it down.
+    // Snapshot the evidence the server collected before tearing it down.
     let citations = server
         .citations
+        .lock()
+        .map(|c| c.clone())
+        .unwrap_or_default();
+    let candidates = server
+        .candidates
         .lock()
         .map(|c| c.clone())
         .unwrap_or_default();
     drop(server); // stops the accept loop (also via Drop), frees the port
 
     let answer = answer??;
-    Ok(AgenticOutcome { answer, citations })
+    Ok(AgenticOutcome {
+        answer,
+        citations,
+        candidates,
+    })
 }
 
 fn run_cli_agentic<F>(

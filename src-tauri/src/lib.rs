@@ -2857,10 +2857,13 @@ async fn run_ask_document(
                 Ok(outcome) => {
                     // Surface the evidence the agent actually grounded on (what the
                     // MCP server served), replacing the seed retrieval's citations.
-                    // Rebuild the trace's evidence chain from the same set so the UI's
-                    // evidence chips resolve to real bboxes (clicking highlights the PDF).
+                    // Swap in the agent's own trace candidates (they carry section
+                    // titles per block) and rebuild the chain from the same set so the
+                    // evidence chips resolve to real bboxes (click → highlight) AND
+                    // show section labels.
                     if !outcome.citations.is_empty() {
                         let citations = dedup_citations(outcome.citations);
+                        agent_run.trace.candidates = outcome.candidates;
                         agent_run.trace.rebuild_evidence_chain(&citations);
                         agent_run.retrieval_run.citations = citations;
                     }

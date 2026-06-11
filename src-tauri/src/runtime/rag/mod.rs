@@ -4866,7 +4866,11 @@ fn open_table_context_candidate(
     }))
 }
 
-fn section_title_for_page(conn: &Connection, document_id: &str, page: u32) -> Option<String> {
+pub(crate) fn section_title_for_page(
+    conn: &Connection,
+    document_id: &str,
+    page: u32,
+) -> Option<String> {
     let mut stmt = conn
         .prepare(
             "SELECT title

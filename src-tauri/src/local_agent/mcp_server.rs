@@ -32,7 +32,7 @@ use rmcp::{
     RoleServer, ServerHandler,
 };
 
-use crate::runtime::rag::{self, Citation, RagToolCapabilities};
+use crate::runtime::rag::{self, Citation, RagToolCapabilities, RetrievalTraceCandidate};
 
 /// The document-scoped MCP server handler. One per server (= per turn).
 #[derive(Clone)]
@@ -41,6 +41,9 @@ pub(crate) struct LumenfolioMcpServer {
     document_id: String,
     /// Citations served this run, for the agentic dispatch to surface as evidence.
     citations: Arc<Mutex<Vec<Citation>>>,
+    /// Trace candidates served this run — they carry `section_title` keyed by
+    /// block, so the dispatch can label the evidence chips it rebuilds.
+    candidates: Arc<Mutex<Vec<RetrievalTraceCandidate>>>,
 }
 
 impl LumenfolioMcpServer {
@@ -98,7 +101,7 @@ impl ServerHandler for LumenfolioMcpServer {
         // future Send despite rusqlite::Connection being !Sync).
         let output = {
             let conn = self.read_only_conn()?;
-            rag::execute_rag_tool_call_for_capabilities(
+            let mut output = rag::execute_rag_tool_call_for_capabilities(
                 &conn,
                 &self.document_id,
                 &[],
@@ -106,12 +109,25 @@ impl ServerHandler for LumenfolioMcpServer {
                 &args,
                 &fallback_query,
                 RagToolCapabilities::default(),
-            )
+            );
+            // FTS / page chunks come back without a section label; fill it from the
+            // page's enclosing structure node so the dispatch's evidence chips still
+            // show a section (Introduction, Methodology, …) rather than just a page.
+            for citation in &mut output.citations {
+                if citation.section_title.is_none() && citation.page > 0 {
+                    citation.section_title =
+                        rag::section_title_for_page(&conn, &citation.document_id, citation.page);
+                }
+            }
+            output
         };
 
         let rendered = render_citations(&output.citations);
         if let Ok(mut sink) = self.citations.lock() {
             sink.extend(output.citations);
+        }
+        if let Ok(mut sink) = self.candidates.lock() {
+            sink.extend(output.trace_candidates);
         }
         Ok(CallToolResult::success(vec![Content::text(rendered)]))
     }
@@ -146,6 +162,7 @@ pub(crate) struct RunningMcpServer {
     pub url: String,
     pub token: String,
     pub citations: Arc<Mutex<Vec<Citation>>>,
+    pub candidates: Arc<Mutex<Vec<RetrievalTraceCandidate>>>,
     shutdown: tokio::sync::watch::Sender<bool>,
 }
 
@@ -176,16 +193,19 @@ pub(crate) async fn start_mcp_server(
 ) -> Result<RunningMcpServer, String> {
     let token = random_token();
     let citations: Arc<Mutex<Vec<Citation>>> = Arc::new(Mutex::new(Vec::new()));
+    let candidates: Arc<Mutex<Vec<RetrievalTraceCandidate>>> = Arc::new(Mutex::new(Vec::new()));
 
     let factory_path = db_path.clone();
     let factory_doc = document_id.clone();
     let factory_citations = citations.clone();
+    let factory_candidates = candidates.clone();
     let http_service = StreamableHttpService::new(
         move || {
             Ok(LumenfolioMcpServer {
                 db_path: factory_path.clone(),
                 document_id: factory_doc.clone(),
                 citations: factory_citations.clone(),
+                candidates: factory_candidates.clone(),
             })
         },
         Arc::new(LocalSessionManager::default()),
@@ -245,6 +265,7 @@ pub(crate) async fn start_mcp_server(
         url,
         token,
         citations,
+        candidates,
         shutdown: shutdown_tx,
     })
 }
