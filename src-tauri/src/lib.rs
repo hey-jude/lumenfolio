@@ -2623,6 +2623,51 @@ async fn run_ask_document(
     // unified-loop error we instead fall through to the best-effort/refusal answer
     // path with whatever evidence was already gathered.
     let mut unified_attempted = false;
+
+    // Local-agent providers (Codex / Claude CLI): Mode A — the seed retrieval above
+    // already gathered the evidence + citations into `agent_run`; we use the user's
+    // local agent purely to GENERATE the answer from that evidence (no HTTP, no
+    // tools). Producing the answer into `unified_answer` lets the shared persistence
+    // + return tail handle it exactly like the HTTP loop's result.
+    if let Some(kind) = local_agent::provider_id_kind(selected_provider_id) {
+        unified_attempted = true;
+        agent_judge::emit_agent_activity(
+            app,
+            activity_event_id.as_deref(),
+            runtime::agent::AgentTraceEvent::new(
+                "tool_call",
+                "finalize_answer",
+                "running",
+                "Generating answer with the local agent",
+                "Answering from retrieved evidence using your local Codex/Claude CLI",
+                "local-agent generation",
+            ),
+        );
+        let prompt = local_agent::build_prompt(
+            question,
+            agent_run.retrieval_run.prompt_context.trim(),
+            agent_run.session_context.trim(),
+            input.locale.as_deref(),
+        );
+        match local_agent::generate_answer(kind, prompt).await {
+            Ok(answer) => {
+                unified_answer = Some(AskAnswerResult {
+                    answer,
+                    reasoning_content: None,
+                    claims: Vec::new(),
+                })
+            }
+            Err(err) => {
+                unified_answer = Some(AskAnswerResult {
+                    answer: format!("⚠️ {err}"),
+                    reasoning_content: None,
+                    claims: Vec::new(),
+                })
+            }
+        }
+    }
+
+    if unified_answer.is_none() {
     if let Ok((provider, _)) = provider_result.as_ref() {
         // Strong (native tool-calling) models go through the unified agent loop;
         // others (and image questions) use the legacy M4 judge + answer path.
@@ -2729,6 +2774,7 @@ async fn run_ask_document(
         agent_judge::emit_agent_activity(app, activity_event_id.as_deref(), event.clone());
         agent_run.trace.events.push(event);
     }
+    } // end: if unified_answer.is_none()
 
     attach_context_budget_to_agent_run(&mut agent_run);
 

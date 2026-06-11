@@ -633,8 +633,25 @@ function chatStreamDebug(label, payload = {}) {
 const allDocs = computed(() => workspace.roots.flatMap((workspaceRoot) => (
   workspaceRoot.folders.flatMap((folder) => folder.docs)
 )))
-const configuredChatModels = computed(() => (
-  modelProviders.value
+// Locally-installed Codex / Claude as virtual chat models (no DB row — computed
+// from detection). The synthetic provider id `local-agent-<kind>` is recognized
+// by the backend dispatch; modelKey is a placeholder.
+const localAgentChatModels = computed(() => (
+  localAgentStatus.value
+    .filter((agent) => agent.installed)
+    .map((agent) => ({
+      id: makeChatModelOptionId(`local-agent-${agent.kind}`, 'default'),
+      providerId: `local-agent-${agent.kind}`,
+      provider: agent.label,
+      providerType: 'local-agent',
+      modelKey: 'default',
+      modelId: agent.kind,
+      label: `${agent.label} (local)`,
+      capabilities: ['text'],
+    }))
+))
+const configuredChatModels = computed(() => ([
+  ...modelProviders.value
     .flatMap((provider) => (
       (provider.models || [])
         .filter((model) => model.enabled)
@@ -648,8 +665,9 @@ const configuredChatModels = computed(() => (
           label: model.nickname || model.modelId,
           capabilities: model.capabilities?.length ? model.capabilities : ['text'],
         }))
-    ))
-))
+    )),
+  ...localAgentChatModels.value,
+]))
 const chatModelConfigured = computed(() => configuredChatModels.value.length > 0)
 const availableChatModels = computed(() => (
   chatModelConfigured.value
@@ -757,19 +775,35 @@ const providerConnectionSummary = computed(() => {
   return `${providerForm.name || ui.value.newProvider} · ${providerForm.baseUrl || providerTypePreset.value.baseUrl} · ${keyState}`
 })
 
+function preferredLocalAgentModelId() {
+  // Preferred local agent first, then the other; only installed ones are listed.
+  const order = preferredLocalAgent.value === 'claude' ? ['claude', 'codex'] : ['codex', 'claude']
+  for (const kind of order) {
+    const match = localAgentChatModels.value.find((model) => model.modelId === kind)
+    if (match) return match.id
+  }
+  return ''
+}
+
 function defaultConfiguredChatModelId() {
   if (!chatModelConfigured.value) return UNCONFIGURED_CHAT_MODEL_ID
   // Prefer the user's last explicit pick if it's still a configured/enabled model.
   if (lastChatModelId.value && configuredChatModels.value.some((model) => model.id === lastChatModelId.value)) {
     return lastChatModelId.value
   }
+  // A configured HTTP provider wins over the local-agent zero-config default.
   const hasEnabledModel = (provider) => (provider?.models || []).some((model) => model.enabled)
   const defaultProvider = modelProviders.value.find((provider) => provider.isDefault && hasEnabledModel(provider))
     || modelProviders.value.find(hasEnabledModel)
   const defaultModelId = defaultProvider ? defaultChatModelOptionId(defaultProvider) : ''
-  return configuredChatModels.value.some((model) => model.id === defaultModelId)
-    ? defaultModelId
-    : configuredChatModels.value[0]?.id || UNCONFIGURED_CHAT_MODEL_ID
+  if (defaultModelId && configuredChatModels.value.some((model) => model.id === defaultModelId)) {
+    return defaultModelId
+  }
+  // No HTTP provider configured → fall back to an installed local agent (the
+  // zero-config first-run path: Codex → Claude by default).
+  const localId = preferredLocalAgentModelId()
+  if (localId) return localId
+  return configuredChatModels.value[0]?.id || UNCONFIGURED_CHAT_MODEL_ID
 }
 
 function resolveChatModelId(modelId) {
@@ -1118,14 +1152,11 @@ async function loadModelProviders() {
     modelProviders.value = await invoke('list_model_providers')
     const defaultProvider = modelProviders.value.find((provider) => provider.isDefault)
       || modelProviders.value[0]
-    if (defaultProvider) {
-      resetProviderForm(defaultProvider)
-      // Restore the user's last-picked model (defaultConfiguredChatModelId
-      // prefers lastChatModelId) instead of forcing the provider default.
-      selectedChatModelId.value = defaultConfiguredChatModelId()
-    } else {
-      selectedChatModelId.value = UNCONFIGURED_CHAT_MODEL_ID
-    }
+    if (defaultProvider) resetProviderForm(defaultProvider)
+    // Resolve through defaultConfiguredChatModelId (last pick → HTTP default →
+    // installed local agent → unconfigured). When local detection lands later,
+    // the availableChatModels watch re-applies this.
+    selectedChatModelId.value = defaultConfiguredChatModelId()
   } catch (err) {
     console.warn('Failed to load model providers', err)
   }
