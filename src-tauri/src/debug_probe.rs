@@ -656,12 +656,21 @@ pub async fn run_agentic_probe_from_env() -> Result<(), String> {
 
     println!("CITATIONS_CAPTURED={}", outcome.citations.len());
     for c in outcome.citations.iter().take(8) {
+        let bbox_len = c.bbox_list.as_array().map(|a| a.len()).unwrap_or(0);
         println!(
-            "- [{}] p{} {}: {}",
+            "- [{}] p{} src={} block={:?} bbox_items={} : {}",
             c.label,
             c.page,
             c.source,
-            truncate_for_error(&c.quote, 120)
+            c.block_id,
+            bbox_len,
+            truncate_for_error(&c.quote, 80)
+        );
+    }
+    if let Some(first) = outcome.citations.first() {
+        println!(
+            "FIRST_CITATION_JSON={}",
+            serde_json::to_string(first).unwrap_or_default()
         );
     }
     println!("\nANSWER:\n{}", outcome.answer);

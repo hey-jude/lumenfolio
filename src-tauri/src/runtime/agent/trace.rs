@@ -167,6 +167,15 @@ impl AgentTrace {
         self.finalize_gate = retrieval_trace.finalize_gate;
     }
 
+    /// Rebuild the evidence chain against a replacement citation set (e.g. when an
+    /// agentic local-CLI run substitutes the seed citations with the ones it actually
+    /// grounded on). Keeps the chain's `citationId`s in sync with the citations the UI
+    /// renders, so evidence chips resolve to real bboxes. Reuses the existing
+    /// candidates only for section-title fallback.
+    pub fn rebuild_evidence_chain(&mut self, citations: &[Citation]) {
+        self.evidence_chain = build_evidence_chain(citations, &self.candidates);
+    }
+
     /// Assign a strictly increasing `seq` (starting at 1) to every event in
     /// insertion order. Call this once, right before the trace is serialized
     /// for the frontend, so UI code can rely on a stable monotone ordering
@@ -347,6 +356,48 @@ mod tests {
         assert_eq!(trace.events[0].seq, 1);
         assert_eq!(trace.events[1].seq, 2);
         assert_eq!(trace.events[2].seq, 3);
+    }
+
+    fn dummy_citation(id: &str, page: u32) -> Citation {
+        Citation {
+            id: id.to_string(),
+            label: format!("[{id}]"),
+            page,
+            block_id: format!("blk-{id}"),
+            section_title: None,
+            quote: "evidence".to_string(),
+            bbox_list: serde_json::json!([[0.1, 0.1, 0.2, 0.2]]),
+            document_id: "doc".to_string(),
+            source: "fts".to_string(),
+        }
+    }
+
+    #[test]
+    fn rebuild_evidence_chain_syncs_ids_with_new_citations() {
+        let mut trace = AgentTrace {
+            run_id: "run".into(),
+            intent: String::new(),
+            tree_nodes: Vec::new(),
+            candidates: Vec::new(),
+            finalize_gate: serde_json::Value::Null,
+            // Stale chain from a prior (seed) citation set.
+            evidence_chain: build_evidence_chain(&[dummy_citation("seed", 1)], &[]),
+            events: Vec::new(),
+            session_summary: None,
+            compact: None,
+        };
+        assert_eq!(trace.evidence_chain[0].citation_id, "seed");
+
+        // Replacing with the agent's citations must re-point the chain so the UI can
+        // resolve each chip back to a real citation (and its bbox).
+        let agent_cites = vec![dummy_citation("x", 6), dummy_citation("y", 7)];
+        trace.rebuild_evidence_chain(&agent_cites);
+        let chain_ids: Vec<_> = trace
+            .evidence_chain
+            .iter()
+            .map(|e| e.citation_id.as_str())
+            .collect();
+        assert_eq!(chain_ids, vec!["x", "y"]);
     }
 
     #[test]
