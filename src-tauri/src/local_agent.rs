@@ -184,6 +184,20 @@ fn answer_language(locale: Option<&str>) -> &'static str {
     }
 }
 
+/// The language directive shared by both prompt modes. The answer must follow the
+/// QUESTION's language (a Chinese question gets a Chinese answer), regardless of
+/// the app UI locale or the document's language; `locale` is only the tiebreaker
+/// when the question itself is language-neutral.
+fn language_directive(locale: Option<&str>) -> String {
+    let fallback = answer_language(locale);
+    format!(
+        "Always write your answer in the SAME language as the user's Question below \
+(e.g. a Chinese question gets a Chinese answer, an English question gets an English answer), \
+even when the document evidence is in another language. Only if the question's language is \
+genuinely ambiguous, default to {fallback}."
+    )
+}
+
 /// Assemble the single prompt for Mode A: the evidence is already retrieved by
 /// Lumenfolio and embedded here; the agent is a pure generator (no tools).
 pub(crate) fn build_prompt(
@@ -192,9 +206,9 @@ pub(crate) fn build_prompt(
     session_context: &str,
     locale: Option<&str>,
 ) -> String {
-    let lang = answer_language(locale);
+    let lang_directive = language_directive(locale);
     let mut prompt = format!(
-        "You are Lumenfolio, a careful academic PDF reading assistant. Answer in {lang}. \
+        "You are Lumenfolio, a careful academic PDF reading assistant. {lang_directive} \
 Use ONLY the evidence from the user's document provided below; if it is insufficient, say so plainly. \
 Write a concise, well-structured Markdown answer (a short direct answer first, then detail). \
 Do NOT call tools, read files, or run commands — answer only from the evidence text below.\n\n"
@@ -385,9 +399,9 @@ pub(crate) fn build_agentic_prompt(
     session_context: &str,
     locale: Option<&str>,
 ) -> String {
-    let lang = answer_language(locale);
+    let lang_directive = language_directive(locale);
     let mut prompt = format!(
-        "You are Lumenfolio, a careful academic PDF reading assistant. Answer in {lang}. \
+        "You are Lumenfolio, a careful academic PDF reading assistant. {lang_directive} \
 You have MCP tools (server `lumenfolio`) that retrieve evidence from the user's open PDF: \
 search passages, open specific pages/sections, and inspect tables/structure. \
 FIRST call the search tool to gather relevant evidence, open pages as needed, then write a \
@@ -720,7 +734,9 @@ mod tests {
     #[test]
     fn build_prompt_embeds_evidence_and_language() {
         let p = build_prompt("What is X?", "page 1: X is Y.", "", Some("zh-CN"));
-        assert!(p.contains("Answer in Chinese"));
+        // The answer follows the question's language; locale is only the fallback.
+        assert!(p.contains("SAME language as the user's Question"));
+        assert!(p.contains("default to Chinese"));
         assert!(p.contains("page 1: X is Y."));
         assert!(p.contains("What is X?"));
     }
@@ -728,7 +744,7 @@ mod tests {
     #[test]
     fn build_agentic_prompt_instructs_tool_use_not_embedded_evidence() {
         let p = build_agentic_prompt("What is X?", "prior: Y", Some("zh"));
-        assert!(p.contains("Answer in Chinese"));
+        assert!(p.contains("SAME language as the user's Question"));
         // Mode B tells the agent to call the lumenfolio tools itself...
         assert!(p.contains("lumenfolio"));
         assert!(p.to_lowercase().contains("search"));
@@ -736,6 +752,16 @@ mod tests {
         assert!(p.contains("prior: Y"));
         // ...and must NOT carry the Mode-A "do not call tools" instruction.
         assert!(!p.contains("Do NOT call tools"));
+    }
+
+    #[test]
+    fn language_directive_follows_question_not_locale() {
+        // Even with an English/None locale, the directive must instruct following
+        // the question's own language (so a Chinese question gets a Chinese answer).
+        let d = language_directive(Some("en"));
+        assert!(d.contains("SAME language as the user's Question"));
+        assert!(d.contains("a Chinese question gets a Chinese answer"));
+        assert!(d.contains("default to English"));
     }
 
     #[test]
