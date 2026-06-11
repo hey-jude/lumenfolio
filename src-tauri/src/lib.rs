@@ -1944,11 +1944,16 @@ async fn generate_session_title(
         return Err("No question to summarize".to_string());
     }
     let provider_id = input.model_provider_id.as_deref().unwrap_or("").trim();
-    let (provider, _) =
-        providers::resolve_chat_provider(&database, provider_id, input.model_key.as_deref())?;
-    let raw_title =
-        llm::chat::generate_session_title_with_openai_compatible(question, &answer, &provider)
-            .await?;
+    // Local-agent providers (Codex/Claude CLI) have no OpenAI-compatible endpoint
+    // for a cheap title call — derive a heuristic title from the question instead
+    // of failing (which would leave the session untitled).
+    let raw_title = if local_agent::provider_id_kind(provider_id).is_some() {
+        question.to_string()
+    } else {
+        let (provider, _) =
+            providers::resolve_chat_provider(&database, provider_id, input.model_key.as_deref())?;
+        llm::chat::generate_session_title_with_openai_compatible(question, &answer, &provider).await?
+    };
     let title = clamp_session_title(&raw_title);
     if title.is_empty() {
         return Err("Generated title was empty".to_string());
