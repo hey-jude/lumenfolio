@@ -228,6 +228,12 @@ const editableProviders = ref([])
 const selectedProviderEditKey = ref('')
 const settingsOpen = ref(false)
 const settingsSection = usePersistedRef('settingsSection', 'chat')
+// Locally-installed agent CLIs (Codex / Claude Code) offered as zero-config chat
+// providers. P0: detection + status only. [{ kind, label, installed, version, path, installUrl }]
+const localAgentStatus = ref([])
+const localAgentChecking = ref(false)
+// Hard-coded default order is Codex → Claude, but the preferred one is configurable.
+const preferredLocalAgent = usePersistedRef('preferredLocalAgent', 'codex')
 const settingsStatus = ref('idle')
 const settingsError = ref('')
 const clearChatConfirmOpen = ref(false)
@@ -1094,6 +1100,19 @@ function resetMicrosoftForm(settings = null) {
   microsoftForm.hasApiKey = Boolean(settings?.microsoftHasApiKey)
 }
 
+async function refreshLocalAgentStatus() {
+  localAgentChecking.value = true
+  try {
+    const status = await invoke('get_local_agent_status')
+    localAgentStatus.value = Array.isArray(status) ? status : []
+  } catch (err) {
+    console.warn('Failed to detect local agents', err)
+    localAgentStatus.value = []
+  } finally {
+    localAgentChecking.value = false
+  }
+}
+
 async function loadModelProviders() {
   try {
     modelProviders.value = await invoke('list_model_providers')
@@ -1688,6 +1707,10 @@ function handleOpenHf(url) {
   invoke('open_external_url', { url }).catch((err) => {
     trendingAddError.value = err?.message || String(err)
   })
+}
+
+function openExternalLink(url) {
+  if (url) invoke('open_external_url', { url }).catch(() => {})
 }
 
 // ---- Update notification (notify-only) ----
@@ -4339,6 +4362,7 @@ onMounted(() => {
     loadLastWorkspaceAfterFirstPaint()
     loadSessionList()
     scheduleIdleTask(() => loadModelProviders(), 1200)
+    scheduleIdleTask(() => refreshLocalAgentStatus(), 1600)
     scheduleIdleTask(() => probePdfTranslationRuntime(), 2000)
   })
   listen('lumenfolio://agent-activity', (event) => {
@@ -4864,6 +4888,50 @@ onMounted(() => {
           </div>
 
           <div v-if="settingsSection === 'chat'" class="settings-panel provider-settings-panel">
+            <section class="local-agents-card">
+              <div class="local-agents-head">
+                <div>
+                  <div class="settings-section-title compact">{{ ui.localAgents }}</div>
+                  <div class="settings-note">{{ ui.localAgentsNote }}</div>
+                </div>
+                <button
+                  type="button"
+                  class="local-agents-recheck"
+                  :disabled="localAgentChecking"
+                  @click="refreshLocalAgentStatus"
+                >{{ localAgentChecking ? ui.localAgentChecking : ui.localAgentRecheck }}</button>
+              </div>
+              <div class="local-agents-rows">
+                <div
+                  v-for="agent in localAgentStatus"
+                  :key="agent.kind"
+                  class="local-agent-row"
+                >
+                  <label class="local-agent-pref" :title="ui.localAgentPreferred">
+                    <input
+                      type="radio"
+                      name="preferred-local-agent"
+                      :value="agent.kind"
+                      :checked="preferredLocalAgent === agent.kind"
+                      @change="preferredLocalAgent = agent.kind"
+                    />
+                  </label>
+                  <span class="local-agent-name">{{ agent.label }}</span>
+                  <span
+                    class="local-agent-pill"
+                    :class="agent.installed ? 'ok' : 'missing'"
+                  >{{ agent.installed ? (ui.localAgentInstalled + (agent.version ? ' · ' + agent.version : '')) : ui.localAgentNotInstalled }}</span>
+                  <span class="local-agents-spacer"></span>
+                  <button
+                    v-if="!agent.installed"
+                    type="button"
+                    class="local-agent-install"
+                    @click="openExternalLink(agent.installUrl)"
+                  >{{ ui.localAgentInstall }} ↗</button>
+                </div>
+                <div v-if="!localAgentStatus.length" class="settings-note">{{ ui.localAgentNone }}</div>
+              </div>
+            </section>
             <aside class="provider-list">
               <div class="provider-list-head">
                 <div>
@@ -5613,6 +5681,97 @@ onMounted(() => {
   display: grid;
   grid-template-columns: 230px minmax(0, 1fr);
   min-width: 0;
+}
+
+/* Local-agent (Codex / Claude) status card, spanning both grid columns above the
+   provider list + form. */
+.local-agents-card {
+  grid-column: 1 / -1;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.local-agents-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.local-agents-recheck {
+  flex-shrink: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.local-agents-recheck:hover:not(:disabled) {
+  color: var(--text-primary);
+  border-color: rgba(106, 169, 255, 0.4);
+}
+
+.local-agents-recheck:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.local-agents-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.local-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.local-agent-pref {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.local-agent-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  min-width: 96px;
+}
+
+.local-agent-pill {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 999px;
+}
+
+.local-agent-pill.ok {
+  color: #8fe0b0;
+  background: rgba(80, 200, 140, 0.14);
+}
+
+.local-agent-pill.missing {
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.local-agents-spacer {
+  flex: 1;
+}
+
+.local-agent-install {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
 }
 
 .provider-list {

@@ -18,6 +18,7 @@ mod document_translation;
 mod documents;
 mod indexing;
 mod llm;
+mod local_agent;
 mod model_catalog;
 mod pdf2zh_sidecar;
 mod pdf_index;
@@ -4667,6 +4668,7 @@ pub fn run() {
             runtime::knowledge_graph::get_related_documents,
             update_check::check_for_update,
             open_external_url,
+            local_agent::get_local_agent_status,
             load_last_workspace,
             read_pdf_bytes,
             pdf2zh_sidecar::read_pdf_artifact_bytes,
