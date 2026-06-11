@@ -580,3 +580,38 @@ fn print_probe_output(output: &ProbeOutput, json: bool) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Manual harness for P2-3 (Mode B MCP server live verification): start the
+/// in-process loopback MCP server against a real on-disk DB + document, print
+/// its URL + bearer token, and keep it alive long enough for an external CLI
+/// (`codex` / `claude`) to connect and exercise the tools. Reads:
+///   LUMEN_VERIFY_DB   — absolute path to lumenfolio.sqlite
+///   LUMEN_VERIFY_DOC  — document id to scope the tools to
+///   LUMEN_VERIFY_SECS — keepalive seconds (default 600)
+/// Not wired into the app; invoked via the `mcp_verify` bin.
+pub async fn run_mcp_verify_from_env() -> Result<(), String> {
+    use std::io::Write;
+
+    let db = env::var("LUMEN_VERIFY_DB").map_err(|_| "set LUMEN_VERIFY_DB".to_string())?;
+    let doc = env::var("LUMEN_VERIFY_DOC").map_err(|_| "set LUMEN_VERIFY_DOC".to_string())?;
+    let secs: u64 = env::var("LUMEN_VERIFY_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
+
+    let server = crate::local_agent::mcp_server::start_mcp_server(PathBuf::from(db), doc).await?;
+    println!("MCP_URL={}", server.url);
+    println!("MCP_TOKEN={}", server.token);
+    println!("MCP_READY alive={secs}s");
+    std::io::stdout().flush().ok();
+
+    tokio::time::sleep(Duration::from_secs(secs)).await;
+
+    let served = server
+        .citations
+        .lock()
+        .map(|c| c.len())
+        .unwrap_or(0);
+    println!("CITATIONS_SERVED={served}");
+    Ok(())
+}
