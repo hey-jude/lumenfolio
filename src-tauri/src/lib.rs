@@ -2383,6 +2383,24 @@ fn normalize_reference_document_ids(raw: &[String], primary_document_id: &str) -
     out
 }
 
+/// Collapse repeated citations an agentic run may serve across multiple tool
+/// calls. Keys on the block (stable id) when present, else page + quote text.
+fn dedup_citations(citations: Vec<runtime::rag::Citation>) -> Vec<runtime::rag::Citation> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(citations.len());
+    for c in citations {
+        let key = if !c.block_id.is_empty() {
+            format!("{}::{}::{}", c.document_id, c.page, c.block_id)
+        } else {
+            format!("{}::{}::{}", c.document_id, c.page, c.quote)
+        };
+        if seen.insert(key) {
+            out.push(c);
+        }
+    }
+    out
+}
+
 async fn run_ask_document(
     input: AskDocumentInput,
     database: &AppDatabase,
@@ -2636,38 +2654,120 @@ async fn run_ask_document(
     // + return tail handle it exactly like the HTTP loop's result.
     if let Some(kind) = local_agent::provider_id_kind(selected_provider_id) {
         unified_attempted = true;
-        agent_judge::emit_agent_activity(
-            app,
-            activity_event_id.as_deref(),
-            runtime::agent::AgentTraceEvent::new(
-                "tool_call",
-                "finalize_answer",
-                "running",
-                "Generating answer with the local agent",
-                "Answering from retrieved evidence using your local Codex/Claude CLI",
-                "local-agent generation",
-            ),
-        );
-        let prompt = local_agent::build_prompt(
-            question,
-            agent_run.retrieval_run.prompt_context.trim(),
-            agent_run.session_context.trim(),
-            input.locale.as_deref(),
-        );
-        match local_agent::generate_answer(kind, prompt).await {
-            Ok(answer) => {
-                unified_answer = Some(AskAnswerResult {
-                    answer,
-                    reasoning_content: None,
-                    claims: Vec::new(),
-                })
+
+        // Mode B (agentic, P2): when the user is reading a focused, indexed
+        // document, let the local CLI call Lumenfolio's tools over a loopback MCP
+        // server and do its own multi-step retrieval. Off the reader (trending /
+        // graph) or for an unindexed doc, fall back to Mode A (generate from the
+        // seed retrieval, which also covers the context tools the doc-scoped MCP
+        // server doesn't expose).
+        let on_reader = input
+            .view_context
+            .as_ref()
+            .and_then(|v| v.surface.as_deref())
+            .map(|s| s == "reader")
+            .unwrap_or(true);
+        let (db_path, doc_indexed) = match database.conn.lock() {
+            Ok(conn) => {
+                let path = conn.path().map(|p| p.to_string());
+                let indexed = path.is_some()
+                    && conn
+                        .query_row(
+                            "SELECT 1 FROM document_chunks WHERE document_id = ?1 LIMIT 1",
+                            params![document_id],
+                            |_| Ok(()),
+                        )
+                        .optional()
+                        .ok()
+                        .flatten()
+                        .is_some();
+                (path, indexed)
             }
-            Err(err) => {
-                unified_answer = Some(AskAnswerResult {
-                    answer: format!("⚠️ {err}"),
-                    reasoning_content: None,
-                    claims: Vec::new(),
-                })
+            Err(_) => (None, false),
+        };
+
+        if on_reader && doc_indexed {
+            agent_judge::emit_agent_activity(
+                app,
+                activity_event_id.as_deref(),
+                runtime::agent::AgentTraceEvent::new(
+                    "tool_call",
+                    "finalize_answer",
+                    "running",
+                    "Researching with your local agent",
+                    "Letting your local Codex/Claude call Lumenfolio's tools to gather evidence, then answer",
+                    "local-agent agentic retrieval",
+                ),
+            );
+            let prompt = local_agent::build_agentic_prompt(
+                question,
+                agent_run.session_context.trim(),
+                input.locale.as_deref(),
+            );
+            match local_agent::generate_answer_agentic(
+                kind,
+                std::path::PathBuf::from(db_path.unwrap_or_default()),
+                document_id.to_string(),
+                prompt,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    // Surface the evidence the agent actually grounded on (what the
+                    // MCP server served), replacing the seed retrieval's citations.
+                    if !outcome.citations.is_empty() {
+                        agent_run.retrieval_run.citations = dedup_citations(outcome.citations);
+                    }
+                    unified_answer = Some(AskAnswerResult {
+                        answer: outcome.answer,
+                        reasoning_content: None,
+                        claims: Vec::new(),
+                    })
+                }
+                Err(err) => {
+                    unified_answer = Some(AskAnswerResult {
+                        answer: format!("⚠️ {err}"),
+                        reasoning_content: None,
+                        claims: Vec::new(),
+                    })
+                }
+            }
+        } else {
+            // Mode A: the seed retrieval already gathered evidence + citations into
+            // `agent_run`; use the local agent purely to GENERATE the answer (no tools).
+            agent_judge::emit_agent_activity(
+                app,
+                activity_event_id.as_deref(),
+                runtime::agent::AgentTraceEvent::new(
+                    "tool_call",
+                    "finalize_answer",
+                    "running",
+                    "Generating answer with the local agent",
+                    "Answering from retrieved evidence using your local Codex/Claude CLI",
+                    "local-agent generation",
+                ),
+            );
+            let prompt = local_agent::build_prompt(
+                question,
+                agent_run.retrieval_run.prompt_context.trim(),
+                agent_run.session_context.trim(),
+                input.locale.as_deref(),
+            );
+            match local_agent::generate_answer(kind, prompt).await {
+                Ok(answer) => {
+                    unified_answer = Some(AskAnswerResult {
+                        answer,
+                        reasoning_content: None,
+                        claims: Vec::new(),
+                    })
+                }
+                Err(err) => {
+                    unified_answer = Some(AskAnswerResult {
+                        answer: format!("⚠️ {err}"),
+                        reasoning_content: None,
+                        claims: Vec::new(),
+                    })
+                }
             }
         }
     }
@@ -4467,6 +4567,24 @@ mod tests {
             document_id: "doc".to_string(),
             source: "fts".to_string(),
         }
+    }
+
+    #[test]
+    fn dedup_citations_collapses_repeats_by_block_then_page_quote() {
+        // Same block id (even with differing citation ids) → one entry.
+        let a1 = dummy_citation("blk-a");
+        let mut a2 = dummy_citation("blk-a");
+        a2.id = "different-id".to_string();
+        // Distinct block id → kept separately.
+        let b = dummy_citation("blk-b");
+        // Empty block id falls back to page+quote: same page+quote → collapsed.
+        let mut q1 = dummy_citation("");
+        q1.block_id = String::new();
+        let mut q2 = dummy_citation("");
+        q2.block_id = String::new();
+        let out = dedup_citations(vec![a1, a2, b, q1, q2]);
+        // blk-a (1) + blk-b (1) + page1/"evidence" (1) = 3.
+        assert_eq!(out.len(), 3);
     }
 
     #[test]

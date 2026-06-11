@@ -6,12 +6,15 @@
 //! docs/lumenfolio_local_agent_provider_plan.md.
 
 use std::{
+    path::PathBuf,
     process::{Command, Stdio},
     sync::mpsc,
     time::Duration,
 };
 
 use serde::Serialize;
+
+use crate::runtime::rag::Citation;
 
 pub(crate) mod mcp_server;
 
@@ -349,6 +352,169 @@ fn parse_codex_jsonl(kind: AgentKind, stdout: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{} returned no answer.", kind.label()))
 }
 
+// ---- P2: drive the CLI as a multi-step agent over our MCP tools (Mode B) ----
+
+/// What an agentic run returns: the final answer plus every citation the MCP
+/// server served while the CLI was exploring (so the UI can surface evidence the
+/// agent actually grounded on, even though we never saw its intermediate reasoning).
+pub(crate) struct AgenticOutcome {
+    pub answer: String,
+    pub citations: Vec<Citation>,
+}
+
+/// Prompt for Mode B: no evidence is embedded — instead the agent is told to use
+/// the Lumenfolio MCP tools to retrieve evidence from the open document itself,
+/// then answer from what it finds. Mirrors `build_prompt`'s persona/language.
+pub(crate) fn build_agentic_prompt(
+    question: &str,
+    session_context: &str,
+    locale: Option<&str>,
+) -> String {
+    let lang = answer_language(locale);
+    let mut prompt = format!(
+        "You are Lumenfolio, a careful academic PDF reading assistant. Answer in {lang}. \
+You have MCP tools (server `lumenfolio`) that retrieve evidence from the user's open PDF: \
+search passages, open specific pages/sections, and inspect tables/structure. \
+FIRST call the search tool to gather relevant evidence, open pages as needed, then write a \
+concise, well-structured Markdown answer (a short direct answer first, then detail) grounded \
+ONLY in what the tools return. If the tools surface nothing relevant, say so plainly. \
+Use ONLY the `lumenfolio` tools — do not read local files or run shell commands.\n\n"
+    );
+    let session_context = session_context.trim();
+    if !session_context.is_empty() {
+        prompt.push_str("Conversation memory:\n");
+        prompt.push_str(session_context);
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str("Question:\n");
+    prompt.push_str(question.trim());
+    prompt
+}
+
+/// The env var the CLI reads the MCP bearer token from. The token value is passed
+/// via the child's environment (never on the command line / in a config file).
+const MCP_TOKEN_ENV: &str = "LUMENFOLIO_MCP_TOKEN";
+
+/// Run the local agent CLI as a multi-step agent: bring up an in-process loopback
+/// MCP server scoped to `document_id`, wire the CLI to it, let it call our tools,
+/// and return the answer + the citations the server served. Offloaded subprocess
+/// I/O is wrapped around the (async) server lifecycle.
+pub(crate) async fn generate_answer_agentic(
+    kind: AgentKind,
+    db_path: PathBuf,
+    document_id: String,
+    prompt: String,
+) -> Result<AgenticOutcome, String> {
+    let server = mcp_server::start_mcp_server(db_path, document_id).await?;
+    let url = server.url.clone();
+    let token = server.token.clone();
+
+    let answer = tauri::async_runtime::spawn_blocking(move || {
+        run_cli_agentic(kind, &prompt, &url, &token)
+    })
+    .await
+    .map_err(|err| format!("Local-agent task failed: {err}"));
+
+    // Snapshot the citations the server collected before tearing it down.
+    let citations = server
+        .citations
+        .lock()
+        .map(|c| c.clone())
+        .unwrap_or_default();
+    drop(server); // stops the accept loop (also via Drop), frees the port
+
+    let answer = answer??;
+    Ok(AgenticOutcome { answer, citations })
+}
+
+fn run_cli_agentic(
+    kind: AgentKind,
+    prompt: &str,
+    url: &str,
+    token: &str,
+) -> Result<String, String> {
+    let binary = resolve_path(kind.binary()).unwrap_or_else(|| kind.binary().to_string());
+    // Per-run empty working dir so that — with Codex's OS sandbox necessarily off
+    // (it cancels MCP calls otherwise) — there is nothing of the user's to read.
+    let work_dir = std::env::temp_dir().join(format!("lumenfolio-agent-{}", &token[..token.len().min(16)]));
+    let _ = std::fs::create_dir_all(&work_dir);
+
+    let mut cmd = Command::new(&binary);
+    match kind {
+        AgentKind::Claude => {
+            // streamable-HTTP MCP server with a bearer header; scope hard:
+            // --strict-mcp-config (ignore the user's other MCP servers), --tools ""
+            // (no built-in fs/shell), allow only our server's tools, bypass the
+            // interactive permission prompt for those read-only tools.
+            let mcp_config = serde_json::json!({
+                "mcpServers": {
+                    "lumenfolio": {
+                        "type": "http",
+                        "url": url,
+                        "headers": { "Authorization": format!("Bearer {token}") }
+                    }
+                }
+            })
+            .to_string();
+            cmd.args([
+                "-p",
+                prompt,
+                "--output-format",
+                "json",
+                "--mcp-config",
+                &mcp_config,
+                "--strict-mcp-config",
+                "--tools",
+                "",
+                "--allowedTools",
+                "mcp__lumenfolio",
+                "--permission-mode",
+                "bypassPermissions",
+            ]);
+        }
+        AgentKind::Codex => {
+            // Headless Codex cancels MCP tool calls under any sandbox/approval combo
+            // except the bypass flag (verified P2-3) — so the OS sandbox is off and we
+            // rely on the empty cwd + scrubbed env for isolation. --ignore-user-config
+            // drops the user's other MCP servers; -c injects only ours (token via env).
+            let mcp_cfg = format!(
+                "mcp_servers.lumenfolio={{url=\"{url}\", bearer_token_env_var=\"{MCP_TOKEN_ENV}\"}}"
+            );
+            cmd.args([
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--ignore-user-config",
+                "-c",
+                &mcp_cfg,
+                prompt,
+            ]);
+            cmd.env(MCP_TOKEN_ENV, token);
+        }
+    }
+    cmd.current_dir(&work_dir)
+        .env_remove("ANTHROPIC_API_KEY") // never bill an API key — use the subscription
+        .env_remove("OPENAI_API_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = run_command_timeout(cmd, GENERATE_TIMEOUT);
+    let _ = std::fs::remove_dir_all(&work_dir);
+    let output = output?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(classify_error(kind, stderr.trim()));
+    }
+    match kind {
+        AgentKind::Claude => parse_claude_json(kind, &stdout),
+        AgentKind::Codex => parse_codex_jsonl(kind, &stdout),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +562,19 @@ mod tests {
         assert!(p.contains("Answer in Chinese"));
         assert!(p.contains("page 1: X is Y."));
         assert!(p.contains("What is X?"));
+    }
+
+    #[test]
+    fn build_agentic_prompt_instructs_tool_use_not_embedded_evidence() {
+        let p = build_agentic_prompt("What is X?", "prior: Y", Some("zh"));
+        assert!(p.contains("Answer in Chinese"));
+        // Mode B tells the agent to call the lumenfolio tools itself...
+        assert!(p.contains("lumenfolio"));
+        assert!(p.to_lowercase().contains("search"));
+        assert!(p.contains("What is X?"));
+        assert!(p.contains("prior: Y"));
+        // ...and must NOT carry the Mode-A "do not call tools" instruction.
+        assert!(!p.contains("Do NOT call tools"));
     }
 
     #[test]

@@ -615,3 +615,37 @@ pub async fn run_mcp_verify_from_env() -> Result<(), String> {
     println!("CITATIONS_SERVED={served}");
     Ok(())
 }
+
+/// Full-stack probe for P2-4 (Mode B agentic dispatch): drive `generate_answer_agentic`
+/// end-to-end — bring up the MCP server, run the real CLI against it, and report the
+/// answer + the citations the server captured. Reads:
+///   LUMEN_VERIFY_DB / LUMEN_VERIFY_DOC — db path + document id
+///   LUMEN_VERIFY_KIND — "codex" (default) | "claude"
+///   LUMEN_VERIFY_Q    — the question to ask
+pub async fn run_agentic_probe_from_env() -> Result<(), String> {
+    let db = env::var("LUMEN_VERIFY_DB").map_err(|_| "set LUMEN_VERIFY_DB".to_string())?;
+    let doc = env::var("LUMEN_VERIFY_DOC").map_err(|_| "set LUMEN_VERIFY_DOC".to_string())?;
+    let question = env::var("LUMEN_VERIFY_Q")
+        .unwrap_or_else(|_| "What is the main contribution of this paper?".to_string());
+    let kind = match env::var("LUMEN_VERIFY_KIND").unwrap_or_default().as_str() {
+        "claude" => crate::local_agent::AgentKind::Claude,
+        _ => crate::local_agent::AgentKind::Codex,
+    };
+
+    let prompt = crate::local_agent::build_agentic_prompt(&question, "", Some("en"));
+    let outcome =
+        crate::local_agent::generate_answer_agentic(kind, PathBuf::from(db), doc, prompt).await?;
+
+    println!("CITATIONS_CAPTURED={}", outcome.citations.len());
+    for c in outcome.citations.iter().take(8) {
+        println!(
+            "- [{}] p{} {}: {}",
+            c.label,
+            c.page,
+            c.source,
+            truncate_for_error(&c.quote, 120)
+        );
+    }
+    println!("\nANSWER:\n{}", outcome.answer);
+    Ok(())
+}

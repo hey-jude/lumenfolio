@@ -9,8 +9,8 @@
 //! support it). Tools are read-only, so the server uses its own READ-ONLY SQLite
 //! connection to the same DB file rather than contending the main `AppDatabase`.
 //!
-//! Scaffold for now — not yet called by the chat dispatch (that wiring is P2-4/P2-5).
-#![allow(dead_code)]
+//! Wired into the chat dispatch in P2-4 (`generate_answer_agentic`): the focused-
+//! document reader path drives the local CLI against this server.
 
 use std::{
     path::PathBuf,
@@ -147,12 +147,6 @@ pub(crate) struct RunningMcpServer {
     pub token: String,
     pub citations: Arc<Mutex<Vec<Citation>>>,
     shutdown: tokio::sync::watch::Sender<bool>,
-}
-
-impl RunningMcpServer {
-    pub fn shutdown(&self) {
-        let _ = self.shutdown.send(true);
-    }
 }
 
 impl Drop for RunningMcpServer {
