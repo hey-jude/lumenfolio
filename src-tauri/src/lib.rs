@@ -837,6 +837,102 @@ fn open_external_url(url: String) -> Result<(), String> {
     Err("Opening a URL is not supported on this platform".to_string())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalAgentTestResult {
+    ok: bool,
+    message: String,
+    tool_calls: u32,
+}
+
+/// Settings "Test connection": verify the local agent can actually reach
+/// Lumenfolio's MCP tools end-to-end. Runs a minimal agentic round-trip against
+/// the first indexed document and reports how many tools the agent managed to
+/// call (0 ⇒ the agent ran but the MCP plumbing didn't engage). Slow by nature
+/// (a real CLI turn), so the frontend shows a spinner.
+#[tauri::command]
+async fn test_local_agent_connection(
+    provider_id: String,
+    database: State<'_, AppDatabase>,
+) -> Result<LocalAgentTestResult, String> {
+    let kind = local_agent::provider_id_kind(&provider_id)
+        .ok_or_else(|| "Not a local agent provider".to_string())?;
+
+    let (db_path, document_id) = {
+        let conn = database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        let path = conn.path().map(|p| p.to_string());
+        let doc: Option<String> = conn
+            .query_row(
+                "SELECT document_id FROM document_chunks LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        (path, doc)
+    };
+
+    let Some(db_path) = db_path else {
+        return Ok(LocalAgentTestResult {
+            ok: false,
+            tool_calls: 0,
+            message: "No database is available to test against.".to_string(),
+        });
+    };
+    let Some(document_id) = document_id else {
+        return Ok(LocalAgentTestResult {
+            ok: false,
+            tool_calls: 0,
+            message: "Index a document first, then test the connection.".to_string(),
+        });
+    };
+
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let counter_cb = counter.clone();
+    let on_tool = move |ev: local_agent::AgentToolEvent| {
+        if ev.phase == local_agent::AgentToolPhase::Started {
+            counter_cb.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    };
+    let prompt = local_agent::build_agentic_prompt(
+        "Call the document search tool once for any keyword you like, then reply with exactly: OK.",
+        "",
+        Some("en"),
+    );
+
+    match local_agent::generate_answer_agentic(
+        kind,
+        std::path::PathBuf::from(db_path),
+        document_id,
+        prompt,
+        on_tool,
+    )
+    .await
+    {
+        Ok(_) => {
+            let n = counter.load(std::sync::atomic::Ordering::Relaxed);
+            Ok(LocalAgentTestResult {
+                ok: n > 0,
+                tool_calls: n,
+                message: if n > 0 {
+                    format!("Connected — the agent called {n} tool(s) over MCP.")
+                } else {
+                    "The agent ran but didn't call any Lumenfolio tools.".to_string()
+                },
+            })
+        }
+        Err(err) => Ok(LocalAgentTestResult {
+            ok: false,
+            tool_calls: counter.load(std::sync::atomic::Ordering::Relaxed),
+            message: err,
+        }),
+    }
+}
+
 fn open_file_manager_target(target: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -2383,6 +2479,26 @@ fn normalize_reference_document_ids(raw: &[String], primary_document_id: &str) -
     out
 }
 
+/// Human-readable label for a Lumenfolio MCP tool name, for the local-agent trace.
+fn friendly_tool_label(tool: &str) -> &str {
+    match tool {
+        "search_chunks" => "Searching the document",
+        "open_pages" => "Reading pages",
+        "open_section" => "Reading a section",
+        "open_table" | "search_table_facts" | "resolve_table_anchor" => "Reading a table",
+        "inspect_tables" => "Inspecting tables",
+        "inspect_tree" | "read_tree_node_lines" => "Inspecting structure",
+        "inspect_visuals" | "open_visual" | "analyze_visual" | "inspect_objects" | "analyze_page" => {
+            "Inspecting figures"
+        }
+        "query_knowledge_graph" => "Querying the knowledge graph",
+        "search_library_knowledge" => "Searching your library",
+        "list_trending_papers" => "Checking trending papers",
+        "recall_chat_history" => "Recalling the conversation",
+        _ => "Using a document tool",
+    }
+}
+
 /// Collapse repeated citations an agentic run may serve across multiple tool
 /// calls. Keys on the block (stable id) when present, else page + quote text.
 fn dedup_citations(citations: Vec<runtime::rag::Citation>) -> Vec<runtime::rag::Citation> {
@@ -2704,11 +2820,37 @@ async fn run_ask_document(
                 agent_run.session_context.trim(),
                 input.locale.as_deref(),
             );
+            // Live trace: relay each MCP tool-call step to the chat activity drawer.
+            let trace_app = app.clone();
+            let trace_event_id = activity_event_id.clone();
+            let on_tool = move |ev: local_agent::AgentToolEvent| {
+                let label = friendly_tool_label(&ev.tool);
+                let (status, title) = match ev.phase {
+                    local_agent::AgentToolPhase::Started => ("running", label.to_string()),
+                    local_agent::AgentToolPhase::Completed => (
+                        if ev.ok { "completed" } else { "failed" },
+                        label.to_string(),
+                    ),
+                };
+                agent_judge::emit_agent_activity(
+                    &trace_app,
+                    trace_event_id.as_deref(),
+                    runtime::agent::AgentTraceEvent::new(
+                        "tool_call",
+                        ev.tool.clone(),
+                        status,
+                        title,
+                        format!("local agent · {}", ev.tool),
+                        String::new(),
+                    ),
+                );
+            };
             match local_agent::generate_answer_agentic(
                 kind,
                 std::path::PathBuf::from(db_path.unwrap_or_default()),
                 document_id.to_string(),
                 prompt,
+                on_tool,
             )
             .await
             {
@@ -4838,6 +4980,7 @@ pub fn run() {
             update_check::check_for_update,
             open_external_url,
             local_agent::get_local_agent_status,
+            test_local_agent_connection,
             load_last_workspace,
             read_pdf_bytes,
             pdf2zh_sidecar::read_pdf_artifact_bytes,

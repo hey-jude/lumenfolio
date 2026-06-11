@@ -232,6 +232,8 @@ const settingsSection = usePersistedRef('settingsSection', 'chat')
 // providers. P0: detection + status only. [{ kind, label, installed, version, path, installUrl }]
 const localAgentStatus = ref([])
 const localAgentChecking = ref(false)
+// Per-kind "Test connection" state: { [kind]: { testing, ok, message } }.
+const localAgentTest = ref({})
 // Hard-coded default order is Codex → Claude, but the preferred one is configurable.
 const preferredLocalAgent = usePersistedRef('preferredLocalAgent', 'codex')
 const settingsStatus = ref('idle')
@@ -1144,6 +1146,26 @@ async function refreshLocalAgentStatus() {
     localAgentStatus.value = []
   } finally {
     localAgentChecking.value = false
+  }
+}
+
+async function testLocalAgent(kind) {
+  const providerId = `local-agent-${kind}`
+  localAgentTest.value = {
+    ...localAgentTest.value,
+    [kind]: { testing: true, ok: null, message: ui.value.localAgentTesting },
+  }
+  try {
+    const res = await invoke('test_local_agent_connection', { providerId })
+    localAgentTest.value = {
+      ...localAgentTest.value,
+      [kind]: { testing: false, ok: Boolean(res?.ok), message: res?.message || '' },
+    }
+  } catch (err) {
+    localAgentTest.value = {
+      ...localAgentTest.value,
+      [kind]: { testing: false, ok: false, message: String(err) },
+    }
   }
 }
 
@@ -4953,6 +4975,19 @@ onMounted(() => {
                     :class="agent.installed ? 'ok' : 'missing'"
                   >{{ agent.installed ? (ui.localAgentInstalled + (agent.version ? ' · ' + agent.version : '')) : ui.localAgentNotInstalled }}</span>
                   <span class="local-agents-spacer"></span>
+                  <span
+                    v-if="localAgentTest[agent.kind] && !localAgentTest[agent.kind].testing"
+                    class="local-agent-test-result"
+                    :class="localAgentTest[agent.kind].ok ? 'ok' : 'missing'"
+                    :title="localAgentTest[agent.kind].message"
+                  >{{ localAgentTest[agent.kind].ok ? '✓' : '✗' }} {{ localAgentTest[agent.kind].message }}</span>
+                  <button
+                    v-if="agent.installed"
+                    type="button"
+                    class="local-agent-install"
+                    :disabled="localAgentTest[agent.kind] && localAgentTest[agent.kind].testing"
+                    @click="testLocalAgent(agent.kind)"
+                  >{{ localAgentTest[agent.kind] && localAgentTest[agent.kind].testing ? ui.localAgentTesting : ui.localAgentTest }}</button>
                   <button
                     v-if="!agent.installed"
                     type="button"
@@ -5796,6 +5831,22 @@ onMounted(() => {
   flex: 1;
 }
 
+.local-agent-test-result {
+  font-size: 11px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.local-agent-test-result.ok {
+  color: #8fe0b0;
+}
+
+.local-agent-test-result.missing {
+  color: #e0a08f;
+}
+
 .local-agent-install {
   border: none;
   background: transparent;
@@ -5803,6 +5854,11 @@ onMounted(() => {
   font-size: 12px;
   cursor: pointer;
   padding: 0;
+}
+
+.local-agent-install:disabled {
+  color: var(--text-muted);
+  cursor: default;
 }
 
 .provider-list {

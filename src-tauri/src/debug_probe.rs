@@ -633,8 +633,26 @@ pub async fn run_agentic_probe_from_env() -> Result<(), String> {
     };
 
     let prompt = crate::local_agent::build_agentic_prompt(&question, "", Some("en"));
-    let outcome =
-        crate::local_agent::generate_answer_agentic(kind, PathBuf::from(db), doc, prompt).await?;
+    let outcome = crate::local_agent::generate_answer_agentic(
+        kind,
+        PathBuf::from(db),
+        doc,
+        prompt,
+        |ev| {
+            let phase = match ev.phase {
+                crate::local_agent::AgentToolPhase::Started => "→ calling",
+                crate::local_agent::AgentToolPhase::Completed => {
+                    if ev.ok {
+                        "✓ done"
+                    } else {
+                        "✗ failed"
+                    }
+                }
+            };
+            println!("TRACE {phase} {}", ev.tool);
+        },
+    )
+    .await?;
 
     println!("CITATIONS_CAPTURED={}", outcome.citations.len());
     for c in outcome.citations.iter().take(8) {

@@ -6,10 +6,11 @@
 //! docs/lumenfolio_local_agent_provider_plan.md.
 
 use std::{
+    io::{BufRead, BufReader, Read},
     path::PathBuf,
     process::{Command, Stdio},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -362,6 +363,20 @@ pub(crate) struct AgenticOutcome {
     pub citations: Vec<Citation>,
 }
 
+/// A tool-call step observed in the CLI's event stream, reported live so the caller
+/// can surface a trace timeline. `ok` is meaningful only for `Completed`.
+pub(crate) struct AgentToolEvent {
+    pub tool: String,
+    pub phase: AgentToolPhase,
+    pub ok: bool,
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) enum AgentToolPhase {
+    Started,
+    Completed,
+}
+
 /// Prompt for Mode B: no evidence is embedded — instead the agent is told to use
 /// the Lumenfolio MCP tools to retrieve evidence from the open document itself,
 /// then answer from what it finds. Mirrors `build_prompt`'s persona/language.
@@ -397,20 +412,25 @@ const MCP_TOKEN_ENV: &str = "LUMENFOLIO_MCP_TOKEN";
 
 /// Run the local agent CLI as a multi-step agent: bring up an in-process loopback
 /// MCP server scoped to `document_id`, wire the CLI to it, let it call our tools,
-/// and return the answer + the citations the server served. Offloaded subprocess
-/// I/O is wrapped around the (async) server lifecycle.
-pub(crate) async fn generate_answer_agentic(
+/// and return the answer + the citations the server served. `on_tool` is invoked
+/// live for each tool-call step (Codex's `--json` stream is parsed incrementally).
+/// Offloaded subprocess I/O is wrapped around the (async) server lifecycle.
+pub(crate) async fn generate_answer_agentic<F>(
     kind: AgentKind,
     db_path: PathBuf,
     document_id: String,
     prompt: String,
-) -> Result<AgenticOutcome, String> {
+    on_tool: F,
+) -> Result<AgenticOutcome, String>
+where
+    F: Fn(AgentToolEvent) + Send + 'static,
+{
     let server = mcp_server::start_mcp_server(db_path, document_id).await?;
     let url = server.url.clone();
     let token = server.token.clone();
 
     let answer = tauri::async_runtime::spawn_blocking(move || {
-        run_cli_agentic(kind, &prompt, &url, &token)
+        run_cli_agentic(kind, &prompt, &url, &token, &on_tool)
     })
     .await
     .map_err(|err| format!("Local-agent task failed: {err}"));
@@ -427,12 +447,16 @@ pub(crate) async fn generate_answer_agentic(
     Ok(AgenticOutcome { answer, citations })
 }
 
-fn run_cli_agentic(
+fn run_cli_agentic<F>(
     kind: AgentKind,
     prompt: &str,
     url: &str,
     token: &str,
-) -> Result<String, String> {
+    on_tool: &F,
+) -> Result<String, String>
+where
+    F: Fn(AgentToolEvent),
+{
     let binary = resolve_path(kind.binary()).unwrap_or_else(|| kind.binary().to_string());
     // Per-run empty working dir so that — with Codex's OS sandbox necessarily off
     // (it cancels MCP calls otherwise) — there is nothing of the user's to read.
@@ -500,18 +524,155 @@ fn run_cli_agentic(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let output = run_command_timeout(cmd, GENERATE_TIMEOUT);
+    let result = match kind {
+        // Codex `--json` is a verified JSONL stream: read it line-by-line so tool
+        // calls surface live, then take the final agent_message as the answer.
+        AgentKind::Codex => stream_codex_agentic(cmd, GENERATE_TIMEOUT, on_tool),
+        // Claude path stays atomic for now (its MCP path is implemented but not yet
+        // live-verified — see plan doc); no incremental trace.
+        AgentKind::Claude => run_command_timeout(cmd, GENERATE_TIMEOUT).and_then(|output| {
+            if !output.status.success() {
+                return Err(classify_error(
+                    kind,
+                    String::from_utf8_lossy(&output.stderr).trim(),
+                ));
+            }
+            parse_claude_json(kind, &String::from_utf8_lossy(&output.stdout))
+        }),
+    };
     let _ = std::fs::remove_dir_all(&work_dir);
-    let output = output?;
+    result
+}
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        return Err(classify_error(kind, stderr.trim()));
+/// Drive Codex `exec --json`, parsing its JSONL stream as it arrives: emit an
+/// `AgentToolEvent` for each `mcp_tool_call` start/finish and return the last
+/// `agent_message` text. A hard deadline kills the child if it stalls.
+fn stream_codex_agentic<F>(
+    mut cmd: Command,
+    timeout: Duration,
+    on_tool: &F,
+) -> Result<String, String>
+where
+    F: Fn(AgentToolEvent),
+{
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| format!("Failed to launch the local agent: {err}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Local agent produced no output stream".to_string())?;
+
+    // Drain stderr on a side thread so a full pipe can't deadlock the child.
+    let (err_tx, err_rx) = mpsc::channel();
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = BufReader::new(stderr).read_to_string(&mut buf);
+            let _ = err_tx.send(buf);
+        });
     }
-    match kind {
-        AgentKind::Claude => parse_claude_json(kind, &stdout),
-        AgentKind::Codex => parse_codex_jsonl(kind, &stdout),
+
+    // Stream stdout lines over a channel so the deadline can interrupt a stall.
+    let (line_tx, line_rx) = mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(l) => {
+                    if line_tx.send(l).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut answer: Option<String> = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let _ = child.kill();
+            let _ = reader.join();
+            return Err(
+                "The local agent timed out. Try again, or pick a model provider.".to_string(),
+            );
+        }
+        match line_rx.recv_timeout(remaining) {
+            Ok(line) => handle_codex_line(&line, on_tool, &mut answer),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = child.kill();
+                let _ = reader.join();
+                return Err(
+                    "The local agent timed out. Try again, or pick a model provider.".to_string(),
+                );
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break, // stdout closed → done
+        }
+    }
+    let _ = reader.join();
+
+    let status = child
+        .wait()
+        .map_err(|err| format!("Local agent did not exit cleanly: {err}"))?;
+    if !status.success() {
+        let stderr = err_rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+        return Err(classify_error(AgentKind::Codex, stderr.trim()));
+    }
+    answer
+        .filter(|a| !a.is_empty())
+        .ok_or_else(|| format!("{} returned no answer.", AgentKind::Codex.label()))
+}
+
+/// Parse one Codex JSONL line: report tool-call start/finish via `on_tool`, and
+/// keep the latest `agent_message` text as the running answer.
+fn handle_codex_line<F>(line: &str, on_tool: &F, answer: &mut Option<String>)
+where
+    F: Fn(AgentToolEvent),
+{
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return;
+    };
+    let event_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let Some(item) = value.get("item") else {
+        return;
+    };
+    let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match (event_type, item_type) {
+        ("item.started", "mcp_tool_call") => {
+            on_tool(AgentToolEvent {
+                tool: item
+                    .get("tool")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("tool")
+                    .to_string(),
+                phase: AgentToolPhase::Started,
+                ok: true,
+            });
+        }
+        ("item.completed", "mcp_tool_call") => {
+            let ok = item.get("status").and_then(|s| s.as_str()) == Some("completed");
+            on_tool(AgentToolEvent {
+                tool: item
+                    .get("tool")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("tool")
+                    .to_string(),
+                phase: AgentToolPhase::Completed,
+                ok,
+            });
+        }
+        ("item.completed", "agent_message") => {
+            if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                *answer = Some(text.trim().to_string());
+            }
+        }
+        _ => {}
     }
 }
 
