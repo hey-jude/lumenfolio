@@ -13,6 +13,8 @@ use std::{
 
 use serde::Serialize;
 
+pub(crate) mod mcp_server;
+
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
