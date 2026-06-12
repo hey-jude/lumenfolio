@@ -1,11 +1,14 @@
 <div align="center">
   <img src="./src/assets/lumenfolio-logo-transparent.png" alt="Lumenfolio logo" width="96">
   <h1>Lumenfolio</h1>
-  <p><strong>Local-first desktop AI reading workspace for academic PDFs.</strong></p>
+  <p><strong>Local-first AI paper reader with verifiable page/bbox evidence.</strong></p>
+  <p>Ask questions, translate PDFs, inspect tables/figures, and use local Codex / Claude Code agents without uploading papers by default.</p>
   <p>
     <a href="https://github.com/tanghui315/lumenfolio/releases/latest"><strong>Download</strong></a>
     ·
-    <a href="./docs/assets/lumenfolio-demo.gif"><strong>Watch Demo</strong></a>
+    <a href="./docs/assets/lumenfolio-demo.gif"><strong>Watch 30s Demo</strong></a>
+    ·
+    <a href="https://github.com/tanghui315/lumenfolio/stargazers"><strong>Star on GitHub</strong></a>
     ·
     <a href="https://github.com/tanghui315/lumenfolio/issues"><strong>Give Feedback</strong></a>
   </p>
@@ -13,11 +16,23 @@
   <p><a href="./README.zh-CN.md">中文文档 (Chinese README)</a></p>
 </div>
 
-Lumenfolio is a local-first desktop AI reading workspace for academic PDFs. It combines a focused PDF reader, vectorless agentic RAG, layout-aware translation, evidence-anchored notes, and local Codex / Claude Code agents into one reading environment.
+Lumenfolio is a local-first desktop AI reading workspace for academic PDFs. It combines a focused PDF reader, vectorless agentic RAG, layout-aware translation, evidence-anchored notes, OCR / TSR visual evidence, and local Codex / Claude Code agents into one reading environment.
 
 It is not just "chat over a PDF". Lumenfolio is built around local document evidence: pages, blocks, chunks, structure, tables, visual regions, citations, and bounding boxes that can point back to the original PDF. That evidence can also be exposed through local MCP tools so your signed-in Codex / Claude Code CLI can gather evidence and answer inside the reading workflow.
 
 ![Lumenfolio demo](./docs/assets/lumenfolio-demo.gif)
+
+If Lumenfolio helps your paper-reading workflow, a star helps more researchers discover it.
+
+## Why Not Another PDF Chat?
+
+| Capability | Typical PDF chat | Lumenfolio |
+| --- | --- | --- |
+| Evidence | Text snippets or loose citations | Page / bbox citations that jump back to the exact PDF region |
+| Retrieval | Chunk + embedding + vector DB by default | PDF structure + SQLite FTS + page/block evidence loop; vectorless by default |
+| Privacy | Often uploads documents to a hosted service | Local indexing first; cloud calls depend on the provider you choose |
+| Tables and figures | Often treated as surrounding text | OCR, TSR-ready table evidence, visual crops, and figure/table inspection |
+| Workflow | A chat box beside a file | Reader, translation, notes, evidence chain, agent trace, and local agents in one workspace |
 
 ## Screenshots
 
@@ -316,12 +331,14 @@ npm run check:translation-linking
 npm run check:prod-no-testids
 ```
 
-## Data & Privacy
+## Trust, Data & Installation
 
 - Lumenfolio is local-first. PDF indexes, notes, chat history, and translation metadata are stored locally.
 - API keys are currently stored locally; migration to the system keychain is planned.
 - If a cloud chat or translation provider is configured, selected text, questions, page context, or translation content may be sent to that provider.
 - If you choose a local Codex / Claude Code provider, questions, conversation memory, and retrieved PDF evidence are passed to that local CLI; the actual model request is handled by the CLI and its signed-in account/subscription.
+- macOS builds are currently ad-hoc signed. Developer ID signing and notarization are planned to reduce first-run friction.
+- Release assets include SHA-256 checksums plus license, notice, AGPL sidecar license, and PDFMathTranslate source archive.
 
 ## Acknowledgements
 

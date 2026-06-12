@@ -1,11 +1,14 @@
 <div align="center">
   <img src="./src/assets/lumenfolio-logo-transparent.png" alt="Lumenfolio logo" width="96">
   <h1>Lumenfolio</h1>
-  <p><strong>本地优先的桌面 PDF AI 阅读工作区</strong></p>
+  <p><strong>带 page/bbox 原文证据的本地优先 AI 论文阅读器</strong></p>
+  <p>提问、翻译、检查图表、分析表格，并用本机 Codex / Claude Code agent 阅读论文；默认不需要上传 PDF。</p>
   <p>
     <a href="https://github.com/tanghui315/lumenfolio/releases/latest"><strong>下载应用</strong></a>
     ·
-    <a href="./docs/assets/lumenfolio-demo.gif"><strong>观看演示</strong></a>
+    <a href="./docs/assets/lumenfolio-demo.gif"><strong>观看 30 秒演示</strong></a>
+    ·
+    <a href="https://github.com/tanghui315/lumenfolio/stargazers"><strong>给项目 Star</strong></a>
     ·
     <a href="https://github.com/tanghui315/lumenfolio/issues"><strong>反馈问题</strong></a>
   </p>
@@ -13,11 +16,23 @@
   <p><a href="./README.md">English README</a></p>
 </div>
 
-Lumenfolio 是一个本地优先的桌面 PDF AI 阅读工作区，面向论文精读、证据可追溯问答、版面级翻译、原文锚定笔记，以及本机 Codex / Claude Code 驱动的论文 agent。
+Lumenfolio 是一个本地优先的桌面 PDF AI 阅读工作区，面向论文精读、证据可追溯问答、版面级翻译、原文锚定笔记、OCR / TSR 视觉证据，以及本机 Codex / Claude Code 驱动的论文 agent。
 
 它不是简单的“PDF + 聊天框”。Lumenfolio 的核心是围绕本地 PDF 证据构建阅读工作流：页面、文本块、chunk、结构树、表格、视觉区域、citation 和 bbox 坐标都可以回到原始 PDF；同时也可以把这些证据通过本地 MCP 工具交给你已经登录的 Codex / Claude Code CLI 来多步取证和回答。
 
 ![Lumenfolio 演示](./docs/assets/lumenfolio-demo.gif)
+
+如果 Lumenfolio 对你的论文阅读工作流有帮助，一个 star 可以让更多研究者发现它。
+
+## 为什么不是普通 PDF Chat？
+
+| 能力 | 普通 PDF Chat | Lumenfolio |
+| --- | --- | --- |
+| 证据定位 | 文本片段或松散引用 | page / bbox citation，可跳回 PDF 精确区域 |
+| 检索方式 | 默认 chunk + embedding + 向量库 | PDF 结构 + SQLite FTS + 页面 / 文本块证据循环；默认无向量库 |
+| 隐私路径 | 常见做法是上传文档到云端服务 | 先本地索引；是否外发取决于你选择的模型 / 翻译 provider |
+| 表格和图像 | 往往只依赖附近正文 | OCR、TSR-ready 表格证据、视觉 crop、图表 / 表格检查 |
+| 工作流 | 文件旁边放一个聊天框 | 阅读器、翻译、笔记、证据链、agent trace、本地 agent 在同一工作区 |
 
 ## 界面截图
 
@@ -317,12 +332,14 @@ npm run check:translation-linking
 npm run check:prod-no-testids
 ```
 
-## 数据与隐私
+## 信任、数据与安装
 
 - Lumenfolio 是 local-first，PDF 索引、笔记、聊天历史和翻译元数据默认保存在本地。
 - API Key 当前仍是本地存储，后续计划迁移到系统 keychain。
 - 如果配置云端模型或翻译 Provider，选中文本、问题、页面上下文或翻译内容可能会发送到对应服务商。
 - 如果选择本地 Codex / Claude Code provider，问题、对话记忆和检索到的 PDF 证据会交给对应本地 CLI；实际模型请求由该 CLI 及其账号订阅处理。
+- macOS 版本当前是 ad-hoc signed。Developer ID signing 和 notarization 已列入计划，用于降低首次安装阻力。
+- Release assets 包含 SHA-256 校验、许可证、NOTICE、AGPL sidecar license，以及 PDFMathTranslate 源码归档。
 
 ## 致谢
 
