@@ -346,6 +346,4 @@ npm run check:prod-no-testids
 
 ## License
 
-This project is licensed under the PolyForm Noncommercial License 1.0.0.
-
-Commercial use is not permitted under this license. If you need commercial licensing, contact the copyright holder at `tanghui315@126.com`.
+This project is licensed under the GNU Affero General Public License v3.0, matching the bundled PDFMathTranslate/pdf2zh sidecar.

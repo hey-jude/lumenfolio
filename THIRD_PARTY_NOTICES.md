@@ -27,6 +27,5 @@ npm run setup:pdf2zh
 npm run build:pdf2zh-runtime:windows
 ```
 
-The main Lumenfolio application is licensed separately under the PolyForm
-Noncommercial License 1.0.0. The bundled PDFMathTranslate/pdf2zh sidecar remains
-licensed under the GNU Affero General Public License v3.0.
+The main Lumenfolio application is also licensed under the GNU Affero General
+Public License v3.0, matching the bundled PDFMathTranslate/pdf2zh sidecar.
