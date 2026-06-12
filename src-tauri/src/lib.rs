@@ -909,6 +909,7 @@ async fn test_local_agent_connection(
         std::path::PathBuf::from(db_path),
         document_id,
         prompt,
+        None,
         on_tool,
     )
     .await
@@ -2928,6 +2929,7 @@ async fn run_ask_document(
                 std::path::PathBuf::from(db_path.unwrap_or_default()),
                 document_id.to_string(),
                 prompt,
+                input.image_data_url.clone(),
                 on_tool,
             )
             .await
@@ -2980,7 +2982,7 @@ async fn run_ask_document(
                 &session_memory,
                 input.locale.as_deref(),
             );
-            match local_agent::generate_answer(kind, prompt).await {
+            match local_agent::generate_answer(kind, prompt, input.image_data_url.clone()).await {
                 Ok(answer) => {
                     unified_answer = Some(AskAnswerResult {
                         answer,

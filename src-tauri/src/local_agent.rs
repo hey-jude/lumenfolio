@@ -177,6 +177,47 @@ pub(crate) fn provider_id_kind(provider_id: &str) -> Option<AgentKind> {
 /// long (the expired-token probe took ~3min). Past this we fail with a timeout.
 const GENERATE_TIMEOUT: Duration = Duration::from_secs(150);
 
+/// A user-supplied image decoded to a temp file for `codex exec -i`. Removed on drop.
+struct ImageTemp {
+    path: PathBuf,
+}
+
+impl Drop for ImageTemp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Decode a `data:image/...;base64,...` URL into a temp file. Returns None for a
+/// non-data / non-base64 / decode failure, in which case the caller answers
+/// text-only.
+fn write_image_temp(data_url: &str) -> Option<ImageTemp> {
+    use base64::Engine;
+    let rest = data_url.trim().strip_prefix("data:")?;
+    let (meta, payload) = rest.split_once(',')?;
+    if !meta.contains("base64") {
+        return None;
+    }
+    let ext = match meta.split(';').next().unwrap_or("") {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let path = std::env::temp_dir().join(format!(
+        "lumenfolio-img-{:016x}.{ext}",
+        rand::random::<u64>()
+    ));
+    std::fs::write(&path, &bytes).ok()?;
+    Some(ImageTemp { path })
+}
+
 fn answer_language(locale: Option<&str>) -> &'static str {
     match locale.map(str::trim).unwrap_or("") {
         l if l.starts_with("zh") => "Chinese",
@@ -234,14 +275,25 @@ Do NOT call tools, read files, or run commands — answer only from the evidence
 /// Run the local agent CLI once with a fully-assembled prompt; return its answer.
 /// Offloaded to a blocking task (subprocess I/O). Errors carry a user-facing hint
 /// (e.g. login required).
-pub(crate) async fn generate_answer(kind: AgentKind, prompt: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || run_cli(kind, &prompt))
-        .await
-        .map_err(|err| format!("Local-agent task failed: {err}"))?
+pub(crate) async fn generate_answer(
+    kind: AgentKind,
+    prompt: String,
+    image_data_url: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_cli(kind, &prompt, image_data_url.as_deref())
+    })
+    .await
+    .map_err(|err| format!("Local-agent task failed: {err}"))?
 }
 
-fn run_cli(kind: AgentKind, prompt: &str) -> Result<String, String> {
+fn run_cli(kind: AgentKind, prompt: &str, image_data_url: Option<&str>) -> Result<String, String> {
     let binary = resolve_path(kind.binary()).unwrap_or_else(|| kind.binary().to_string());
+    // Codex `exec` takes images via `-i`; Claude's headless `-p` has no image flag,
+    // so it degrades to text. Kept alive until the child exits.
+    let image = image_data_url
+        .filter(|_| kind == AgentKind::Codex)
+        .and_then(write_image_temp);
     let mut cmd = Command::new(&binary);
     match kind {
         // --tools "" disables all built-in tools: pure generation, no fs/shell access.
@@ -250,14 +302,13 @@ fn run_cli(kind: AgentKind, prompt: &str) -> Result<String, String> {
         }
         // read-only sandbox + no approval; no MCP configured → no tools available.
         AgentKind::Codex => {
-            cmd.args([
-                "exec",
-                "--json",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                prompt,
-            ]);
+            cmd.args(["exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only"]);
+            // Prompt MUST precede `-i`: `--image <FILE>...` is multi-value and would
+            // otherwise swallow the prompt positional as a second image.
+            cmd.arg(prompt);
+            if let Some(image) = &image {
+                cmd.arg("-i").arg(&image.path);
+            }
         }
     }
     cmd.current_dir(std::env::temp_dir()) // neutral cwd: nothing of the user's to read
@@ -437,6 +488,7 @@ pub(crate) async fn generate_answer_agentic<F>(
     db_path: PathBuf,
     document_id: String,
     prompt: String,
+    image_data_url: Option<String>,
     on_tool: F,
 ) -> Result<AgenticOutcome, String>
 where
@@ -447,7 +499,7 @@ where
     let token = server.token.clone();
 
     let answer = tauri::async_runtime::spawn_blocking(move || {
-        run_cli_agentic(kind, &prompt, &url, &token, &on_tool)
+        run_cli_agentic(kind, &prompt, &url, &token, image_data_url.as_deref(), &on_tool)
     })
     .await
     .map_err(|err| format!("Local-agent task failed: {err}"));
@@ -478,6 +530,7 @@ fn run_cli_agentic<F>(
     prompt: &str,
     url: &str,
     token: &str,
+    image_data_url: Option<&str>,
     on_tool: &F,
 ) -> Result<String, String>
 where
@@ -488,6 +541,10 @@ where
     // (it cancels MCP calls otherwise) — there is nothing of the user's to read.
     let work_dir = std::env::temp_dir().join(format!("lumenfolio-agent-{}", &token[..token.len().min(16)]));
     let _ = std::fs::create_dir_all(&work_dir);
+    // Codex takes the user's image via `-i`; Claude headless can't. Alive until exit.
+    let image = image_data_url
+        .filter(|_| kind == AgentKind::Codex)
+        .and_then(write_image_temp);
 
     let mut cmd = Command::new(&binary);
     match kind {
@@ -538,8 +595,12 @@ where
                 "--ignore-user-config",
                 "-c",
                 &mcp_cfg,
-                prompt,
             ]);
+            // Prompt MUST precede `-i` (multi-value `--image` would eat it otherwise).
+            cmd.arg(prompt);
+            if let Some(image) = &image {
+                cmd.arg("-i").arg(&image.path);
+            }
             cmd.env(MCP_TOKEN_ENV, token);
         }
     }
@@ -713,6 +774,22 @@ mod tests {
         assert_eq!(parse_version("v1.4.2"), "1.4.2");
         // No dotted token → trimmed first line.
         assert_eq!(parse_version("nightly build\nextra"), "nightly build");
+    }
+
+    #[test]
+    fn write_image_temp_decodes_and_cleans_up() {
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 4]);
+        let data_url = format!("data:image/png;base64,{encoded}");
+        let temp = write_image_temp(&data_url).expect("decoded");
+        assert_eq!(temp.path.extension().and_then(|e| e.to_str()), Some("png"));
+        assert_eq!(std::fs::read(&temp.path).unwrap(), vec![1, 2, 3, 4]);
+        let path = temp.path.clone();
+        drop(temp);
+        assert!(!path.exists(), "temp file removed on drop");
+        // Rejects: not a data URL, and data URL without base64 marker.
+        assert!(write_image_temp("https://example.com/x.png").is_none());
+        assert!(write_image_temp("data:image/png,plain").is_none());
     }
 
     #[test]

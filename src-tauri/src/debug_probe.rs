@@ -632,12 +632,28 @@ pub async fn run_agentic_probe_from_env() -> Result<(), String> {
         _ => crate::local_agent::AgentKind::Codex,
     };
 
+    // Optional image: LUMEN_VERIFY_IMG=<path> → base64 data URL, exercising the `-i` path.
+    let image_data_url = env::var("LUMEN_VERIFY_IMG").ok().and_then(|path| {
+        use base64::Engine;
+        let bytes = std::fs::read(&path).ok()?;
+        let mime = if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+            "image/jpeg"
+        } else {
+            "image/png"
+        };
+        Some(format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        ))
+    });
+
     let prompt = crate::local_agent::build_agentic_prompt(&question, "", Some("en"));
     let outcome = crate::local_agent::generate_answer_agentic(
         kind,
         PathBuf::from(db),
         doc,
         prompt,
+        image_data_url,
         |ev| {
             let phase = match ev.phase {
                 crate::local_agent::AgentToolPhase::Started => "→ calling",
