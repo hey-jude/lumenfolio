@@ -2479,6 +2479,74 @@ fn normalize_reference_document_ids(raw: &[String], primary_document_id: &str) -
     out
 }
 
+// Local agents (Codex / Claude CLI) have very large context windows, so we feed
+// them a far richer conversation memory than the token-budgeted API path: the most
+// recent turns' FULL question + answer, rather than 3 turns of ~260-char previews.
+const LOCAL_AGENT_MEMORY_TURNS: usize = 20;
+const LOCAL_AGENT_MEMORY_ANSWER_CHARS: usize = 8_000;
+const LOCAL_AGENT_MEMORY_TOTAL_CHARS: usize = 80_000;
+
+fn cap_chars(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let mut out: String = value.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// Build a generous conversation-memory block for the local-agent prompt from the
+/// session's stored turns (full Q + A), newest-bounded by a total budget and shown
+/// oldest-first. Returns an empty string when there is no prior history.
+fn build_local_agent_memory(conn: &Connection, session_id: &str) -> String {
+    let mut stmt = match conn.prepare(
+        "SELECT user_message, assistant_answer
+         FROM chat_turns
+         WHERE session_id = ?1
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ?2",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return String::new(),
+    };
+    let rows = stmt.query_map(
+        params![session_id, LOCAL_AGENT_MEMORY_TURNS as i64],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    );
+    let turns_desc: Vec<(String, String)> = match rows {
+        Ok(iter) => iter.filter_map(Result::ok).collect(),
+        Err(_) => return String::new(),
+    };
+
+    // Walk newest→oldest, accepting turns until the total budget is hit (so the
+    // most recent context is always kept), then present them oldest→newest.
+    let mut selected: Vec<(String, String)> = Vec::new();
+    let mut total = 0usize;
+    for (question, answer) in turns_desc {
+        let question = question.trim().to_string();
+        let answer = cap_chars(answer.trim(), LOCAL_AGENT_MEMORY_ANSWER_CHARS);
+        if question.is_empty() && answer.is_empty() {
+            continue;
+        }
+        let block_len = question.len() + answer.len() + 16;
+        if !selected.is_empty() && total + block_len > LOCAL_AGENT_MEMORY_TOTAL_CHARS {
+            break;
+        }
+        total += block_len;
+        selected.push((question, answer));
+    }
+    if selected.is_empty() {
+        return String::new();
+    }
+    selected.reverse();
+
+    let mut out = String::from("Recent conversation (most recent last):\n");
+    for (question, answer) in selected {
+        out.push_str(&format!("- Q: {question}\n  A: {answer}\n"));
+    }
+    out
+}
+
 /// Human-readable label for a Lumenfolio MCP tool name, for the local-agent trace.
 fn friendly_tool_label(tool: &str) -> &str {
     match tool {
@@ -2783,7 +2851,7 @@ async fn run_ask_document(
             .and_then(|v| v.surface.as_deref())
             .map(|s| s == "reader")
             .unwrap_or(true);
-        let (db_path, doc_indexed) = match database.conn.lock() {
+        let (db_path, doc_indexed, local_memory) = match database.conn.lock() {
             Ok(conn) => {
                 let path = conn.path().map(|p| p.to_string());
                 let indexed = path.is_some()
@@ -2797,9 +2865,19 @@ async fn run_ask_document(
                         .ok()
                         .flatten()
                         .is_some();
-                (path, indexed)
+                // Rich conversation memory (full recent turns) — local agents have the
+                // context window to use it, unlike the token-budgeted API path.
+                let memory = build_local_agent_memory(&conn, &session_id);
+                (path, indexed, memory)
             }
-            Err(_) => (None, false),
+            Err(_) => (None, false, String::new()),
+        };
+        // Prefer the generous memory; fall back to the compacted one (e.g. if the DB
+        // read found nothing).
+        let session_memory = if local_memory.trim().is_empty() {
+            agent_run.session_context.trim().to_string()
+        } else {
+            local_memory
         };
 
         if on_reader && doc_indexed {
@@ -2817,7 +2895,7 @@ async fn run_ask_document(
             );
             let prompt = local_agent::build_agentic_prompt(
                 question,
-                agent_run.session_context.trim(),
+                &session_memory,
                 input.locale.as_deref(),
             );
             // Live trace: relay each MCP tool-call step to the chat activity drawer.
@@ -2899,7 +2977,7 @@ async fn run_ask_document(
             let prompt = local_agent::build_prompt(
                 question,
                 agent_run.retrieval_run.prompt_context.trim(),
-                agent_run.session_context.trim(),
+                &session_memory,
                 input.locale.as_deref(),
             );
             match local_agent::generate_answer(kind, prompt).await {
@@ -4915,6 +4993,46 @@ mod tests {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].id, "fresh");
         assert_eq!(turns[0].assistant_answer, "new answer");
+    }
+
+    #[test]
+    fn local_agent_memory_keeps_full_answers_in_chronological_order() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE chat_turns (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL DEFAULT '',
+              user_message TEXT NOT NULL,
+              assistant_answer TEXT NOT NULL,
+              created_at INTEGER NOT NULL
+            );",
+        )
+        .expect("schema");
+        // Two sessions; only 'sess' turns should appear, oldest-first.
+        conn.execute_batch(
+            "INSERT INTO chat_turns (id, session_id, user_message, assistant_answer, created_at) VALUES
+               ('t1', 'sess',  'first question',  'first FULL answer that is well past any 260-char preview cap', 1),
+               ('t2', 'sess',  'second question', 'second answer', 2),
+               ('o1', 'other', 'other question',  'other answer', 5);",
+        )
+        .expect("rows");
+
+        let memory = build_local_agent_memory(&conn, "sess");
+        // Both turns present, full text, chronological (first before second).
+        let first = memory.find("first question").expect("turn 1");
+        let second = memory.find("second question").expect("turn 2");
+        assert!(first < second, "oldest turn should come first");
+        assert!(memory.contains("first FULL answer that is well past any 260-char preview cap"));
+        // Other session is excluded.
+        assert!(!memory.contains("other question"));
+
+        assert!(build_local_agent_memory(&conn, "empty-session").is_empty());
+    }
+
+    #[test]
+    fn cap_chars_truncates_with_ellipsis() {
+        assert_eq!(cap_chars("hello", 10), "hello");
+        assert_eq!(cap_chars("hello", 3), "hel…");
     }
 
     fn insufficient_run(budget_exhausted: bool) -> runtime::agent::AgentRunResult {
