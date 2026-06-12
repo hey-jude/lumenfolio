@@ -104,7 +104,7 @@ impl ServerHandler for LumenfolioMcpServer {
 
         // Synchronous DB work, no await held across the connection (keeps the
         // future Send despite rusqlite::Connection being !Sync).
-        let output = {
+        let (output, image_paths) = {
             let conn = self.read_only_conn()?;
             let mut output = rag::execute_rag_tool_call_for_capabilities(
                 &conn,
@@ -127,7 +127,23 @@ impl ServerHandler for LumenfolioMcpServer {
                         rag::section_title_for_page(&conn, &citation.document_id, citation.page);
                 }
             }
-            output
+            // For visual tools, resolve the actual figure crops so a vision-capable
+            // agent can SEE them. A visual citation's block_id is its asset id.
+            let image_paths: Vec<String> = if VISUAL_TOOLS.contains(&tool.as_str()) {
+                let mut seen = std::collections::HashSet::new();
+                output
+                    .citations
+                    .iter()
+                    .filter(|c| !c.block_id.is_empty() && seen.insert(c.block_id.clone()))
+                    .filter_map(|c| {
+                        rag::visual_asset_image_path(&conn, &c.document_id, &c.block_id)
+                    })
+                    .take(MAX_TOOL_IMAGES)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            (output, image_paths)
         };
 
         let rendered = render_citations(&output.citations);
@@ -137,8 +153,51 @@ impl ServerHandler for LumenfolioMcpServer {
         if let Ok(mut sink) = self.candidates.lock() {
             sink.extend(output.trace_candidates);
         }
-        Ok(CallToolResult::success(vec![Content::text(rendered)]))
+
+        let mut contents = vec![Content::text(rendered)];
+        for path in image_paths {
+            if let Some(image) = read_image_content(&path) {
+                contents.push(image);
+            }
+        }
+        Ok(CallToolResult::success(contents))
     }
+}
+
+/// Tools that surface figures/charts — their citations carry a visual asset id in
+/// `block_id`, so we attach the actual crop image to the result.
+const VISUAL_TOOLS: [&str; 4] = [
+    "open_visual",
+    "inspect_visuals",
+    "inspect_objects",
+    "resolve_visual_anchor",
+];
+/// Cap images per tool call so a single call can't return a huge payload.
+const MAX_TOOL_IMAGES: usize = 3;
+/// Skip crops larger than this (defensive against a pathological asset).
+const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read a crop file into an MCP image content block (base64 + mime). Returns None
+/// if the file is missing (crops live in a temp dir), empty, or too large.
+fn read_image_content(path: &str) -> Option<Content> {
+    use base64::Engine;
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.is_empty() || bytes.len() > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let mime = match std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        _ => "image/png",
+    };
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(Content::image(data, mime.to_string()))
 }
 
 fn render_citations(citations: &[Citation]) -> String {
@@ -276,4 +335,37 @@ pub(crate) async fn start_mcp_server(
         candidates,
         shutdown: shutdown_tx,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_image_content_handles_valid_missing_and_empty() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("lumenfolio-test-{:016x}.png", rand::random::<u64>()));
+        std::fs::write(&path, [0x89u8, 0x50, 0x4e, 0x47, 0x0d, 0x0a]).unwrap();
+        assert!(
+            read_image_content(path.to_str().unwrap()).is_some(),
+            "a readable non-empty file yields an image content block"
+        );
+        std::fs::remove_file(&path).ok();
+
+        // Missing file → None.
+        assert!(read_image_content(&path.to_string_lossy()).is_none());
+
+        // Empty file → None.
+        let empty = dir.join(format!("lumenfolio-empty-{:016x}.png", rand::random::<u64>()));
+        std::fs::write(&empty, []).unwrap();
+        assert!(read_image_content(empty.to_str().unwrap()).is_none());
+        std::fs::remove_file(&empty).ok();
+    }
+
+    #[test]
+    fn visual_tools_set_covers_figure_surfacing_tools() {
+        assert!(VISUAL_TOOLS.contains(&"open_visual"));
+        assert!(VISUAL_TOOLS.contains(&"resolve_visual_anchor"));
+        assert!(!VISUAL_TOOLS.contains(&"search_chunks"));
+    }
 }

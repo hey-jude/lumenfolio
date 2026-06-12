@@ -4866,6 +4866,24 @@ fn open_table_context_candidate(
     }))
 }
 
+/// The on-disk crop path for an indexed visual asset by id (the `block_id` a
+/// visual citation carries). Lets a vision-capable local agent see the actual
+/// figure crop in Mode B.
+pub(crate) fn visual_asset_image_path(
+    conn: &Connection,
+    document_id: &str,
+    asset_id: &str,
+) -> Option<String> {
+    conn.query_row(
+        "SELECT image_path FROM document_visual_assets
+         WHERE document_id = ?1 AND id = ?2 AND image_path != '' LIMIT 1",
+        params![document_id, asset_id],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+    .filter(|path: &String| !path.trim().is_empty())
+}
+
 pub(crate) fn section_title_for_page(
     conn: &Connection,
     document_id: &str,
