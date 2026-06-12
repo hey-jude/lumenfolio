@@ -250,9 +250,13 @@ pub(crate) fn build_prompt(
     let lang_directive = language_directive(locale);
     let mut prompt = format!(
         "You are Lumenfolio, a careful academic PDF reading assistant. {lang_directive} \
-Use ONLY the evidence from the user's document provided below; if it is insufficient, say so plainly. \
+The user is reading a document; relevant passages retrieved from it appear below. \
+If the question is about the document, answer using ONLY that evidence; if it is insufficient, say so plainly. \
+If instead the question is general background knowledge not specific to this document, and the evidence \
+below is not relevant to it, answer from your own knowledge and note that this is general background, \
+not drawn from the document. \
 Write a concise, well-structured Markdown answer (a short direct answer first, then detail). \
-Do NOT call tools, read files, or run commands — answer only from the evidence text below.\n\n"
+Do NOT call tools, read files, or run commands.\n\n"
     );
     let session_context = session_context.trim();
     if !session_context.is_empty() {
@@ -457,11 +461,15 @@ pub(crate) fn build_agentic_prompt(
     let mut prompt = format!(
         "You are Lumenfolio, a careful academic PDF reading assistant. {lang_directive} \
 You have MCP tools (server `lumenfolio`) that retrieve evidence from the user's open PDF: \
-search passages, open specific pages/sections, and inspect tables/structure. \
-FIRST call the search tool to gather relevant evidence, open pages as needed, then write a \
-concise, well-structured Markdown answer (a short direct answer first, then detail) grounded \
-ONLY in what the tools return. If the tools surface nothing relevant, say so plainly. \
-Use ONLY the `lumenfolio` tools — do not read local files or run shell commands.\n\n"
+search passages, open specific pages/sections, and inspect tables/figures. \
+Decide what the question needs: if it is about the open document (its content, methods, results, \
+figures, or claims), use the tools to gather evidence first, then answer grounded ONLY in what the \
+tools return — if they surface nothing relevant, say so plainly. If instead it is a general or \
+background-knowledge question not specific to this document (e.g. explaining a general concept, \
+algorithm, or term), answer it directly from your own knowledge; you need not search, and should \
+not imply the document covers it. \
+Write a concise, well-structured Markdown answer (a short direct answer first, then detail). \
+Only use the `lumenfolio` tools — do not read local files or run shell commands.\n\n"
     );
     let session_context = session_context.trim();
     if !session_context.is_empty() {
