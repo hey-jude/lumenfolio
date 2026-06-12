@@ -34,6 +34,11 @@ use rmcp::{
 
 use crate::runtime::rag::{self, Citation, RagToolCapabilities, RetrievalTraceCandidate};
 
+/// Local agents have long context windows, so let each tool call return fuller
+/// passages than the token-budgeted API path (which clamps to ≤8k). Bigger quotes
+/// mean the agent reads more per call and loops the tools less.
+const MCP_MAX_QUOTE_CHARS: usize = 16_000;
+
 /// The document-scoped MCP server handler. One per server (= per turn).
 #[derive(Clone)]
 pub(crate) struct LumenfolioMcpServer {
@@ -108,7 +113,10 @@ impl ServerHandler for LumenfolioMcpServer {
                 &tool,
                 &args,
                 &fallback_query,
-                RagToolCapabilities::default(),
+                RagToolCapabilities {
+                    vision_enabled: false,
+                    max_quote_chars: MCP_MAX_QUOTE_CHARS,
+                },
             );
             // FTS / page chunks come back without a section label; fill it from the
             // page's enclosing structure node so the dispatch's evidence chips still

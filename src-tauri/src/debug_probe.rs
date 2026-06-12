@@ -654,10 +654,17 @@ pub async fn run_agentic_probe_from_env() -> Result<(), String> {
     )
     .await?;
 
+    let max_quote = outcome
+        .citations
+        .iter()
+        .map(|c| c.quote.chars().count())
+        .max()
+        .unwrap_or(0);
     println!(
-        "CITATIONS_CAPTURED={} CANDIDATES_CAPTURED={}",
+        "CITATIONS_CAPTURED={} CANDIDATES_CAPTURED={} MAX_QUOTE_CHARS={}",
         outcome.citations.len(),
-        outcome.candidates.len()
+        outcome.candidates.len(),
+        max_quote
     );
     // Mirror build_evidence_chain's block-match to confirm section titles now resolve.
     for c in outcome.citations.iter().take(8) {
