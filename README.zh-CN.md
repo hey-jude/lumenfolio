@@ -13,9 +13,9 @@
   <p><a href="./README.md">English README</a></p>
 </div>
 
-Lumenfolio 是一个本地优先的桌面 PDF AI 阅读工作区，面向论文精读、证据可追溯问答、版面级翻译和原文锚定笔记。
+Lumenfolio 是一个本地优先的桌面 PDF AI 阅读工作区，面向论文精读、证据可追溯问答、版面级翻译、原文锚定笔记，以及本机 Codex / Claude Code 驱动的论文 agent。
 
-它不是简单的“PDF + 聊天框”。Lumenfolio 的核心是围绕本地 PDF 证据构建阅读工作流：页面、文本块、chunk、结构树、表格、视觉区域、citation 和 bbox 坐标都可以回到原始 PDF。
+它不是简单的“PDF + 聊天框”。Lumenfolio 的核心是围绕本地 PDF 证据构建阅读工作流：页面、文本块、chunk、结构树、表格、视觉区域、citation 和 bbox 坐标都可以回到原始 PDF；同时也可以把这些证据通过本地 MCP 工具交给你已经登录的 Codex / Claude Code CLI 来多步取证和回答。
 
 ![Lumenfolio 演示](./docs/assets/lumenfolio-demo.gif)
 
@@ -46,6 +46,7 @@ Lumenfolio 是一个本地优先的桌面 PDF AI 阅读工作区，面向论文�
 - **本地优先**：PDF、索引、聊天历史、笔记、Provider 设置和 API Key 都保存在用户本机。
 - **证据优先**：回答应能回到当前 PDF 的页码、bbox 和原文 quote。
 - **无向量 Agentic RAG**：默认不依赖 embedding 模型和向量数据库。
+- **本地 Agent Provider**：可直接使用本机 Codex / Claude Code 订阅作为聊天模型，免单独配置 API key。
 - **版面级翻译**：把 PDF 翻译当成文档版面任务，而不是普通纯文本翻译。
 - **原文锚定笔记**：高亮和评注绑定到 PDF 坐标和原文片段，可跳回来源。
 
@@ -89,6 +90,23 @@ Question
 这种设计让检索可以在本地低成本运行，不依赖 embedding 模型质量，也更容易审计。它并不是要替代所有向量检索场景，而是专门优化单篇论文精读：结构、页内上下文和可验证 citation 比模糊语义召回更重要。
 
 对于支持原生工具调用（native tool calling）的模型，整个过程是一个统一的 agent loop：检索与回答共享同一段不断增长的上下文，因此 agent 能始终“记得”自己检索过什么。不支持工具调用的模型会回退到规则驱动的检索路径，弱模型 / 本地模型照样可用。Agent 还具备工作区感知：它能看到你整个已索引的文献库、回答关于库本身的问题（例如“我哪篇论文是关于 X 的”）、并把检索路由到正确的文档；库很大时按需发现文档，而不是把它们全部塞进 prompt。
+
+## 本地 Agent Provider（Codex / Claude Code）
+
+Lumenfolio 可以把本机已安装的 Codex 和 Claude Code CLI 变成“本地聊天模型”。如果你已经在终端登录过 Codex 或 Claude Code，Lumenfolio 可以自动检测它们，并在模型选择器里提供 `Codex (local)` / `Claude Code (local)` 选项。
+
+这条路径的重点不是再配置一个云端 API，而是把已有的本地 agent 订阅接入论文阅读工作流：
+
+- **免 API key**：走你本机已经登录的 Codex / Claude Code，不需要在 Lumenfolio 里单独填写模型 API key。
+- **自动检测与连接测试**：Settings 会显示本地 agent 是否安装、版本、安装入口，并可执行一次端到端 MCP 连接测试。
+- **Mode A：证据生成模式**：Lumenfolio 先完成本地检索，把 page / bbox / quote 证据交给本地 agent 生成回答。
+- **Mode B：Agentic MCP 模式**：在已索引的阅读器文档中，本地 Codex / Claude 可通过 Lumenfolio 暴露的只读 MCP 工具自行搜索段落、打开页面 / 章节、检查表格和视觉证据，再生成回答。
+- **实时工具轨迹**：Codex agent 调用 Lumenfolio 工具时，Chat 侧会展示“Searching the document / Reading pages / Inspecting figures”等 live trace。
+- **更长会话记忆**：本地 agent 路径会喂入更多历史问答上下文，适合连续追论文、改写问题和多轮核证。
+- **视觉证据进入 agent**：图、表格和页面视觉区域可以作为 crop 进入 MCP 结果，vision-capable agent 能看到实际图像证据。
+- **安全边界**：MCP server 每轮只在 `127.0.0.1` 启动，使用随机 bearer token，工具只读并且限定在当前文档的证据检索范围内。
+
+因此 Lumenfolio 不只是“接一个大模型回答 PDF”，而是把本地 PDF 证据层暴露给本机 agent：让 Codex / Claude Code 像读代码仓库一样，分步读取论文结构、证据、图表和上下文。
 
 ## Agent 会话
 
@@ -186,6 +204,8 @@ Agent 知道你当前在看什么,并能在 **任意视图** 越过当前 PDF �
 - 带 citation 的 agentic Q&A，支持单文档与跨文档
 - 工作区感知检索：agent 能看到并回答关于整个已索引库的问题，库大时按需发现文档
 - 面向支持工具调用模型的 native tool-calling agent loop，弱 / 本地模型自动回退到规则路径
+- 本地 Agent Provider：自动检测 Codex / Claude Code CLI，支持免 API key 的本机 agent 回答
+- 本地 agent MCP 模式：让 Codex / Claude 调用 Lumenfolio 只读工具检索页面、章节、表格和视觉证据
 - 跨文档对话：一次提问可 `@` 引用至多 4 篇其它已索引论文
 - 知识沉淀（摘要、实体、概念、关键词），逐文档、全本地
 - 跨文档知识图谱：阅读侧概念桥接图 + 全屏库级图谱（社区聚类与洞察）
@@ -221,6 +241,8 @@ Lumenfolio 是一个 Tauri 2 + Vue 3 桌面应用。
 - `src-tauri/src/runtime/rag/`：检索与证据组装
 - `src-tauri/src/runtime/agent/`：turn runner、policy gate、session memory、ledger、trace
 - `src-tauri/src/llm/agent_loop.rs`：统一的 native tool-calling agent loop
+- `src-tauri/src/local_agent.rs`：Codex / Claude Code CLI 检测、调用和本地 agent prompt
+- `src-tauri/src/local_agent/mcp_server.rs`：面向本地 agent 的 loopback MCP 工具服务器
 - `src-tauri/src/pdf2zh_sidecar/`：PDF 翻译 sidecar 管理
 - `docs/`：产品、架构与 runtime 方案文档
 
@@ -234,6 +256,8 @@ Lumenfolio 是一个 Tauri 2 + Vue 3 桌面应用。
 - 独立的多会话 Agent 工作区
 - Agentic 检索问答链路：native tool-calling 路径 + 规则回退
 - 面向整个已索引库的工作区感知检索，库大时按需发现文档
+- 本地 Codex / Claude Code agent provider 检测、选择、连接测试与持久化选择
+- 本地 agent Mode A（检索后生成）与 Mode B（通过 MCP 工具多步取证）
 - 跨多篇已索引论文的 `@` 引用对话
 - 按模型识别上下文窗口并支持手动覆盖
 - 带页码 / bbox 的 citation 跳转
@@ -298,6 +322,7 @@ npm run check:prod-no-testids
 - Lumenfolio 是 local-first，PDF 索引、笔记、聊天历史和翻译元数据默认保存在本地。
 - API Key 当前仍是本地存储，后续计划迁移到系统 keychain。
 - 如果配置云端模型或翻译 Provider，选中文本、问题、页面上下文或翻译内容可能会发送到对应服务商。
+- 如果选择本地 Codex / Claude Code provider，问题、对话记忆和检索到的 PDF 证据会交给对应本地 CLI；实际模型请求由该 CLI 及其账号订阅处理。
 
 ## 致谢
 

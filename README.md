@@ -13,9 +13,9 @@
   <p><a href="./README.zh-CN.md">中文文档 (Chinese README)</a></p>
 </div>
 
-Lumenfolio is a local-first desktop AI reading workspace for academic PDFs. It combines a focused PDF reader, vectorless agentic RAG, layout-aware translation, and evidence-anchored notes into one reading environment.
+Lumenfolio is a local-first desktop AI reading workspace for academic PDFs. It combines a focused PDF reader, vectorless agentic RAG, layout-aware translation, evidence-anchored notes, and local Codex / Claude Code agents into one reading environment.
 
-It is not just "chat over a PDF". Lumenfolio is built around local document evidence: pages, blocks, chunks, structure, tables, visual regions, citations, and bounding boxes that can point back to the original PDF.
+It is not just "chat over a PDF". Lumenfolio is built around local document evidence: pages, blocks, chunks, structure, tables, visual regions, citations, and bounding boxes that can point back to the original PDF. That evidence can also be exposed through local MCP tools so your signed-in Codex / Claude Code CLI can gather evidence and answer inside the reading workflow.
 
 ![Lumenfolio demo](./docs/assets/lumenfolio-demo.gif)
 
@@ -46,6 +46,7 @@ The core product principles are:
 - **Local-first by default**: PDFs, indexes, chat history, notes, provider settings, and API keys stay on the user's machine.
 - **Evidence-grounded answers**: answers are expected to cite page-level and bbox-level evidence from the current PDF.
 - **Vectorless agentic RAG**: retrieval does not require embeddings or a vector database.
+- **Local agent providers**: use a locally installed Codex or Claude Code subscription as a chat model, without configuring a separate API key in Lumenfolio.
 - **Layout-aware translation**: PDF translation is handled as a document-layout problem, not just plain text translation.
 - **Anchored notes**: highlights and comments are attached to PDF coordinates and quotes, so they can jump back to the source.
 
@@ -89,6 +90,23 @@ Question
 This makes retrieval cheap to run locally, independent from embedding model quality, and easier to audit. The goal is not to replace every vector-search use case; it is to optimize for single-document scholarly reading where structure, page context, and verifiable citations matter.
 
 On models that support native tool calling, this runs as a single agent loop: retrieval and answering share one growing context, so the agent stays aware of everything it has explored. Models without tool calling fall back to a rule-driven retrieval path, so weaker or local models keep working. The agent is also workspace-aware — it can see your whole indexed library, answer questions about it (for example "which of my papers is about X"), and route retrieval to the right document; for large libraries it discovers documents on demand instead of loading them all into the prompt.
+
+## Local Agent Providers (Codex / Claude Code)
+
+Lumenfolio can turn locally installed Codex and Claude Code CLIs into chat models. If you have already logged in from the terminal, Lumenfolio can detect them automatically and expose `Codex (local)` / `Claude Code (local)` in the model picker.
+
+This path is not another cloud API form. It connects your existing local agent subscription to the paper-reading workflow:
+
+- **No separate API key**: use the locally signed-in Codex / Claude Code CLI instead of storing another model API key in Lumenfolio.
+- **Auto-detection and connection test**: Settings shows install status, version, install links, and an end-to-end MCP connection test.
+- **Mode A: evidence-then-generate**: Lumenfolio retrieves page / bbox / quote evidence first, then asks the local agent to generate the answer from that evidence.
+- **Mode B: agentic MCP retrieval**: on an indexed reader document, local Codex / Claude can call Lumenfolio's read-only MCP tools to search passages, open pages / sections, inspect tables, and inspect visual evidence before answering.
+- **Live tool trace**: Codex tool calls appear in the chat activity stream as steps such as "Searching the document", "Reading pages", and "Inspecting figures".
+- **Richer conversation memory**: the local-agent path can feed much more prior Q&A context, which is useful for long paper-reading sessions and follow-up questions.
+- **Visual evidence for agents**: figure, table, and page crops can be returned through MCP results so vision-capable agents can inspect the actual image evidence.
+- **Scoped safety boundary**: the MCP server is started per turn on `127.0.0.1`, uses a random bearer token, exposes read-only tools, and is scoped to document evidence retrieval.
+
+In practice, Lumenfolio exposes its local PDF evidence layer to your local agent, so Codex / Claude Code can read a paper more like it reads a codebase: by stepping through structure, evidence, figures, tables, and context.
 
 ## Agent Sessions
 
@@ -186,6 +204,8 @@ The agent is aware of what you are looking at and can reach beyond the focused P
 - Agentic Q&A with citations, single- or cross-document
 - Workspace-aware retrieval: the agent can see and answer about your whole indexed library, with on-demand discovery for large libraries
 - Native tool-calling agent loop for capable models, with a rule-driven fallback for weaker/local models
+- Local agent providers: auto-detect Codex / Claude Code CLI and use them as no-extra-API-key local chat models
+- Local-agent MCP mode: let Codex / Claude call Lumenfolio read-only tools for pages, sections, tables, and visual evidence
 - Cross-document chat: `@`-mention up to 4 other indexed papers in one question
 - Knowledge precipitation (summary, entities, concepts, keywords) per document, fully local
 - Cross-document knowledge graph: reader-side concept-bridge graph + full-screen library graph with communities and insights
@@ -220,6 +240,8 @@ Key paths:
 - `src-tauri/src/runtime/rag/`: retrieval and evidence assembly
 - `src-tauri/src/runtime/agent/`: turn runner, policy gate, session memory, ledger, trace
 - `src-tauri/src/llm/agent_loop.rs`: unified native tool-calling agent loop
+- `src-tauri/src/local_agent.rs`: Codex / Claude Code CLI detection, invocation, and local-agent prompts
+- `src-tauri/src/local_agent/mcp_server.rs`: loopback MCP tool server for local agents
 - `src-tauri/src/pdf2zh_sidecar/`: PDF translation sidecar manager
 - `docs/`: product, architecture, and runtime plans
 
@@ -233,6 +255,8 @@ Implemented today:
 - Independent multi-session agent workspace
 - Agentic retrieval loop with a native tool-calling path and rule-based fallback
 - Workspace-aware retrieval across the indexed library, with large-library on-demand discovery
+- Local Codex / Claude Code agent provider detection, model selection, connection testing, and persisted preference
+- Local-agent Mode A (retrieve then generate) and Mode B (multi-step retrieval through MCP tools)
 - Cross-document `@`-mention chat across multiple indexed papers
 - Per-model context window detection and override
 - Citation-aware answers with page/bbox jump support
@@ -297,6 +321,7 @@ npm run check:prod-no-testids
 - Lumenfolio is local-first. PDF indexes, notes, chat history, and translation metadata are stored locally.
 - API keys are currently stored locally; migration to the system keychain is planned.
 - If a cloud chat or translation provider is configured, selected text, questions, page context, or translation content may be sent to that provider.
+- If you choose a local Codex / Claude Code provider, questions, conversation memory, and retrieved PDF evidence are passed to that local CLI; the actual model request is handled by the CLI and its signed-in account/subscription.
 
 ## Acknowledgements
 
