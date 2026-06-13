@@ -455,6 +455,7 @@ onBeforeUnmount(() => {
   clearScrollbarFadeTimer()
   clearCopyStatusTimer()
   if (pageSyncSuppressTimer) window.clearTimeout(pageSyncSuppressTimer)
+  if (scrollFrame) cancelAnimationFrame(scrollFrame)
   cancelAssistPointerFrame()
   cancelLinkedPointerFrame()
   cancelOngoingRender()
@@ -829,12 +830,20 @@ function zoomBy(delta) {
   return setScale(scale.value + delta)
 }
 
+let scrollFrame = 0
 function handleScroll() {
   clearAssistHover({ immediate: true })
-  if (!suppressScrollPageChange) updateCurrentPageFromScroll()
-  renderVisiblePages()
-  emitViewerState()
   showScrollbarWhileScrolling()
+  // Raw scroll fires far more often than one frame, and each renderVisiblePages()
+  // can cost tens-to-hundreds of ms on large PDFs. Coalesce the heavy work (page
+  // sync + canvas render + state emit) to one pass per animation frame.
+  if (scrollFrame) return
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = 0
+    if (!suppressScrollPageChange) updateCurrentPageFromScroll()
+    renderVisiblePages()
+    emitViewerState()
+  })
 }
 
 function showScrollbarWhileScrolling() {

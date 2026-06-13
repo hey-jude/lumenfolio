@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 use rusqlite::Connection;
 
@@ -9,8 +9,30 @@ pub(crate) fn open_database(path: &Path) -> Result<Connection, String> {
         .map_err(|err| format!("Failed to enable SQLite WAL: {err}"))?;
     conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(|err| format!("Failed to enable SQLite foreign keys: {err}"))?;
+    // Wait (rather than fail) when another connection — e.g. the dedicated index
+    // writer — briefly holds the write lock.
+    conn.busy_timeout(Duration::from_secs(30))
+        .map_err(|err| format!("Failed to set SQLite busy timeout: {err}"))?;
     migrate_database(&conn)?;
     reset_interrupted_index_jobs(&conn)?;
+    Ok(conn)
+}
+
+/// A second connection to the same on-disk database used for the long-running
+/// document index write. Keeping the heavy transaction off the app's shared
+/// `Mutex<Connection>` lets concurrent reads (page loads, clicks, scroll) proceed
+/// under WAL while the index runs, instead of freezing the UI. Schema already
+/// exists (the primary connection migrated it), so this neither migrates nor
+/// resets jobs.
+pub(crate) fn open_index_writer(path: &Path) -> Result<Connection, String> {
+    let conn = Connection::open(path)
+        .map_err(|err| format!("Failed to open index writer for {}: {err}", path.display()))?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|err| format!("Failed to enable WAL on index writer: {err}"))?;
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .map_err(|err| format!("Failed to enable foreign keys on index writer: {err}"))?;
+    conn.busy_timeout(Duration::from_secs(60))
+        .map_err(|err| format!("Failed to set index writer busy timeout: {err}"))?;
     Ok(conn)
 }
 

@@ -32,10 +32,39 @@ fn upsert_document_index_job_with_progress(
 ) -> Result<DocumentIndexResult, String> {
     let document_id = input.document_id.clone();
     let page_count = input.page_count;
-    let mut conn = database
+
+    // Run the long index write on a dedicated connection to the same DB file so
+    // app reads (page loads, clicks, scroll) keep flowing under WAL instead of
+    // blocking on the shared `Mutex<Connection>` for the whole transaction.
+    // In-memory test DBs have no file path → a second connection would be a
+    // different empty DB, so fall back to the shared connection there.
+    let db_path = database
         .conn
         .lock()
-        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        .ok()
+        .and_then(|conn| conn.path().map(std::path::PathBuf::from))
+        .filter(|path| !path.as_os_str().is_empty() && path.to_str() != Some(":memory:"));
+
+    let mut dedicated = match &db_path {
+        Some(path) => Some(crate::storage::open_index_writer(path)?),
+        None => None,
+    };
+    let mut shared_guard = if dedicated.is_none() {
+        Some(
+            database
+                .conn
+                .lock()
+                .map_err(|_| "SQLite lock was poisoned".to_string())?,
+        )
+    } else {
+        None
+    };
+    let conn: &mut rusqlite::Connection = match (dedicated.as_mut(), shared_guard.as_mut()) {
+        (Some(conn), _) => conn,
+        (None, Some(guard)) => guard,
+        (None, None) => unreachable!("either a dedicated or shared connection is set"),
+    };
+
     let tx = conn
         .transaction()
         .map_err(|err| format!("Failed to start index transaction: {err}"))?;
