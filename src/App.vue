@@ -649,7 +649,9 @@ const localAgentChatModels = computed(() => (
       modelKey: 'default',
       modelId: agent.kind,
       label: `${agent.label} (local)`,
-      capabilities: ['text'],
+      // Codex takes images via `codex exec -i`; Claude's headless `-p` has no image
+      // flag, so it stays text-only. This flag gates the chat composer's paste/attach.
+      capabilities: agent.kind === 'codex' ? ['text', 'vision'] : ['text'],
     }))
 ))
 const configuredChatModels = computed(() => ([
