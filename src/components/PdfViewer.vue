@@ -695,9 +695,14 @@ async function renderPage(pageNumber) {
     bumpPerf('textLayerRender(await)', performance.now() - __tl0)
     textLayerTasks.delete(clampedPage)
 
-    const rendered = new Set(renderedPageKeys.value)
-    rendered.add(renderKey)
-    renderedPageKeys.value = rendered
+    // Only mark the page rendered if its canvas is still mounted/connected: the
+    // window may have scrolled past it mid-render and unmounted the canvas. Marking
+    // a detached canvas 'done' would leave a permanently blank page when it returns.
+    if (isPageMounted(clampedPage) && canvas.isConnected) {
+      const rendered = new Set(renderedPageKeys.value)
+      rendered.add(renderKey)
+      renderedPageKeys.value = rendered
+    }
   } catch (err) {
     if (isCancellationError(err)) return
     if (run === renderRun) {
@@ -720,6 +725,19 @@ function isPageMounted(pageNumber) {
   return pageNumber >= mountStart.value && pageNumber <= mountEnd.value
 }
 
+function cancelPageRender(pageNumber) {
+  const entry = renderTasks.get(pageNumber)
+  if (entry) {
+    entry.task?.cancel?.()
+    renderTasks.delete(pageNumber)
+  }
+  const textLayer = textLayerTasks.get(pageNumber)
+  if (textLayer) {
+    textLayer.cancel?.()
+    textLayerTasks.delete(pageNumber)
+  }
+}
+
 function setMountWindow(start, end) {
   const total = pageCount.value || Math.max(start, end)
   const lo = Math.max(1, Math.min(start, end))
@@ -727,6 +745,12 @@ function setMountWindow(start, end) {
   if (lo === mountStart.value && hi === mountEnd.value) return
   mountStart.value = lo
   mountEnd.value = hi
+  // Cancel in-flight renders for pages leaving the window: their canvas/text layer
+  // unmount, so the work is wasted and (if left to finish) would mark a detached
+  // canvas as rendered. Snapshot keys first — cancelPageRender mutates the maps.
+  for (const pageNumber of [...renderTasks.keys(), ...textLayerTasks.keys()]) {
+    if (pageNumber < lo || pageNumber > hi) cancelPageRender(pageNumber)
+  }
   // A page whose canvas just unmounted must re-render when it returns, so drop its
   // render key — otherwise renderPage would treat the fresh blank canvas as done.
   if (renderedPageKeys.value.size) {

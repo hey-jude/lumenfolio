@@ -2,17 +2,28 @@ use std::{path::Path, time::Duration};
 
 use rusqlite::Connection;
 
-pub(crate) fn open_database(path: &Path) -> Result<Connection, String> {
-    let conn = Connection::open(path)
-        .map_err(|err| format!("Failed to open SQLite database {}: {err}", path.display()))?;
+/// Shared pragmas for every connection to the database. `busy_timeout` is opt-in:
+/// the app connection deliberately leaves it at 0 (fail fast) so that a write which
+/// loses the race to the dedicated index writer releases the shared `Mutex<Connection>`
+/// immediately instead of holding it — and freezing reads — for the whole index.
+fn configure_connection(conn: &Connection, busy_timeout: Option<Duration>) -> Result<(), String> {
     conn.pragma_update(None, "journal_mode", "WAL")
         .map_err(|err| format!("Failed to enable SQLite WAL: {err}"))?;
     conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(|err| format!("Failed to enable SQLite foreign keys: {err}"))?;
-    // Wait (rather than fail) when another connection — e.g. the dedicated index
-    // writer — briefly holds the write lock.
-    conn.busy_timeout(Duration::from_secs(30))
-        .map_err(|err| format!("Failed to set SQLite busy timeout: {err}"))?;
+    if let Some(timeout) = busy_timeout {
+        conn.busy_timeout(timeout)
+            .map_err(|err| format!("Failed to set SQLite busy timeout: {err}"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn open_database(path: &Path) -> Result<Connection, String> {
+    let conn = Connection::open(path)
+        .map_err(|err| format!("Failed to open SQLite database {}: {err}", path.display()))?;
+    // No busy_timeout: an app write contending with the index writer fails fast and
+    // frees the shared mutex rather than blocking reads (reads never contend — WAL).
+    configure_connection(&conn, None)?;
     migrate_database(&conn)?;
     reset_interrupted_index_jobs(&conn)?;
     Ok(conn)
@@ -23,16 +34,12 @@ pub(crate) fn open_database(path: &Path) -> Result<Connection, String> {
 /// `Mutex<Connection>` lets concurrent reads (page loads, clicks, scroll) proceed
 /// under WAL while the index runs, instead of freezing the UI. Schema already
 /// exists (the primary connection migrated it), so this neither migrates nor
-/// resets jobs.
+/// resets jobs. It waits (busy_timeout) at transaction start for any brief
+/// in-flight app write to finish.
 pub(crate) fn open_index_writer(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path)
         .map_err(|err| format!("Failed to open index writer for {}: {err}", path.display()))?;
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|err| format!("Failed to enable WAL on index writer: {err}"))?;
-    conn.pragma_update(None, "foreign_keys", "ON")
-        .map_err(|err| format!("Failed to enable foreign keys on index writer: {err}"))?;
-    conn.busy_timeout(Duration::from_secs(60))
-        .map_err(|err| format!("Failed to set index writer busy timeout: {err}"))?;
+    configure_connection(&conn, Some(Duration::from_secs(60)))?;
     Ok(conn)
 }
 
