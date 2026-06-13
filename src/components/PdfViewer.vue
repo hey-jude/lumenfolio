@@ -17,6 +17,12 @@ const pdfRuntimeOptions = {
 }
 
 const RENDER_BUFFER_PX = 900
+// Mount the heavy per-page DOM (canvas, text layer, highlight layers) only for a
+// window around the viewport — for a 3000-page PDF, mounting all of it at once is
+// the dominant open/scroll freeze. The window is wider than the render buffer so
+// pages are in the DOM before they need drawing.
+const MOUNT_BUFFER_PX = 2600
+const MOUNT_EXTRA_PAGES = 4
 const MIN_SCALE = 0.7
 const MAX_SCALE = 2.4
 const HOVER_ASSIST_ENABLED = false
@@ -620,6 +626,13 @@ async function renderPage(pageNumber) {
   const renderToken = Symbol(`render-${clampedPage}`)
   renderTasks.set(clampedPage, { token: renderToken, task: null })
   try {
+    // Heavy DOM is windowed: ensure this page's canvas/text layer are mounted
+    // before drawing (covers direct callers like goToPage / citation jumps).
+    if (!isPageMounted(clampedPage)) {
+      ensurePageMounted(clampedPage)
+      await nextTick()
+      if (run !== renderRun) return
+    }
     const page = await pdf.getPage(clampedPage)
     if (run !== renderRun) return
 
@@ -699,14 +712,54 @@ async function renderPage(pageNumber) {
   }
 }
 
+// The contiguous page window whose heavy DOM is mounted (see MOUNT_BUFFER_PX).
+const mountStart = ref(1)
+const mountEnd = ref(1)
+
+function isPageMounted(pageNumber) {
+  return pageNumber >= mountStart.value && pageNumber <= mountEnd.value
+}
+
+function setMountWindow(start, end) {
+  const total = pageCount.value || Math.max(start, end)
+  const lo = Math.max(1, Math.min(start, end))
+  const hi = Math.min(total, Math.max(start, end))
+  if (lo === mountStart.value && hi === mountEnd.value) return
+  mountStart.value = lo
+  mountEnd.value = hi
+  // A page whose canvas just unmounted must re-render when it returns, so drop its
+  // render key — otherwise renderPage would treat the fresh blank canvas as done.
+  if (renderedPageKeys.value.size) {
+    let changed = false
+    const kept = new Set()
+    for (const key of renderedPageKeys.value) {
+      const page = Number(key.slice(0, key.indexOf('@')))
+      if (page >= lo && page <= hi) kept.add(key)
+      else changed = true
+    }
+    if (changed) renderedPageKeys.value = kept
+  }
+}
+
+// Make a specific page renderable now (e.g. a citation jump far outside the
+// current window) by centering the mount window on it.
+function ensurePageMounted(pageNumber) {
+  if (isPageMounted(pageNumber)) return
+  setMountWindow(pageNumber - MOUNT_EXTRA_PAGES, pageNumber + MOUNT_EXTRA_PAGES)
+}
+
 function renderVisiblePages() {
   if (!pdfScroll.value || !pdfDocument.value || loading.value || error.value) return
-  const { start, end } = visiblePageRange(RENDER_BUFFER_PX, 2)
-  // eslint-disable-next-line no-console
-  console.log(`[pdf-perf] renderVisiblePages pages ${start}..${end} (scale=${scale.value})`)
-  for (let pageNo = start; pageNo <= end; pageNo += 1) {
-    renderPage(pageNo)
-  }
+  // Mount the heavy DOM for a window around the viewport (and unmount the rest),
+  // then draw the visible subset once the new pages are in the DOM.
+  const mount = visiblePageRange(MOUNT_BUFFER_PX, MOUNT_EXTRA_PAGES)
+  setMountWindow(mount.start, mount.end)
+  nextTick(() => {
+    const { start, end } = visiblePageRange(RENDER_BUFFER_PX, 2)
+    for (let pageNo = start; pageNo <= end; pageNo += 1) {
+      renderPage(pageNo)
+    }
+  })
 }
 
 function getRenderKey(pageNumber) {
@@ -2023,6 +2076,7 @@ defineExpose({
           @mousemove="handlePagePointerMove($event, pageNumber)"
           @mouseleave="handleAssistPointerLeave"
         >
+          <template v-if="isPageMounted(pageNumber)">
           <canvas class="pdf-canvas"></canvas>
           <div class="textLayer pdf-text-layer"></div>
           <div class="highlight-layer" aria-hidden="true">
@@ -2084,6 +2138,7 @@ defineExpose({
               }"
             ></span>
           </div>
+          </template>
         </div>
 
         <div
