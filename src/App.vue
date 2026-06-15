@@ -4296,9 +4296,12 @@ function createLocalDocument(pdf) {
     },
     pageCount: pdf.page_count || 0,
     currentPage: pdf.current_page || 1,
-    chatModelId: chatModelConfigured.value
-      ? configuredChatModels.value[0]?.id || ''
-      : UNCONFIGURED_CHAT_MODEL_ID,
+    // Don't pin a specific model on a freshly-loaded doc — that hardcoded the first
+    // configured model (an HTTP provider, since those precede local agents in the
+    // list), so opening a doc clobbered the user's current pick (e.g. Codex) with
+    // e.g. deepseek. UNCONFIGURED makes applySelectedChatModel resolve to the global
+    // default, which honors the user's last explicit pick (lastChatModelId).
+    chatModelId: UNCONFIGURED_CHAT_MODEL_ID,
     quoteBlockId: '',
     chatReady: indexFresh,
     translation: {
