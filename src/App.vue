@@ -402,7 +402,12 @@ function upsertSessionFromBackend(row) {
     updatedAt: row.updatedAt || 0,
   }
   chatSessions.set(row.id, session)
-  return session
+  // Return the reactive proxy from the Map, not the raw object: callers mutate the
+  // returned session (e.g. handleSend pushes messages), and mutating the raw object
+  // bypasses reactivity, so the first message in a freshly-created session (common
+  // on the Trending page, where no session is active yet) wouldn't render until a
+  // later mutation forced a re-render.
+  return chatSessions.get(row.id)
 }
 
 async function loadSessionList() {
