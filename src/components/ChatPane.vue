@@ -1389,11 +1389,24 @@ function evidenceGroups(message) {
   return groups
 }
 
+// Only show evidence the user can act on: a chip is useful when clicking it jumps
+// the reader (page anchor) or opens a referenced document. Discovery results like
+// trending papers have no documentId and page 0 — they aren't clickable, so a strip
+// of "trending paper (daily)" chips is just confusing noise. Drop them (and the
+// whole strip hides when nothing actionable is left).
+function isActionableEvidenceGroup(group) {
+  return Boolean(group.documentId) || Number(group.page) > 0
+}
+
+function actionableEvidenceGroups(message) {
+  return evidenceGroups(message).filter(isActionableEvidenceGroup)
+}
+
 // Collapsed preview: first-per-document guaranteed (so cross-doc pages aren't
 // buried under "+N"), capped. Independent of expand state so the +N/Collapse
 // toggle stays visible while expanded.
 function evidenceGroupPreview(message) {
-  const groups = evidenceGroups(message)
+  const groups = actionableEvidenceGroups(message)
   const docs = answerSourceDocs(message)
   if (docs.length <= 1) return groups.slice(0, 6)
   const cap = Math.max(6, docs.length)
@@ -1416,11 +1429,11 @@ function evidenceGroupPreview(message) {
 
 // Chips actually rendered: every page when expanded, else the preview.
 function evidenceDisplayGroups(message) {
-  return isEvidenceExpanded(message) ? evidenceGroups(message) : evidenceGroupPreview(message)
+  return isEvidenceExpanded(message) ? actionableEvidenceGroups(message) : evidenceGroupPreview(message)
 }
 
 function evidenceHiddenCount(message) {
-  return evidenceGroups(message).length - evidenceGroupPreview(message).length
+  return actionableEvidenceGroups(message).length - evidenceGroupPreview(message).length
 }
 
 function isEvidenceGroupActive(group) {
@@ -1904,7 +1917,7 @@ function evidenceSourceLabel(source) {
             </div>
             <div v-if="message.provider" class="message-provider">{{ message.provider }}</div>
 
-            <div v-if="evidenceItems(message).length" class="evidence-group">
+            <div v-if="actionableEvidenceGroups(message).length" class="evidence-group">
               <div v-if="answerSourceDocs(message).length" class="evidence-sources">
                 <span class="evidence-sources-label">{{ ui.sources }}</span>
                 <button
