@@ -455,13 +455,15 @@ pub(crate) enum AgentToolPhase {
 pub(crate) fn build_agentic_prompt(
     question: &str,
     session_context: &str,
+    view_note: Option<&str>,
     locale: Option<&str>,
 ) -> String {
     let lang_directive = language_directive(locale);
     let mut prompt = format!(
         "You are Lumenfolio, a careful academic PDF reading assistant. {lang_directive} \
-You have MCP tools (server `lumenfolio`) that retrieve evidence from the user's open PDF: \
-search passages, open specific pages/sections, and inspect tables/figures. \
+You have MCP tools (server `lumenfolio`) that retrieve evidence from the user's open PDF \
+(search passages, open pages/sections, inspect tables/figures) and from their wider library \
+(list_trending_papers, search_library_knowledge, query_knowledge_graph). \
 Decide what the question needs: if it is about the open document (its content, methods, results, \
 figures, or claims), use the tools to gather evidence first, then answer grounded ONLY in what the \
 tools return — if they surface nothing relevant, say so plainly. If instead it is a general or \
@@ -471,6 +473,11 @@ not imply the document covers it. \
 Write a concise, well-structured Markdown answer (a short direct answer first, then detail). \
 Only use the `lumenfolio` tools — do not read local files or run shell commands.\n\n"
     );
+    if let Some(note) = view_note.map(str::trim).filter(|note| !note.is_empty()) {
+        prompt.push_str("Current view:\n");
+        prompt.push_str(note);
+        prompt.push_str("\n\n");
+    }
     let session_context = session_context.trim();
     if !session_context.is_empty() {
         prompt.push_str("Conversation memory:\n");
@@ -840,13 +847,20 @@ mod tests {
 
     #[test]
     fn build_agentic_prompt_instructs_tool_use_not_embedded_evidence() {
-        let p = build_agentic_prompt("What is X?", "prior: Y", Some("zh"));
+        let p = build_agentic_prompt(
+            "What is X?",
+            "prior: Y",
+            Some("The user is currently viewing the Trending Papers list (period: weekly)."),
+            Some("zh"),
+        );
         assert!(p.contains("SAME language as the user's Question"));
         // Mode B tells the agent to call the lumenfolio tools itself...
         assert!(p.contains("lumenfolio"));
         assert!(p.to_lowercase().contains("search"));
         assert!(p.contains("What is X?"));
         assert!(p.contains("prior: Y"));
+        // ...the current-view note is surfaced so it reaches for the right tool...
+        assert!(p.contains("Trending Papers list (period: weekly)"));
         // ...and must NOT carry the Mode-A "do not call tools" instruction.
         assert!(!p.contains("Do NOT call tools"));
     }

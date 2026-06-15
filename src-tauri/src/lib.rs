@@ -901,6 +901,7 @@ async fn test_local_agent_connection(
     let prompt = local_agent::build_agentic_prompt(
         "Call the document search tool once for any keyword you like, then reply with exactly: OK.",
         "",
+        None,
         Some("en"),
     );
 
@@ -2840,18 +2841,30 @@ async fn run_ask_document(
     if let Some(kind) = local_agent::provider_id_kind(selected_provider_id) {
         unified_attempted = true;
 
-        // Mode B (agentic, P2): when the user is reading a focused, indexed
-        // document, let the local CLI call Lumenfolio's tools over a loopback MCP
-        // server and do its own multi-step retrieval. Off the reader (trending /
-        // graph) or for an unindexed doc, fall back to Mode A (generate from the
-        // seed retrieval, which also covers the context tools the doc-scoped MCP
-        // server doesn't expose).
-        let on_reader = input
-            .view_context
-            .as_ref()
-            .and_then(|v| v.surface.as_deref())
-            .map(|s| s == "reader")
-            .unwrap_or(true);
+        // Mode B (agentic, P2): whenever a focused, indexed document exists, let the
+        // local CLI call Lumenfolio's tools over a loopback MCP server (document +
+        // library + trending + knowledge-graph tools) and do its own multi-step
+        // retrieval. Only an unindexed/missing document falls back to Mode A.
+        // A short note tells the agent what the user is looking at, so off the reader
+        // (e.g. Trending) it reaches for list_trending_papers rather than the open doc.
+        let view_note = input.view_context.as_ref().and_then(|v| {
+            match v.surface.as_deref() {
+                Some("trending") => {
+                    let period = v.trending_period.as_deref().unwrap_or("daily");
+                    Some(format!(
+                        "The user is currently viewing the Trending Papers list (period: {period}). \
+For questions about what is trending or high-value there, call list_trending_papers \
+(period=\"{period}\") instead of searching the open document."
+                    ))
+                }
+                Some("graph") => Some(
+                    "The user is currently viewing the cross-document Knowledge Graph; for \
+questions spanning their library use search_library_knowledge / query_knowledge_graph."
+                        .to_string(),
+                ),
+                _ => None,
+            }
+        });
         let (db_path, doc_indexed, local_memory) = match database.conn.lock() {
             Ok(conn) => {
                 let path = conn.path().map(|p| p.to_string());
@@ -2881,7 +2894,7 @@ async fn run_ask_document(
             local_memory
         };
 
-        if on_reader && doc_indexed {
+        if doc_indexed {
             agent_judge::emit_agent_activity(
                 app,
                 activity_event_id.as_deref(),
@@ -2897,6 +2910,7 @@ async fn run_ask_document(
             let prompt = local_agent::build_agentic_prompt(
                 question,
                 &session_memory,
+                view_note.as_deref(),
                 input.locale.as_deref(),
             );
             // Live trace: relay each MCP tool-call step to the chat activity drawer.

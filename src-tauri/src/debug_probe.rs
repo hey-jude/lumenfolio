@@ -647,7 +647,13 @@ pub async fn run_agentic_probe_from_env() -> Result<(), String> {
         ))
     });
 
-    let prompt = crate::local_agent::build_agentic_prompt(&question, "", Some("en"));
+    let view_note = env::var("LUMEN_VERIFY_VIEW").ok();
+    let prompt = crate::local_agent::build_agentic_prompt(
+        &question,
+        "",
+        view_note.as_deref(),
+        Some("en"),
+    );
     let outcome = crate::local_agent::generate_answer_agentic(
         kind,
         PathBuf::from(db),
