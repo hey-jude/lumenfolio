@@ -2017,6 +2017,72 @@ function messageDisplayText(message) {
     : String(message.content || '')
 }
 
+// Render the active chat session as Markdown: per-turn user question + assistant
+// answer + the answer's sources (page/section/quote). Reasoning and trace are
+// intentionally left out for a clean, shareable document.
+function buildChatMarkdown(session) {
+  const title = sessionTabTitle(session) || ui.value.newSession
+  const dateStr = new Date().toISOString().slice(0, 10)
+  const context = session.focusDocTitle || chatBrowsingLabel.value || ''
+  const userLabel = locale.value === 'zh' ? '用户' : 'User'
+  const out = [`# ${title}`, '', `> Lumenfolio · ${dateStr}${context ? ` · ${context}` : ''}`, '']
+  for (const message of session.messages || []) {
+    const text = messageDisplayText(message).trim()
+    if (message.role === 'user') {
+      out.push(`## 🧑 ${userLabel}`, '')
+      out.push(text || '_(empty)_')
+      if (message.imageDataUrl) out.push('', `_[${locale.value === 'zh' ? '附图' : 'image attached'}]_`)
+      out.push('')
+    } else if (message.role === 'assistant') {
+      const provider = message.provider ? ` · ${message.provider}` : ''
+      out.push(`## 🤖 ${locale.value === 'zh' ? '助手' : 'Assistant'}${provider}`, '')
+      out.push(text || '_(no answer)_')
+      const citations = message.citations || []
+      if (citations.length) {
+        out.push('', `**${ui.value.sources}:**`)
+        for (const c of citations) {
+          const page = Number(c.page) > 0 ? ` p${c.page}` : ''
+          const section = c.sectionTitle ? ` — ${c.sectionTitle}` : ''
+          const quote = String(c.quote || '').replace(/\s+/g, ' ').trim()
+          const quoteShort = quote.length > 200 ? `${quote.slice(0, 200)}…` : quote
+          out.push(`- ${c.label || '•'}${page}${section}${quoteShort ? `: ${quoteShort}` : ''}`)
+        }
+      }
+      out.push('')
+    }
+    out.push('---', '')
+  }
+  return out.join('\n')
+}
+
+const transientToast = ref('')
+let transientToastTimer = null
+function showToast(text) {
+  transientToast.value = text
+  if (transientToastTimer) window.clearTimeout(transientToastTimer)
+  transientToastTimer = window.setTimeout(() => { transientToast.value = '' }, 2600)
+}
+
+async function handleExportChat() {
+  const session = activeSession.value
+  if (!session || !(session.messages || []).some((message) => messageDisplayText(message).trim())) {
+    showToast(ui.value.exportChatEmpty)
+    return
+  }
+  const markdown = buildChatMarkdown(session)
+  const safeTitle = ((sessionTabTitle(session) || 'chat')
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .slice(0, 60)
+    .trim()) || 'chat'
+  const defaultName = `lumenfolio-${safeTitle}-${new Date().toISOString().slice(0, 10)}.md`
+  try {
+    const saved = await invoke('export_markdown_file', { defaultName, content: markdown })
+    if (saved) showToast(ui.value.exportChatDone)
+  } catch (err) {
+    console.warn('Failed to export chat', err)
+  }
+}
+
 function setMessageDisplayText(message, text) {
   message.content = {
     en: text,
@@ -4562,6 +4628,9 @@ onMounted(() => {
         @click="dismissUpdateBanner"
       >×</button>
     </div>
+    <div v-if="transientToast" class="update-banner" role="status">
+      <span class="update-banner-text">{{ transientToast }}</span>
+    </div>
     <WorkspaceSidebar
       :roots="workspace.roots"
       :selected-doc-id="selectedDocId"
@@ -4726,6 +4795,7 @@ onMounted(() => {
       @clear-selection="clearPendingSelection"
       @clear-history="openClearChatHistoryConfirm"
       @new-session="handleNewSession"
+      @export-chat="handleExportChat"
       @select-session="setActiveSession"
       @close-session="closeSessionTab"
       @delete-session="deleteSessionById"

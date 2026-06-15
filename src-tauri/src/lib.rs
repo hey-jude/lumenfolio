@@ -785,6 +785,22 @@ fn choose_pdf_files() -> Result<Vec<String>, String> {
         .unwrap_or_default())
 }
 
+/// Save text (e.g. a chat exported as Markdown) to a user-chosen file via the
+/// native "Save as" dialog. Returns the saved path, or None if cancelled.
+#[tauri::command]
+fn export_markdown_file(default_name: String, content: String) -> Result<Option<String>, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Export chat as Markdown")
+        .set_file_name(&default_name)
+        .add_filter("Markdown", &["md"])
+        .save_file()
+    else {
+        return Ok(None);
+    };
+    std::fs::write(&path, content).map_err(|err| format!("Failed to write file: {err}"))?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
 #[tauri::command]
 fn open_path_in_file_manager(path: String) -> Result<(), String> {
     let trimmed = path.trim();
@@ -5122,6 +5138,7 @@ pub fn run() {
             open_external_url,
             local_agent::get_local_agent_status,
             test_local_agent_connection,
+            export_markdown_file,
             load_last_workspace,
             read_pdf_bytes,
             pdf2zh_sidecar::read_pdf_artifact_bytes,

@@ -109,6 +109,7 @@ const emit = defineEmits([
   'clear-history',
   'set-tab',
   'new-session',
+  'export-chat',
   'select-session',
   'close-session',
   'delete-session',
@@ -1664,9 +1665,23 @@ function evidenceSourceLabel(source) {
           @mousedown.stop
           @click="emit('set-focus-doc', viewedDocId)"
         >{{ ui.focusOnCurrent }}</button>
+        <div class="subtitle-actions">
         <button
           type="button"
-          class="chat-icon-btn focus-clear-btn"
+          class="chat-icon-btn subtitle-action-btn"
+          :title="ui.exportChat"
+          :aria-label="ui.exportChat"
+          @mousedown.stop
+          @click="emit('export-chat')"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3v11m0 0 4-4m-4 4-4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M5 20h14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="chat-icon-btn subtitle-action-btn"
           :disabled="!hasChatHistory"
           :title="ui.clearChatHistory"
           :aria-label="ui.clearChatHistory"
@@ -1684,6 +1699,7 @@ function evidenceSourceLabel(source) {
             />
           </svg>
         </button>
+        </div>
       </div>
       <div
         v-if="historyOpen"
@@ -2302,14 +2318,22 @@ function evidenceSourceLabel(source) {
 }
 
 /* Clear-history button lives at the far right of the Focus row. */
-.focus-clear-btn {
+/* Right-aligned cluster of per-conversation actions (export, clear) kept adjacent. */
+.subtitle-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.subtitle-action-btn {
   width: 24px;
   height: 24px;
   flex-shrink: 0;
 }
 
-.focus-clear-btn svg {
+.subtitle-action-btn svg {
   width: 13px;
   height: 13px;
 }
