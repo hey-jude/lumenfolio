@@ -2,6 +2,11 @@
 import { computed } from 'vue'
 import MarkdownIt from 'markdown-it'
 import linkAttributes from 'markdown-it-link-attributes'
+import mdKatexImport from '@vscode/markdown-it-katex'
+import 'katex/dist/katex.min.css'
+
+// The plugin ships as CommonJS ({ default: fn }); take the callable.
+const markdownItKatex = mdKatexImport?.default || mdKatexImport
 
 const props = defineProps({
   text: {
@@ -31,17 +36,26 @@ md.use(linkAttributes, {
   },
 })
 
+// Render LaTeX math ($...$, $$...$$, and — after normalization — \(...\), \[...\]).
+// throwOnError:false renders a red error span instead of breaking the whole message.
+md.use(markdownItKatex, { throwOnError: false })
+
 const renderedMarkdown = computed(() => md.render(normalizeMathDelimiters(props.text || '')))
 const renderedWithStreamBubble = computed(() => (
   `${renderedMarkdown.value}<span class="stream-bubble" aria-hidden="true"></span>`
 ))
 
+// LLMs emit math with mixed delimiters; map them all to $-delimiters the KaTeX
+// plugin handles uniformly. First collapse any double-escaped backslashes (\\( ->
+// \(), then convert \[...\] to block $$ and \(...\) to inline $.
 function normalizeMathDelimiters(value) {
   return String(value || '')
     .replace(/\\\\\(/g, '\\(')
     .replace(/\\\\\)/g, '\\)')
     .replace(/\\\\\[/g, '\\[')
     .replace(/\\\\\]/g, '\\]')
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, body) => `\n\n$$\n${body.trim()}\n$$\n\n`)
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_, body) => `$${body.trim()}$`)
 }
 
 function escapeHtml(value) {
