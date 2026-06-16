@@ -100,6 +100,18 @@ function conceptKey(normalized) {
   return `c:${normalized}`
 }
 
+// Document node labels come from the raw filename ("2606.12883 The Hidden Power…
+// .pdf"), which is long and noisy on the graph. Drop the extension and a leading
+// arXiv id, then cap the length so labels stay legible and don't overlap.
+function cleanGraphLabel(title) {
+  let label = String(title || '')
+    .replace(/\.pdf$/i, '')
+    .replace(/^\s*\d{4}\.\d{4,5}(v\d+)?[\s_-]*/, '')
+    .trim()
+  if (label.length > 34) label = `${label.slice(0, 34).trim()}…`
+  return label || String(title || '').trim()
+}
+
 // Structural insights computed on the full graph: surprising cross-community
 // links, isolated documents (knowledge gaps), and bridge documents.
 function analyzeInsights(g) {
@@ -195,7 +207,7 @@ function buildGraph() {
 
   for (const doc of documents) {
     if (!g.hasNode(doc.id)) {
-      g.addNode(doc.id, { kind: 'document', label: doc.title || doc.id })
+      g.addNode(doc.id, { kind: 'document', label: cleanGraphLabel(doc.title) || doc.id })
     }
   }
 
@@ -429,6 +441,11 @@ async function render() {
     renderLabels: true,
     labelDensity: 0.6,
     labelRenderedSizeThreshold: 7,
+    // Default label color is black — invisible on the dark graph overlay.
+    labelColor: { color: '#c8d0e0' },
+    labelSize: 12,
+    labelWeight: '500',
+    labelFont: 'Inter, system-ui, -apple-system, sans-serif',
     defaultEdgeColor: 'rgba(120,130,150,0.25)',
     nodeReducer: (node, attrs) => {
       const res = { ...attrs }
