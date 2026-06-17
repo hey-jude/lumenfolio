@@ -770,6 +770,31 @@ struct OpenAiChatChunkDelta {
     content: Option<String>,
     reasoning_content: Option<String>,
     reasoning: Option<String>,
+    // Streamed native tool calls (the agent loop accumulates these across chunks
+    // by `index`). Ignored by the plain answer-stream path, which never offers tools.
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAiStreamToolCall>>,
+}
+
+/// One fragment of a streamed tool call. The `id`/`function.name` arrive in the
+/// first chunk for a given `index`; the `function.arguments` are split across
+/// subsequent chunks and must be concatenated in arrival order.
+#[derive(Deserialize)]
+struct OpenAiStreamToolCall {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<OpenAiStreamToolCallFunction>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiStreamToolCallFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2215,9 +2240,11 @@ fn stop_ask_document(event_id: String, app: tauri::AppHandle) -> Result<(), Stri
     match cancellation_token(&app, &event_id) {
         Some(token) => {
             token.cancel();
-            log::info!("[stop] cancelled generation event_id={event_id}");
+            log::info!("stop requested for in-flight generation event_id={event_id}");
         }
-        None => log::warn!("[stop] NO token found for event_id={event_id} (already done?)"),
+        // No token means the run already finished — the frontend flushes the
+        // typewriter on click, so the stop still settles the bubble visually.
+        None => log::debug!("stop requested but generation already done event_id={event_id}"),
     }
     Ok(())
 }

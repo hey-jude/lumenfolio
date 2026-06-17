@@ -20,6 +20,14 @@ import { usePersistedRef, readPersisted, writePersisted } from './persistedState
 const UNCONFIGURED_CHAT_MODEL_ID = 'unconfigured-model'
 const ASSISTANT_STREAM_DRAIN_MS = 35
 const ASSISTANT_STREAM_CHARS_PER_TICK = 2
+// When the visible text falls far behind the target — which happens when a
+// non-streaming path (the tool-capable agent loop, or a local CLI) delivers the
+// whole answer in one shot — reveal a fraction of the backlog each tick instead
+// of a fixed two chars. Without this a 4k-char answer takes ~70s to paint, which
+// leaves the message stuck in the "running" state (stop button visible, nothing
+// to cancel) long after the backend finished. /6 drains a one-shot answer in
+// ~1s while a genuine token stream stays smooth.
+const ASSISTANT_STREAM_CATCHUP_DIVISOR = 6
 const CHAT_STREAM_DEBUG_STORAGE_KEY = 'lumenfolio.chatStreamDebug'
 const ASYNC_COMPONENT_TIMEOUT_MS = 30000
 const CLEAR_CHAT_HISTORY_TIMEOUT_MS = 5000
@@ -2197,7 +2205,12 @@ function drainAssistantStreamTargets() {
     }
     const refreshedText = messageDisplayText(message)
     if (state.target.length > refreshedText.length) {
-      const nextText = state.target.slice(0, refreshedText.length + ASSISTANT_STREAM_CHARS_PER_TICK)
+      const remaining = state.target.length - refreshedText.length
+      const increment = Math.max(
+        ASSISTANT_STREAM_CHARS_PER_TICK,
+        Math.ceil(remaining / ASSISTANT_STREAM_CATCHUP_DIVISOR),
+      )
+      const nextText = state.target.slice(0, refreshedText.length + increment)
       setMessageDisplayText(message, nextText)
       if (refreshedText.length === 0 || nextText.length === state.target.length || nextText.length % 20 === 0) {
         chatStreamDebug('drain tick', {
@@ -2257,11 +2270,37 @@ function applyAskDocumentMetadata(message, result) {
 // backend cancels within ~150ms and finalizes the message.
 async function handleStopGeneration(eventId) {
   if (!eventId) return
+  // Paint whatever we have in full and clear "running" right now. The backend
+  // cancel races in parallel, but it may already have finished (the typewriter
+  // was just catching up), so a local flush guarantees the click does something
+  // visible instead of waiting out the reveal.
+  flushAssistantStream(eventId)
   try {
     await invoke('stop_ask_document', { eventId })
   } catch (err) {
     console.warn('Failed to stop generation', err)
   }
+}
+
+// Reveal the full accumulated target immediately and finalize the message. Used
+// by stop: turns the gradual reveal into an instant one so the bubble settles
+// and the running state (and stop button) clear without delay.
+function flushAssistantStream(eventId) {
+  if (!eventId) return
+  const message = findMessageByActivityEventId(eventId)
+  if (!message || message.status !== 'running') return
+  const state = assistantStreamState(eventId)
+  const finalText = state.finalReplacement || state.target || messageDisplayText(message)
+  if (state.doneResult) {
+    setMessageDisplayText(message, finalText)
+    applyAskDocumentMetadata(message, state.doneResult)
+  } else {
+    // Backend hasn't reported done yet (still mid-generation): keep the partial,
+    // or a short note if nothing streamed, and optimistically settle the bubble.
+    setMessageDisplayText(message, finalText || ui.value.generationStopped)
+    message.status = 'succeeded'
+  }
+  assistantStreamTargets.delete(eventId)
 }
 
 // A non-streaming generation (agent loop / local CLI) that the user stopped:

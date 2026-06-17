@@ -20,7 +20,6 @@
 
 use std::time::Duration;
 
-use serde::Deserialize;
 use tauri::Emitter;
 
 use crate::runtime::agent::{tool_call_event, tool_result_event};
@@ -91,38 +90,15 @@ pub(crate) fn should_use_unified_loop(
 
 // ---- Non-streaming tool-round response shapes -----------------------------
 
-#[derive(Deserialize)]
-struct ToolRoundResponse {
-    #[serde(default)]
-    choices: Vec<ToolRoundChoice>,
-}
-
-#[derive(Deserialize)]
-struct ToolRoundChoice {
-    message: ToolRoundMessage,
-}
-
-#[derive(Deserialize)]
-struct ToolRoundMessage {
-    #[serde(default)]
-    content: serde_json::Value,
-    #[serde(default)]
-    reasoning_content: Option<String>,
-    #[serde(default)]
-    tool_calls: Option<Vec<ToolCallEntry>>,
-}
-
-#[derive(Deserialize, Clone)]
+/// A native tool call ready for the loop to execute — reassembled from the
+/// streamed fragments (id/name/arguments).
 struct ToolCallEntry {
-    #[serde(default)]
     id: String,
     function: ToolCallFunction,
 }
 
-#[derive(Deserialize, Clone)]
 struct ToolCallFunction {
     name: String,
-    #[serde(default)]
     arguments: String,
 }
 
@@ -165,35 +141,49 @@ pub(crate) async fn run_unified_agent_loop(
             "model": ctx.provider.model,
             "messages": messages,
             "temperature": 0.1,
-            "stream": false,
+            // Stream the round: answer/reasoning content paints live (true token
+            // streaming) while native tool calls are reassembled from the deltas.
+            "stream": true,
             "tools": tools,
             "tool_choice": "auto",
         });
-        let response =
-            send_tool_round(&client, &endpoint, ctx.provider, &request, ctx.app, ctx.activity_event_id)
+        let round_result =
+            stream_tool_round(&client, &endpoint, ctx.provider, &request, ctx.app, ctx.activity_event_id)
                 .await?;
-        let Some(choice) = response.choices.into_iter().next() else {
-            return Err("Agent loop response had no choices".to_string());
-        };
-        let mut tool_calls = choice.message.tool_calls.clone().unwrap_or_default();
-        let content_str = llm::chat::extract_chat_response_text(&choice.message.content);
-        let reasoning_str = choice.message.reasoning_content.clone().unwrap_or_default();
+        let content_str = round_result.content.clone();
+        let reasoning_str = round_result.reasoning.clone();
+        // Reassemble streamed tool-call fragments into the loop's tool-call shape,
+        // synthesizing a stable id when the server omitted one and dropping any
+        // empty slot (a stray index that never received a name).
+        let tool_calls: Vec<ToolCallEntry> = round_result
+            .tool_calls
+            .into_iter()
+            .enumerate()
+            .filter(|(_, call)| !call.name.trim().is_empty())
+            .map(|(index, call)| ToolCallEntry {
+                id: if call.id.trim().is_empty() {
+                    format!("call_{round}_{index}")
+                } else {
+                    call.id
+                },
+                function: ToolCallFunction {
+                    name: call.name,
+                    arguments: call.arguments,
+                },
+            })
+            .collect();
 
         if !tool_calls.is_empty() {
             // --- OpenAI-native structured tool calls ---
-            // Some servers omit the tool_call `id`; synthesize a stable one so the
-            // assistant echo and the tool result still pair up.
-            for (index, call) in tool_calls.iter_mut().enumerate() {
-                if call.id.trim().is_empty() {
-                    call.id = format!("call_{round}_{index}");
-                }
-            }
             log::info!(
                 "unified_loop round={} native tool call(s)={}",
                 round + 1,
                 tool_calls.len()
             );
-            messages.push(assistant_tool_call_message(&choice.message.content, &tool_calls));
+            messages.push(assistant_tool_call_message(
+                &serde_json::Value::String(content_str.clone()),
+                &tool_calls,
+            ));
             for call in &tool_calls {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)
                     .unwrap_or_else(|err| {
@@ -229,7 +219,13 @@ pub(crate) async fn run_unified_agent_loop(
             // an interleaved model emit a trailing, un-runnable tool call). The
             // loop is closed — the model either keeps calling tools above or
             // answers here.
-            return build_unified_answer(&ctx, agent_run, &content_str, &reasoning_str);
+            return build_unified_answer(
+                &ctx,
+                agent_run,
+                &content_str,
+                &reasoning_str,
+                round_result.emitted_answer,
+            );
         }
         log::info!(
             "unified_loop round={} DSML tool call(s)={}",
@@ -248,8 +244,9 @@ pub(crate) async fn run_unified_agent_loop(
     // Round cap reached while the model still wanted tools — force a final answer
     // (no tools offered) so it commits to prose instead of looping forever.
     compact_history(ctx.app, ctx.activity_event_id, agent_run, &mut messages, char_budget);
-    let (content, reasoning) = force_final_answer(&ctx, &client, &endpoint, &messages).await?;
-    build_unified_answer(&ctx, agent_run, &content, &reasoning)
+    let (content, reasoning, emitted_answer) =
+        force_final_answer(&ctx, &client, &endpoint, &messages).await?;
+    build_unified_answer(&ctx, agent_run, &content, &reasoning, emitted_answer)
 }
 
 /// A tool call parsed out of DeepSeek's DSML text format.
@@ -802,59 +799,33 @@ fn render_tool_output(tool: &str, output: &runtime::rag::RagToolExecutionOutput)
     rendered
 }
 
-async fn send_tool_round(
+/// Send one streaming round: POST the request, then read the SSE stream — content
+/// paints live, native tool calls are reassembled, and a stop cancels the read.
+async fn stream_tool_round(
     client: &reqwest::Client,
     endpoint: &str,
     provider: &OpenAiCompatibleProvider,
     request: &serde_json::Value,
     app: &tauri::AppHandle,
     answer_event_id: Option<&str>,
-) -> Result<ToolRoundResponse, String> {
-    let work = async {
-        let mut builder = client.post(endpoint).json(request);
-        if let Some(api_key) = &provider.api_key {
-            builder = builder.bearer_auth(api_key);
-        }
-        let response = builder
-            .send()
-            .await
-            .map_err(|err| format!("Agent loop request failed: {err}"))?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!(
-                "Agent loop provider returned {status}: {}",
-                truncate_for_error(&body, 600)
-            ));
-        }
-        response
-            .json::<ToolRoundResponse>()
-            .await
-            .map_err(|err| format!("Failed to decode agent loop response: {err}"))
-    };
-    // Stop button: abort the (non-streamed) request if the user cancels.
-    match answer_event_id.and_then(|id| crate::cancellation_token(app, id)) {
-        Some(token) => {
-            log::info!(
-                "[stop] tool round armed with cancel token event_id={}",
-                answer_event_id.unwrap_or("-")
-            );
-            tokio::select! {
-                _ = token.cancelled() => {
-                    log::info!("[stop] tool round aborted by user event_id={}", answer_event_id.unwrap_or("-"));
-                    Err(GENERATION_STOPPED.to_string())
-                }
-                res = work => res,
-            }
-        }
-        None => {
-            log::warn!(
-                "[stop] tool round has NO cancel token event_id={:?}",
-                answer_event_id
-            );
-            work.await
-        }
+) -> Result<llm::openai_stream::UnifiedStreamRound, String> {
+    let mut builder = client.post(endpoint).json(request);
+    if let Some(api_key) = &provider.api_key {
+        builder = builder.bearer_auth(api_key);
     }
+    let response = builder
+        .send()
+        .await
+        .map_err(|err| format!("Agent loop request failed: {err}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "Agent loop provider returned {status}: {}",
+            truncate_for_error(&body, 600)
+        ));
+    }
+    llm::openai_stream::read_unified_tool_round_stream(response, app, answer_event_id).await
 }
 
 /// Error sentinel for a user-cancelled generation; the frontend ignores the
@@ -873,6 +844,7 @@ fn build_unified_answer(
     agent_run: &mut runtime::agent::AgentRunResult,
     content: &str,
     reasoning: &str,
+    already_streamed: bool,
 ) -> Result<AskAnswerResult, String> {
     if let Some(event_id) = ctx.activity_event_id {
         let _ = ctx.app.emit(
@@ -915,16 +887,20 @@ fn build_unified_answer(
     let answer =
         llm::claims::strip_known_inline_citation_labels(&answer, &agent_run.retrieval_run.citations);
 
-    // Push the answer to the UI in one shot — the tool rounds are non-streamed, so
-    // there are no token deltas; the frontend renders this delta as the answer.
-    if let Some(event_id) = ctx.activity_event_id {
-        let _ = ctx.app.emit(
-            "lumenfolio://answer-delta",
-            AnswerDeltaEventOutput {
-                event_id: event_id.to_string(),
-                delta: answer.clone(),
-            },
-        );
+    // If the answer round streamed live, its deltas already painted the bubble —
+    // re-emitting the whole answer here would duplicate it. Only push the one-shot
+    // delta for paths that produced no live tokens (e.g. a withheld/empty stream,
+    // or a non-streaming fallback), so the frontend still renders the answer.
+    if !already_streamed {
+        if let Some(event_id) = ctx.activity_event_id {
+            let _ = ctx.app.emit(
+                "lumenfolio://answer-delta",
+                AnswerDeltaEventOutput {
+                    event_id: event_id.to_string(),
+                    delta: answer.clone(),
+                },
+            );
+        }
     }
 
     Ok(AskAnswerResult {
@@ -935,29 +911,25 @@ fn build_unified_answer(
 }
 
 /// Last resort when the round cap is hit while the model still wants tools: one
-/// non-streaming call with NO tools offered, so it commits to a prose answer
-/// instead of requesting yet another tool. Returns (content, reasoning).
+/// streaming call with NO tools offered, so it commits to a prose answer instead
+/// of requesting yet another tool. The answer paints live like any other round.
+/// Returns (content, reasoning, already_streamed).
 async fn force_final_answer(
     ctx: &UnifiedLoopInput<'_>,
     client: &reqwest::Client,
     endpoint: &str,
     messages: &[serde_json::Value],
-) -> Result<(String, String), String> {
+) -> Result<(String, String, bool), String> {
     let request = serde_json::json!({
         "model": ctx.provider.model,
         "messages": messages,
         "temperature": 0.2,
-        "stream": false,
+        "stream": true,
     });
-    let response =
-        send_tool_round(client, endpoint, ctx.provider, &request, ctx.app, ctx.activity_event_id)
+    let round =
+        stream_tool_round(client, endpoint, ctx.provider, &request, ctx.app, ctx.activity_event_id)
             .await?;
-    let Some(choice) = response.choices.into_iter().next() else {
-        return Err("Agent loop forced-answer response had no choices".to_string());
-    };
-    let content = llm::chat::extract_chat_response_text(&choice.message.content);
-    let reasoning = choice.message.reasoning_content.clone().unwrap_or_default();
-    Ok((content, reasoning))
+    Ok((round.content, round.reasoning, round.emitted_answer))
 }
 
 fn emit_activity(

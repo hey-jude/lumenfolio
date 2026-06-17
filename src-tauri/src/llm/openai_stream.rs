@@ -129,11 +129,6 @@ pub(crate) async fn read_openai_answer_stream(
     // Stop button: break the read loop when the user cancels, returning what has
     // streamed so far (the request is dropped, so the provider stops too).
     let cancel = answer_event_id.and_then(|id| crate::cancellation_token(app, id));
-    log::info!(
-        "[stop] http stream started event_id={} cancel_token={}",
-        answer_event_id.unwrap_or("-"),
-        cancel.is_some()
-    );
     loop {
         let next = if let Some(token) = &cancel {
             tokio::select! {
@@ -449,9 +444,340 @@ fn emit_reasoning_delta(app: &tauri::AppHandle, answer_event_id: Option<&str>, d
     }
 }
 
+/// One streamed tool call, reassembled from its `index`-keyed fragments.
+#[derive(Default, Clone)]
+pub(crate) struct UnifiedStreamToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
+/// Result of one streamed round of the agent loop.
+pub(crate) struct UnifiedStreamRound {
+    /// Full assistant content (think-split applied). For a tool round this is
+    /// usually empty for native models, or the DSML markup for the text fallback.
+    pub content: String,
+    /// Reasoning/thinking text, emitted live to the drawer.
+    pub reasoning: String,
+    /// Native tool calls the model requested this round, in `index` order.
+    pub tool_calls: Vec<UnifiedStreamToolCall>,
+    /// Whether any answer delta was painted live. When true the caller must NOT
+    /// re-emit the whole answer one-shot (that would duplicate the bubble).
+    pub emitted_answer: bool,
+}
+
+/// Withholds live answer emission until the round's content is confirmed to be
+/// prose rather than a tool-call markup block (the DSML text fallback, whose
+/// blocks always open with `<|`/`<｜`). Without this, a non-conformant endpoint
+/// that returns tool calls as `content` text would paint raw markup into the
+/// answer bubble. Accumulation into the full `content` string is unaffected —
+/// this only gates what reaches the UI. Adds at most a 1–2 char delay for a
+/// genuine answer that happens to start with `<`.
+#[derive(Default)]
+struct ContentGate {
+    /// None = undecided, Some(true) = prose (emit), Some(false) = markup (hold).
+    decided: Option<bool>,
+    pending: String,
+}
+
+impl ContentGate {
+    /// Feed a fresh answer fragment; return the slice that is safe to emit now.
+    fn admit(&mut self, part: &str) -> String {
+        match self.decided {
+            Some(true) => part.to_string(),
+            Some(false) => String::new(),
+            None => {
+                self.pending.push_str(part);
+                let trimmed = self.pending.trim_start();
+                if trimmed.is_empty() {
+                    return String::new();
+                }
+                let mut chars = trimmed.chars();
+                let first = chars.next().unwrap();
+                if first != '<' {
+                    self.decided = Some(true);
+                    return std::mem::take(&mut self.pending);
+                }
+                match chars.next() {
+                    None => String::new(), // only "<" so far — wait for the next char
+                    Some(c) if c == '|' || c == '\u{ff5c}' => {
+                        self.decided = Some(false);
+                        String::new()
+                    }
+                    Some(_) => {
+                        self.decided = Some(true);
+                        std::mem::take(&mut self.pending)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Any text held back at end of stream, emitted as prose unless ruled markup.
+    fn flush(&mut self) -> String {
+        if self.decided == Some(false) {
+            return String::new();
+        }
+        std::mem::take(&mut self.pending)
+    }
+}
+
+/// Read one streaming round of the agent loop. Answer/reasoning content is
+/// emitted live (true token streaming) while native `tool_calls` are accumulated
+/// across chunks and returned so the loop can execute them. Cancellation mirrors
+/// the plain answer stream: a stop aborts the read and surfaces GENERATION_STOPPED.
+pub(crate) async fn read_unified_tool_round_stream(
+    mut response: reqwest::Response,
+    app: &tauri::AppHandle,
+    answer_event_id: Option<&str>,
+) -> Result<UnifiedStreamRound, String> {
+    let mut buffer = Vec::new();
+    let mut acc = UnifiedRoundAcc::default();
+    let cancel = answer_event_id.and_then(|id| crate::cancellation_token(app, id));
+    loop {
+        let next = if let Some(token) = &cancel {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    return Err(crate::llm::agent_loop::GENERATION_STOPPED.to_string());
+                }
+                res = response.chunk() => res,
+            }
+        } else {
+            response.chunk().await
+        };
+        let Some(chunk) =
+            next.map_err(|err| format!("Failed to read agent stream: {err}"))?
+        else {
+            break;
+        };
+        buffer.extend_from_slice(&chunk);
+        drain_unified_sse_buffer(&mut buffer, &mut acc, app, answer_event_id)?;
+    }
+    drain_unified_sse_buffer(&mut buffer, &mut acc, app, answer_event_id)?;
+    drain_unified_stream_tail(&mut buffer, &mut acc, app, answer_event_id)?;
+    // Emit (or just absorb) any text the think-splitter / content-gate held back.
+    let (answer_tail, reasoning_tail) = acc.splitter.flush();
+    if !reasoning_tail.is_empty() {
+        acc.reasoning.push_str(&reasoning_tail);
+        if !acc.tool_call_seen {
+            emit_reasoning_delta(app, answer_event_id, reasoning_tail);
+        }
+    }
+    if !answer_tail.is_empty() {
+        acc.answer.push_str(&answer_tail);
+    }
+    let gated = acc.gate.flush();
+    if !gated.is_empty() && !acc.tool_call_seen {
+        emit_answer_delta(app, answer_event_id, gated);
+        acc.emitted_answer = true;
+    }
+    Ok(UnifiedStreamRound {
+        content: acc.answer,
+        reasoning: acc.reasoning,
+        tool_calls: acc.tool_calls,
+        emitted_answer: acc.emitted_answer,
+    })
+}
+
+#[derive(Default)]
+struct UnifiedRoundAcc {
+    answer: String,
+    reasoning: String,
+    splitter: ThinkSplitter,
+    gate: ContentGate,
+    tool_calls: Vec<UnifiedStreamToolCall>,
+    tool_call_seen: bool,
+    emitted_answer: bool,
+}
+
+fn drain_unified_sse_buffer(
+    buffer: &mut Vec<u8>,
+    acc: &mut UnifiedRoundAcc,
+    app: &tauri::AppHandle,
+    answer_event_id: Option<&str>,
+) -> Result<(), String> {
+    while let Some((index, delimiter_len)) = next_sse_frame_boundary(buffer) {
+        let frame_bytes = buffer[..index].to_vec();
+        buffer.drain(..index + delimiter_len);
+        let frame = std::str::from_utf8(&frame_bytes)
+            .map_err(|err| format!("Failed to decode agent stream frame: {err}"))?;
+        handle_unified_frame(frame, acc, app, answer_event_id)?;
+    }
+    Ok(())
+}
+
+fn handle_unified_frame(
+    frame: &str,
+    acc: &mut UnifiedRoundAcc,
+    app: &tauri::AppHandle,
+    answer_event_id: Option<&str>,
+) -> Result<(), String> {
+    for line in frame.lines() {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let chunk = serde_json::from_str::<crate::OpenAiChatChunk>(data)
+            .map_err(|err| format!("Failed to decode agent stream chunk: {err}"))?;
+        for choice in chunk.choices {
+            let Some(delta) = choice.delta else { continue };
+            if let Some(calls) = delta.tool_calls {
+                for call in calls {
+                    acc.tool_call_seen = true;
+                    while acc.tool_calls.len() <= call.index {
+                        acc.tool_calls.push(UnifiedStreamToolCall::default());
+                    }
+                    let slot = &mut acc.tool_calls[call.index];
+                    if let Some(id) = call.id {
+                        if !id.is_empty() {
+                            slot.id = id;
+                        }
+                    }
+                    if let Some(func) = call.function {
+                        if let Some(name) = func.name {
+                            if !name.is_empty() {
+                                slot.name = name;
+                            }
+                        }
+                        if let Some(arguments) = func.arguments {
+                            slot.arguments.push_str(&arguments);
+                        }
+                    }
+                }
+            }
+            if let Some(reasoning_delta) = delta
+                .reasoning_content
+                .or(delta.reasoning)
+                .filter(|value| !value.is_empty())
+            {
+                acc.reasoning.push_str(&reasoning_delta);
+                if !acc.tool_call_seen {
+                    emit_reasoning_delta(app, answer_event_id, reasoning_delta);
+                }
+            }
+            if let Some(answer_delta) = delta.content.filter(|value| !value.is_empty()) {
+                let (answer_part, reasoning_part) = acc.splitter.feed(&answer_delta);
+                if !reasoning_part.is_empty() {
+                    acc.reasoning.push_str(&reasoning_part);
+                    if !acc.tool_call_seen {
+                        emit_reasoning_delta(app, answer_event_id, reasoning_part);
+                    }
+                }
+                if !answer_part.is_empty() {
+                    acc.answer.push_str(&answer_part);
+                    // Paint live only while this still looks like an answer round.
+                    if !acc.tool_call_seen {
+                        let emit = acc.gate.admit(&answer_part);
+                        if !emit.is_empty() {
+                            emit_answer_delta(app, answer_event_id, emit);
+                            acc.emitted_answer = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Handle a trailing partial frame or a whole non-SSE JSON body (a provider that
+/// ignored `stream: true` and returned one completion object). Keeps the loop
+/// working against endpoints that don't actually stream.
+fn drain_unified_stream_tail(
+    buffer: &mut Vec<u8>,
+    acc: &mut UnifiedRoundAcc,
+    app: &tauri::AppHandle,
+    answer_event_id: Option<&str>,
+) -> Result<(), String> {
+    let tail = std::str::from_utf8(buffer)
+        .map_err(|err| format!("Failed to decode agent stream tail: {err}"))?
+        .trim()
+        .to_string();
+    buffer.clear();
+    if tail.is_empty() {
+        return Ok(());
+    }
+    if tail.starts_with("data:") {
+        return handle_unified_frame(&tail, acc, app, answer_event_id);
+    }
+    // Non-SSE fallback: parse a full chat-completion object for content + tool calls.
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&tail) {
+        let message = &value["choices"][0]["message"];
+        if let Some(calls) = message["tool_calls"].as_array() {
+            for call in calls {
+                acc.tool_call_seen = true;
+                acc.tool_calls.push(UnifiedStreamToolCall {
+                    id: call["id"].as_str().unwrap_or_default().to_string(),
+                    name: call["function"]["name"].as_str().unwrap_or_default().to_string(),
+                    arguments: call["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                });
+            }
+        }
+        let content = extract_chat_response_text(&message["content"]);
+        if !content.is_empty() {
+            let (answer_part, reasoning_part) = acc.splitter.feed(&content);
+            if !reasoning_part.is_empty() {
+                acc.reasoning.push_str(&reasoning_part);
+                if !acc.tool_call_seen {
+                    emit_reasoning_delta(app, answer_event_id, reasoning_part);
+                }
+            }
+            if !answer_part.is_empty() {
+                acc.answer.push_str(&answer_part);
+                if !acc.tool_call_seen {
+                    let emit = acc.gate.admit(&answer_part);
+                    if !emit.is_empty() {
+                        emit_answer_delta(app, answer_event_id, emit);
+                        acc.emitted_answer = true;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_gate_emits_plain_prose_immediately() {
+        let mut gate = ContentGate::default();
+        assert_eq!(gate.admit("The "), "The ");
+        assert_eq!(gate.admit("answer."), "answer.");
+        assert_eq!(gate.flush(), "");
+    }
+
+    #[test]
+    fn content_gate_withholds_dsml_markup() {
+        // Tool-call text fallback: opens with `<｜` — must never reach the bubble.
+        let mut gate = ContentGate::default();
+        assert_eq!(gate.admit("<\u{ff5c}"), "");
+        assert_eq!(gate.admit("\u{ff5c}DSML\u{ff5c}\u{ff5c}tool_calls>"), "");
+        assert_eq!(gate.flush(), "");
+    }
+
+    #[test]
+    fn content_gate_keeps_prose_starting_with_angle_bracket() {
+        // A genuine answer may start with "<" (e.g. "<5%"); only "<|" is markup.
+        let mut gate = ContentGate::default();
+        assert_eq!(gate.admit("<"), ""); // undecided on a lone "<"
+        assert_eq!(gate.admit("5% of cases"), "<5% of cases");
+    }
+
+    #[test]
+    fn content_gate_preserves_leading_whitespace_before_prose() {
+        let mut gate = ContentGate::default();
+        assert_eq!(gate.admit("  "), "");
+        assert_eq!(gate.admit("hi"), "  hi");
+    }
 
     #[test]
     fn sse_boundary_waits_for_complete_utf8_frame() {
