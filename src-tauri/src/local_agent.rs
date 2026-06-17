@@ -14,8 +14,13 @@ use std::{
 };
 
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::runtime::rag::Citation;
+
+/// Error returned when the user stops a generation; the frontend ignores the
+/// resulting error event for a stopped turn, so the exact text is irrelevant.
+const GENERATION_STOPPED: &str = "Generation stopped by user.";
 
 pub(crate) mod mcp_server;
 
@@ -283,15 +288,21 @@ pub(crate) async fn generate_answer(
     kind: AgentKind,
     prompt: String,
     image_data_url: Option<String>,
+    cancel: CancellationToken,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_cli(kind, &prompt, image_data_url.as_deref())
+        run_cli(kind, &prompt, image_data_url.as_deref(), &cancel)
     })
     .await
     .map_err(|err| format!("Local-agent task failed: {err}"))?
 }
 
-fn run_cli(kind: AgentKind, prompt: &str, image_data_url: Option<&str>) -> Result<String, String> {
+fn run_cli(
+    kind: AgentKind,
+    prompt: &str,
+    image_data_url: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<String, String> {
     let binary = resolve_path(kind.binary()).unwrap_or_else(|| kind.binary().to_string());
     // Codex `exec` takes images via `-i`; Claude's headless `-p` has no image flag,
     // so it degrades to text. Kept alive until the child exits.
@@ -322,7 +333,7 @@ fn run_cli(kind: AgentKind, prompt: &str, image_data_url: Option<&str>) -> Resul
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let output = run_command_timeout(cmd, GENERATE_TIMEOUT)?;
+    let output = run_command_timeout(cmd, GENERATE_TIMEOUT, cancel)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
@@ -337,16 +348,76 @@ fn run_cli(kind: AgentKind, prompt: &str, image_data_url: Option<&str>) -> Resul
 fn run_command_timeout(
     mut cmd: Command,
     timeout: Duration,
+    cancel: &CancellationToken,
 ) -> Result<std::process::Output, String> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(cmd.output());
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(err)) => Err(format!("Failed to launch the local agent: {err}")),
-        Err(_) => Err("The local agent timed out. Try again, or pick a model provider.".to_string()),
-    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| format!("Failed to launch the local agent: {err}"))?;
+    // Drain stdout/stderr on threads so a full pipe can't deadlock the child while
+    // we poll for exit / cancellation.
+    let drain = |pipe: Option<std::process::ChildStdout>| {
+        let (tx, rx) = mpsc::channel();
+        match pipe {
+            Some(mut handle) => {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = handle.read_to_end(&mut buf);
+                    let _ = tx.send(buf);
+                });
+            }
+            None => {
+                let _ = tx.send(Vec::new());
+            }
+        }
+        rx
+    };
+    let out_rx = drain(child.stdout.take());
+    // stderr is ChildStderr, not ChildStdout — drain inline.
+    let err_rx = {
+        let (tx, rx) = mpsc::channel();
+        match child.stderr.take() {
+            Some(mut handle) => {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = handle.read_to_end(&mut buf);
+                    let _ = tx.send(buf);
+                });
+            }
+            None => {
+                let _ = tx.send(Vec::new());
+            }
+        }
+        rx
+    };
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(err) => return Err(format!("Local agent wait failed: {err}")),
+        }
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(GENERATION_STOPPED.to_string());
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(
+                "The local agent timed out. Try again, or pick a model provider.".to_string(),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    };
+    let stdout = out_rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+    let stderr = err_rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Turn an auth/login failure into an actionable message; otherwise pass through.
@@ -504,6 +575,7 @@ pub(crate) async fn generate_answer_agentic<F>(
     document_id: String,
     prompt: String,
     image_data_url: Option<String>,
+    cancel: CancellationToken,
     on_tool: F,
 ) -> Result<AgenticOutcome, String>
 where
@@ -514,7 +586,7 @@ where
     let token = server.token.clone();
 
     let answer = tauri::async_runtime::spawn_blocking(move || {
-        run_cli_agentic(kind, &prompt, &url, &token, image_data_url.as_deref(), &on_tool)
+        run_cli_agentic(kind, &prompt, &url, &token, image_data_url.as_deref(), &cancel, &on_tool)
     })
     .await
     .map_err(|err| format!("Local-agent task failed: {err}"));
@@ -546,6 +618,7 @@ fn run_cli_agentic<F>(
     url: &str,
     token: &str,
     image_data_url: Option<&str>,
+    cancel: &CancellationToken,
     on_tool: &F,
 ) -> Result<String, String>
 where
@@ -629,10 +702,10 @@ where
     let result = match kind {
         // Codex `--json` is a verified JSONL stream: read it line-by-line so tool
         // calls surface live, then take the final agent_message as the answer.
-        AgentKind::Codex => stream_codex_agentic(cmd, GENERATE_TIMEOUT, on_tool),
+        AgentKind::Codex => stream_codex_agentic(cmd, GENERATE_TIMEOUT, cancel, on_tool),
         // Claude path stays atomic for now (its MCP path is implemented but not yet
         // live-verified — see plan doc); no incremental trace.
-        AgentKind::Claude => run_command_timeout(cmd, GENERATE_TIMEOUT).and_then(|output| {
+        AgentKind::Claude => run_command_timeout(cmd, GENERATE_TIMEOUT, cancel).and_then(|output| {
             if !output.status.success() {
                 return Err(classify_error(
                     kind,
@@ -652,6 +725,7 @@ where
 fn stream_codex_agentic<F>(
     mut cmd: Command,
     timeout: Duration,
+    cancel: &CancellationToken,
     on_tool: &F,
 ) -> Result<String, String>
 where
@@ -693,6 +767,12 @@ where
     let deadline = Instant::now() + timeout;
     let mut answer: Option<String> = None;
     loop {
+        // Stop button: kill the CLI mid-run when the user cancels.
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = reader.join();
+            return Err(GENERATION_STOPPED.to_string());
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             let _ = child.kill();
@@ -701,15 +781,12 @@ where
                 "The local agent timed out. Try again, or pick a model provider.".to_string(),
             );
         }
-        match line_rx.recv_timeout(remaining) {
+        // Poll in short slices so cancellation/timeout are checked promptly even
+        // when the CLI is quiet (a real timeout is caught by the deadline check).
+        let poll = remaining.min(Duration::from_millis(150));
+        match line_rx.recv_timeout(poll) {
             Ok(line) => handle_codex_line(&line, on_tool, &mut answer),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = child.kill();
-                let _ = reader.join();
-                return Err(
-                    "The local agent timed out. Try again, or pick a model provider.".to_string(),
-                );
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break, // stdout closed → done
         }
     }

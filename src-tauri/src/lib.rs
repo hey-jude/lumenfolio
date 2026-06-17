@@ -50,6 +50,23 @@ struct AppDatabase {
     conn: Mutex<Connection>,
 }
 
+/// In-flight chat generations, keyed by their activity event id, so `stop_ask_document`
+/// can cancel one cooperatively (streaming loops check the token; local-agent
+/// subprocesses are killed). Entries are removed when the generation finishes.
+#[derive(Default)]
+pub(crate) struct AskCancellations(
+    Mutex<std::collections::HashMap<String, tokio_util::sync::CancellationToken>>,
+);
+
+/// The cancellation token for an in-flight generation, if one is registered.
+pub(crate) fn cancellation_token(
+    app: &tauri::AppHandle,
+    event_id: &str,
+) -> Option<tokio_util::sync::CancellationToken> {
+    app.try_state::<AskCancellations>()
+        .and_then(|state| state.0.lock().ok().and_then(|map| map.get(event_id).cloned()))
+}
+
 type AgentSessionState = runtime::agent::AgentSessionStore;
 
 #[derive(Clone, Serialize)]
@@ -431,6 +448,12 @@ struct AskDocumentDoneEventOutput {
 struct AskDocumentErrorEventOutput {
     event_id: String,
     message: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AskDocumentStoppedEventOutput {
+    event_id: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -927,6 +950,7 @@ async fn test_local_agent_connection(
         document_id,
         prompt,
         None,
+        tokio_util::sync::CancellationToken::new(),
         on_tool,
     )
     .await
@@ -2114,14 +2138,32 @@ fn ask_document_stream(input: AskDocumentInput, app: tauri::AppHandle) -> Result
         .map(ToString::to_string)
         .ok_or_else(|| "Missing activity event id".to_string())?;
     log::info!("chat stream command accepted event_id={event_id}");
+    // Register a cancellation token so `stop_ask_document` can interrupt this run.
+    if let Some(state) = app.try_state::<AskCancellations>() {
+        if let Ok(mut map) = state.0.lock() {
+            map.insert(event_id.clone(), tokio_util::sync::CancellationToken::new());
+        }
+    }
     let task_app = app.clone();
+    let cleanup_event_id = event_id.clone();
     tauri::async_runtime::spawn(async move {
         let result = {
             let database = task_app.state::<AppDatabase>();
             let agent_sessions = task_app.state::<AgentSessionState>();
             run_ask_document(input, &database, &agent_sessions, &task_app).await
         };
+        // Did the user stop this run? Check before removing the token.
+        let was_cancelled = cancellation_token(&task_app, &cleanup_event_id)
+            .map(|token| token.is_cancelled())
+            .unwrap_or(false);
+        if let Some(state) = task_app.try_state::<AskCancellations>() {
+            if let Ok(mut map) = state.0.lock() {
+                map.remove(&cleanup_event_id);
+            }
+        }
         match result {
+            // The HTTP path returns the partial answer it streamed before the stop,
+            // so a stopped HTTP turn still completes normally (with the partial).
             Ok(output) => {
                 log::info!(
                     "chat stream command completed event_id={} answer_chars={}",
@@ -2138,6 +2180,15 @@ fn ask_document_stream(input: AskDocumentInput, app: tauri::AppHandle) -> Result
                     log::warn!("Failed to emit ask-document-done: {err}");
                 }
             }
+            // A non-streaming path (agent loop / local CLI) that was stopped aborts
+            // with an error — surface it as a quiet "stopped", not a failure.
+            Err(_) if was_cancelled => {
+                log::info!("chat stream stopped by user event_id={event_id}");
+                let _ = task_app.emit(
+                    "lumenfolio://ask-document-stopped",
+                    AskDocumentStoppedEventOutput { event_id },
+                );
+            }
             Err(err) => {
                 log::warn!("chat stream command failed event_id={event_id}: {err}");
                 if let Err(emit_err) = task_app.emit(
@@ -2152,6 +2203,19 @@ fn ask_document_stream(input: AskDocumentInput, app: tauri::AppHandle) -> Result
             }
         }
     });
+    Ok(())
+}
+
+/// Stop an in-flight chat generation (the user pressed "stop"). Cooperative: the
+/// HTTP/agent-loop streaming loops break on the token and return what they have so
+/// far; a local-agent subprocess is killed. The frontend finalizes the message
+/// optimistically, so this just needs to fire-and-forget.
+#[tauri::command]
+fn stop_ask_document(event_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(token) = cancellation_token(&app, &event_id) {
+        token.cancel();
+        log::info!("chat stream cancellation requested event_id={event_id}");
+    }
     Ok(())
 }
 
@@ -2856,6 +2920,12 @@ async fn run_ask_document(
     // + return tail handle it exactly like the HTTP loop's result.
     if let Some(kind) = local_agent::provider_id_kind(selected_provider_id) {
         unified_attempted = true;
+        // Stop button: the same token registered for this turn, so the CLI subprocess
+        // is killed when the user cancels (default = a never-cancelled token).
+        let agent_cancel = activity_event_id
+            .as_deref()
+            .and_then(|id| cancellation_token(app, id))
+            .unwrap_or_default();
 
         // Mode B (agentic, P2): whenever a focused, indexed document exists, let the
         // local CLI call Lumenfolio's tools over a loopback MCP server (document +
@@ -2960,6 +3030,7 @@ questions spanning their library use search_library_knowledge / query_knowledge_
                 document_id.to_string(),
                 prompt,
                 input.image_data_url.clone(),
+                agent_cancel.clone(),
                 on_tool,
             )
             .await
@@ -3012,7 +3083,7 @@ questions spanning their library use search_library_knowledge / query_knowledge_
                 &session_memory,
                 input.locale.as_deref(),
             );
-            match local_agent::generate_answer(kind, prompt, input.image_data_url.clone()).await {
+            match local_agent::generate_answer(kind, prompt, input.image_data_url.clone(), agent_cancel.clone()).await {
                 Ok(answer) => {
                     unified_answer = Some(AskAnswerResult {
                         answer,
@@ -5119,6 +5190,7 @@ pub fn run() {
         .manage(PdfRegistry::default())
         .manage(pdf2zh_sidecar::Pdf2zhSidecarState::default())
         .manage(AgentSessionState::default())
+        .manage(AskCancellations::default())
         .invoke_handler(tauri::generate_handler![
             choose_workspace,
             choose_pdf_files,
@@ -5172,6 +5244,7 @@ pub fn run() {
             delete_note,
             ask_document,
             ask_document_stream,
+            stop_ask_document,
             load_translation_settings,
             save_translation_settings,
             remove_workspace_root,

@@ -660,6 +660,7 @@ pub async fn run_agentic_probe_from_env() -> Result<(), String> {
         doc,
         prompt,
         image_data_url,
+        tokio_util::sync::CancellationToken::new(),
         |ev| {
             let phase = match ev.phase {
                 crate::local_agent::AgentToolPhase::Started => "→ calling",

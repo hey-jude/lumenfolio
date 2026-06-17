@@ -126,11 +126,27 @@ pub(crate) async fn read_openai_answer_stream(
     let mut splitter = ThinkSplitter::default();
     let mut chunk_count = 0usize;
     let mut total_bytes = 0usize;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| format!("Failed to read chat stream: {err}"))?
-    {
+    // Stop button: break the read loop when the user cancels, returning what has
+    // streamed so far (the request is dropped, so the provider stops too).
+    let cancel = answer_event_id.and_then(|id| crate::cancellation_token(app, id));
+    loop {
+        let next = if let Some(token) = &cancel {
+            tokio::select! {
+                _ = token.cancelled() => {
+                    log::info!(
+                        "chat stream cancelled by user event_id={}",
+                        answer_event_id.unwrap_or("-")
+                    );
+                    break;
+                }
+                res = response.chunk() => res,
+            }
+        } else {
+            response.chunk().await
+        };
+        let Some(chunk) = next.map_err(|err| format!("Failed to read chat stream: {err}"))? else {
+            break;
+        };
         chunk_count += 1;
         total_bytes += chunk.len();
         log::debug!(

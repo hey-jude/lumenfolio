@@ -110,6 +110,7 @@ const emit = defineEmits([
   'set-tab',
   'new-session',
   'export-chat',
+  'stop-generation',
   'select-session',
   'close-session',
   'delete-session',
@@ -556,6 +557,14 @@ const lastTurnRunning = computed(() => {
   const msgs = visibleMessages.value
   const last = msgs[msgs.length - 1]
   return Boolean(last && last.role === 'assistant' && last.status === 'running')
+})
+// The activity event id of the in-flight generation, for the stop button.
+const runningActivityEventId = computed(() => {
+  const msgs = visibleMessages.value
+  const last = msgs[msgs.length - 1]
+  return last && last.role === 'assistant' && last.status === 'running'
+    ? (last.activityEventId || '')
+    : ''
 })
 
 function isEditableUserMessage(message) {
@@ -2197,7 +2206,17 @@ function evidenceSourceLabel(source) {
               </select>
             </label>
 
-            <button class="submit-btn" :disabled="!chatInputEnabled" type="submit" :title="ui.sendMessage" :aria-label="ui.sendMessage">
+            <button
+              v-if="lastTurnRunning"
+              class="submit-btn stop"
+              type="button"
+              :title="ui.stopGeneration"
+              :aria-label="ui.stopGeneration"
+              @click="emit('stop-generation', runningActivityEventId)"
+            >
+              <span class="icon-stop" aria-hidden="true"></span>
+            </button>
+            <button v-else class="submit-btn" :disabled="!chatInputEnabled" type="submit" :title="ui.sendMessage" :aria-label="ui.sendMessage">
               <span class="icon-send" aria-hidden="true"></span>
             </button>
           </div>
@@ -4062,6 +4081,14 @@ button.agent-process-head:disabled {
   width: 14px;
   height: 14px;
   display: inline-block;
+}
+
+.icon-stop {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  border-radius: 2px;
+  background: currentColor;
 }
 
 .icon-plus::before,

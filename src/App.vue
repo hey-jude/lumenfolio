@@ -281,6 +281,7 @@ let answerDeltaUnlisten = null
 let reasoningDeltaUnlisten = null
 let askDocumentDoneUnlisten = null
 let askDocumentErrorUnlisten = null
+let askDocumentStoppedUnlisten = null
 let documentIndexUnlisten = null
 let visualIndexUnlisten = null
 let knowledgeUnlisten = null
@@ -2235,6 +2236,31 @@ function applyAskDocumentMetadata(message, result) {
     const session = chatSessions.get(message.sessionId)
     if (session) void maybeGenerateSessionTitle(session)
   }
+}
+
+// Stop button: ask the backend to cancel the in-flight generation. The HTTP path
+// returns its partial via the normal done event; non-streaming paths emit a
+// "stopped" event we finalize below. Optimistically nothing else is needed — the
+// backend cancels within ~150ms and finalizes the message.
+async function handleStopGeneration(eventId) {
+  if (!eventId) return
+  try {
+    await invoke('stop_ask_document', { eventId })
+  } catch (err) {
+    console.warn('Failed to stop generation', err)
+  }
+}
+
+// A non-streaming generation (agent loop / local CLI) that the user stopped:
+// finalize the message with whatever streamed so far, no error banner.
+function applyAskDocumentStopped(eventId) {
+  if (!eventId || clearedActivityEventIds.has(eventId)) return
+  const message = findMessageByActivityEventId(eventId)
+  if (!message) return
+  // Keep whatever streamed; if nothing did (non-streaming path stopped early),
+  // show a short note rather than an empty bubble.
+  const partial = assistantStreamState(eventId).target || messageDisplayText(message)
+  markAssistantStreamDone(eventId, { answer: partial || ui.value.generationStopped })
 }
 
 function applyAskDocumentResult(eventId, result) {
@@ -4476,6 +4502,7 @@ onBeforeUnmount(() => {
   if (reasoningDeltaUnlisten) reasoningDeltaUnlisten()
   if (askDocumentDoneUnlisten) askDocumentDoneUnlisten()
   if (askDocumentErrorUnlisten) askDocumentErrorUnlisten()
+  if (askDocumentStoppedUnlisten) askDocumentStoppedUnlisten()
   if (documentIndexUnlisten) documentIndexUnlisten()
   if (visualIndexUnlisten) visualIndexUnlisten()
   if (knowledgeUnlisten) knowledgeUnlisten()
@@ -4564,6 +4591,13 @@ onMounted(() => {
     askDocumentErrorUnlisten = unlisten
   }).catch((err) => {
     console.warn('Failed to listen for ask errors', err)
+  })
+  listen('lumenfolio://ask-document-stopped', (event) => {
+    applyAskDocumentStopped(event.payload?.eventId)
+  }).then((unlisten) => {
+    askDocumentStoppedUnlisten = unlisten
+  }).catch((err) => {
+    console.warn('Failed to listen for ask stop', err)
   })
   listen('lumenfolio://document-index', (event) => {
     handleDocumentIndexEvent(event.payload)
@@ -4817,6 +4851,7 @@ onMounted(() => {
       @clear-history="openClearChatHistoryConfirm"
       @new-session="handleNewSession"
       @export-chat="handleExportChat"
+      @stop-generation="handleStopGeneration"
       @select-session="setActiveSession"
       @close-session="closeSessionTab"
       @delete-session="deleteSessionById"

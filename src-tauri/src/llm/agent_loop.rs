@@ -169,7 +169,9 @@ pub(crate) async fn run_unified_agent_loop(
             "tools": tools,
             "tool_choice": "auto",
         });
-        let response = send_tool_round(&client, &endpoint, ctx.provider, &request).await?;
+        let response =
+            send_tool_round(&client, &endpoint, ctx.provider, &request, ctx.app, ctx.activity_event_id)
+                .await?;
         let Some(choice) = response.choices.into_iter().next() else {
             return Err("Agent loop response had no choices".to_string());
         };
@@ -805,28 +807,44 @@ async fn send_tool_round(
     endpoint: &str,
     provider: &OpenAiCompatibleProvider,
     request: &serde_json::Value,
+    app: &tauri::AppHandle,
+    answer_event_id: Option<&str>,
 ) -> Result<ToolRoundResponse, String> {
-    let mut builder = client.post(endpoint).json(request);
-    if let Some(api_key) = &provider.api_key {
-        builder = builder.bearer_auth(api_key);
+    let work = async {
+        let mut builder = client.post(endpoint).json(request);
+        if let Some(api_key) = &provider.api_key {
+            builder = builder.bearer_auth(api_key);
+        }
+        let response = builder
+            .send()
+            .await
+            .map_err(|err| format!("Agent loop request failed: {err}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "Agent loop provider returned {status}: {}",
+                truncate_for_error(&body, 600)
+            ));
+        }
+        response
+            .json::<ToolRoundResponse>()
+            .await
+            .map_err(|err| format!("Failed to decode agent loop response: {err}"))
+    };
+    // Stop button: abort the (non-streamed) request if the user cancels.
+    match answer_event_id.and_then(|id| crate::cancellation_token(app, id)) {
+        Some(token) => tokio::select! {
+            _ = token.cancelled() => Err(GENERATION_STOPPED.to_string()),
+            res = work => res,
+        },
+        None => work.await,
     }
-    let response = builder
-        .send()
-        .await
-        .map_err(|err| format!("Agent loop request failed: {err}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!(
-            "Agent loop provider returned {status}: {}",
-            truncate_for_error(&body, 600)
-        ));
-    }
-    response
-        .json::<ToolRoundResponse>()
-        .await
-        .map_err(|err| format!("Failed to decode agent loop response: {err}"))
 }
+
+/// Error sentinel for a user-cancelled generation; the frontend ignores the
+/// resulting done/error event for a stopped turn, so the text is irrelevant.
+pub(crate) const GENERATION_STOPPED: &str = "Generation stopped by user.";
 
 /// Final answer: stream from the SAME full message history (tool results included)
 /// with tools disabled so the model writes prose instead of calling more tools.
@@ -916,7 +934,9 @@ async fn force_final_answer(
         "temperature": 0.2,
         "stream": false,
     });
-    let response = send_tool_round(client, endpoint, ctx.provider, &request).await?;
+    let response =
+        send_tool_round(client, endpoint, ctx.provider, &request, ctx.app, ctx.activity_event_id)
+            .await?;
     let Some(choice) = response.choices.into_iter().next() else {
         return Err("Agent loop forced-answer response had no choices".to_string());
     };
