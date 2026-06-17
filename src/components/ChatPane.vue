@@ -50,6 +50,12 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  // Activity event id of the in-flight generation in ANY session (from the parent),
+  // so the stop button works even after navigating away from the running session.
+  runningEventId: {
+    type: String,
+    default: '',
+  },
   allDocuments: {
     type: Array,
     default: () => [],
@@ -2207,12 +2213,12 @@ function evidenceSourceLabel(source) {
             </label>
 
             <button
-              v-if="lastTurnRunning"
+              v-if="props.runningEventId || lastTurnRunning"
               class="submit-btn stop"
               type="button"
               :title="ui.stopGeneration"
               :aria-label="ui.stopGeneration"
-              @click="emit('stop-generation', runningActivityEventId)"
+              @click="emit('stop-generation', props.runningEventId || runningActivityEventId)"
             >
               <span class="icon-stop" aria-hidden="true"></span>
             </button>

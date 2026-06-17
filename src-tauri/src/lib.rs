@@ -3054,6 +3054,8 @@ questions spanning their library use search_library_knowledge / query_knowledge_
                         claims: Vec::new(),
                     })
                 }
+                // User stopped it: propagate so the turn finalizes as "stopped".
+                Err(err) if err == llm::agent_loop::GENERATION_STOPPED => return Err(err),
                 Err(err) => {
                     unified_answer = Some(AskAnswerResult {
                         answer: format!("⚠️ {err}"),
@@ -3091,6 +3093,8 @@ questions spanning their library use search_library_knowledge / query_knowledge_
                         claims: Vec::new(),
                     })
                 }
+                // User stopped it: propagate so the turn finalizes as "stopped".
+                Err(err) if err == llm::agent_loop::GENERATION_STOPPED => return Err(err),
                 Err(err) => {
                     unified_answer = Some(AskAnswerResult {
                         answer: format!("⚠️ {err}"),
@@ -3130,6 +3134,9 @@ questions spanning their library use search_library_knowledge / query_knowledge_
             .await
             {
                 Ok(result) => unified_answer = Some(result),
+                // User stopped it: propagate so the turn finalizes as "stopped"
+                // instead of falling through to another (best-effort) answer attempt.
+                Err(err) if err == llm::agent_loop::GENERATION_STOPPED => return Err(err),
                 Err(err) => {
                     log::warn!(
                         "Unified agent loop failed; answering from gathered evidence: {err}"

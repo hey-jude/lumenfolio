@@ -331,6 +331,19 @@ const openSessions = computed(() => openSessionIds.value
 const activeSession = computed(() => (
   activeSessionId.value ? chatSessions.get(activeSessionId.value) || null : null
 ))
+// The activity event id of the in-flight generation in ANY open session, so the
+// composer's stop button works even after the user navigates to a different
+// paper/session while a generation is still streaming in the one they left.
+const globalRunningEventId = computed(() => {
+  for (const session of openSessions.value) {
+    const messages = session?.messages || []
+    const last = messages[messages.length - 1]
+    if (last && last.role === 'assistant' && last.status === 'running') {
+      return last.activityEventId || ''
+    }
+  }
+  return ''
+})
 // The document a session's retrieval defaults to. Falls back to the viewed
 // document so an as-yet-unfocused session still has somewhere to ask.
 const activeFocusDoc = computed(() => {
@@ -4828,6 +4841,7 @@ onMounted(() => {
       :viewed-doc-id="selectedDocId"
       :viewed-doc-name="selectedDocument.shortTitle || selectedDocument.title || ''"
       :browsing-label="chatBrowsingLabel"
+      :running-event-id="globalRunningEventId"
       :all-documents="allDocs"
       :collapsed="rightCollapsed"
       :width="rightWidth"
