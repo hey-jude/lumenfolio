@@ -146,7 +146,10 @@ const focusDiffersFromView = computed(() => Boolean(
     && props.viewedDocId !== 'empty',
 ))
 
-const chatInputEnabled = computed(() => props.document.chatReady && props.modelConfigured)
+// The composer stays usable while a doc is still indexing — asking before it's
+// ready just gets a natural-language "still indexing" reply (handled in the parent)
+// instead of a blocking loading card.
+const chatInputEnabled = computed(() => props.modelConfigured)
 const supportsVision = computed(() => props.currentModel?.capabilities?.includes('vision'))
 // Messages come from the active session. The welcome placeholder is keyed by
 // session id so it is filtered out of the visible list.
@@ -1740,14 +1743,7 @@ function evidenceSourceLabel(source) {
         @pointerdown="markUserScrolledMessages"
         @keydown="markUserScrolledMessages"
       >
-        <div v-if="!document.chatReady" class="prepare-card">
-          <div class="prepare-title">{{ ui.preparingDocument }}</div>
-          <div class="prepare-line">- {{ ui.extractingBlocks }}</div>
-          <div class="prepare-line">- {{ ui.mappingCitations }}</div>
-          <div class="prepare-line">- {{ ui.preparingContext }}</div>
-        </div>
-
-        <template v-else>
+        <template>
           <div v-if="!visibleMessages.length" class="chat-empty-state">
             <div class="chat-empty-title">{{ ui.chatEmptyTitle }}</div>
             <div class="chat-empty-copy">{{ ui.chatEmptyHint }}</div>
@@ -2169,13 +2165,11 @@ function evidenceSourceLabel(source) {
           ref="composerTextareaRef"
           :disabled="!chatInputEnabled"
           :placeholder="
-            !document.chatReady
-              ? ui.inputDisabled
-              : !modelConfigured
-                ? ui.modelNotConfiguredHint
-                : supportsVision
-                  ? ui.imageInputPlaceholder
-                  : ui.inputPlaceholder
+            !modelConfigured
+              ? ui.modelNotConfiguredHint
+              : supportsVision
+                ? ui.imageInputPlaceholder
+                : ui.inputPlaceholder
           "
           @keydown="handleComposerKeydown"
           @input="handleComposerInput"

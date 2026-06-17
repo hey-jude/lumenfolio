@@ -1888,7 +1888,7 @@ async function handleSend(payload, selection = null) {
   const referenceDocumentIds = Array.isArray(payloadObject?.mentionedDocIds)
     ? payloadObject.mentionedDocIds.filter((id) => id && id !== doc.id)
     : []
-  if ((!doc.chatReady && !selectedQuote) || !chatModelConfigured.value) return
+  if (!chatModelConfigured.value) return
   const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
   if (!messageText.trim() && !imageDataUrl) return
   let citations = selectedQuote
@@ -1928,6 +1928,24 @@ async function handleSend(payload, selection = null) {
     imageDataUrl: imageDataUrl || null,
     mentionedDocumentIds: referenceDocumentIds,
   })
+  // Still indexing (or index went stale): the backend has no evidence to answer
+  // from yet, so reply in natural language instead of querying. A selected quote
+  // can be answered from the selection, so that path proceeds normally.
+  if (!doc.chatReady && !selectedQuote) {
+    session.messages.push({
+      id: assistantMessageId,
+      sessionId: session.id,
+      role: 'assistant',
+      content: { en: ui.value.docStillIndexing, zh: ui.value.docStillIndexing },
+      citations: [],
+      status: 'succeeded',
+      activityEvents: [],
+      reasoningContent: '',
+      originalQuestion: messageText.trim() || ui.value.imageOnlyPrompt,
+    })
+    session.updatedAt = Math.floor(Date.now() / 1000)
+    return
+  }
   session.messages.push({
     id: assistantMessageId,
     sessionId: session.id,
