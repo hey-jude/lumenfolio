@@ -2212,9 +2212,12 @@ fn ask_document_stream(input: AskDocumentInput, app: tauri::AppHandle) -> Result
 /// optimistically, so this just needs to fire-and-forget.
 #[tauri::command]
 fn stop_ask_document(event_id: String, app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(token) = cancellation_token(&app, &event_id) {
-        token.cancel();
-        log::info!("chat stream cancellation requested event_id={event_id}");
+    match cancellation_token(&app, &event_id) {
+        Some(token) => {
+            token.cancel();
+            log::info!("[stop] cancelled generation event_id={event_id}");
+        }
+        None => log::warn!("[stop] NO token found for event_id={event_id} (already done?)"),
     }
     Ok(())
 }

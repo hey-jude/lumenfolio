@@ -834,11 +834,26 @@ async fn send_tool_round(
     };
     // Stop button: abort the (non-streamed) request if the user cancels.
     match answer_event_id.and_then(|id| crate::cancellation_token(app, id)) {
-        Some(token) => tokio::select! {
-            _ = token.cancelled() => Err(GENERATION_STOPPED.to_string()),
-            res = work => res,
-        },
-        None => work.await,
+        Some(token) => {
+            log::info!(
+                "[stop] tool round armed with cancel token event_id={}",
+                answer_event_id.unwrap_or("-")
+            );
+            tokio::select! {
+                _ = token.cancelled() => {
+                    log::info!("[stop] tool round aborted by user event_id={}", answer_event_id.unwrap_or("-"));
+                    Err(GENERATION_STOPPED.to_string())
+                }
+                res = work => res,
+            }
+        }
+        None => {
+            log::warn!(
+                "[stop] tool round has NO cancel token event_id={:?}",
+                answer_event_id
+            );
+            work.await
+        }
     }
 }
 

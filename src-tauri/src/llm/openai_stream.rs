@@ -129,6 +129,11 @@ pub(crate) async fn read_openai_answer_stream(
     // Stop button: break the read loop when the user cancels, returning what has
     // streamed so far (the request is dropped, so the provider stops too).
     let cancel = answer_event_id.and_then(|id| crate::cancellation_token(app, id));
+    log::info!(
+        "[stop] http stream started event_id={} cancel_token={}",
+        answer_event_id.unwrap_or("-"),
+        cancel.is_some()
+    );
     loop {
         let next = if let Some(token) = &cancel {
             tokio::select! {
