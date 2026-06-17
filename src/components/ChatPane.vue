@@ -1743,11 +1743,10 @@ function evidenceSourceLabel(source) {
         @pointerdown="markUserScrolledMessages"
         @keydown="markUserScrolledMessages"
       >
-        <template>
-          <div v-if="!visibleMessages.length" class="chat-empty-state">
-            <div class="chat-empty-title">{{ ui.chatEmptyTitle }}</div>
-            <div class="chat-empty-copy">{{ ui.chatEmptyHint }}</div>
-          </div>
+        <div v-if="!visibleMessages.length" class="chat-empty-state">
+          <div class="chat-empty-title">{{ ui.chatEmptyTitle }}</div>
+          <div class="chat-empty-copy">{{ ui.chatEmptyHint }}</div>
+        </div>
           <article
             v-for="message in visibleMessages"
             :key="message.id"
@@ -2069,7 +2068,6 @@ function evidenceSourceLabel(source) {
               </div>
             </details>
           </article>
-        </template>
         <button
           v-if="showJumpToLatest"
           type="button"
