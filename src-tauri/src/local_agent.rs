@@ -647,13 +647,28 @@ where
         .filter(|_| kind == AgentKind::Codex)
         .and_then(write_image_temp);
 
-    let mut cmd = Command::new(&binary);
-    match kind {
+    let result = match kind {
+        // Codex: drive the app-server JSON-RPC protocol. Unlike `exec --json` (which
+        // delivers the answer atomically), the app-server emits token-level
+        // `item/agentMessage/delta` notifications, so the answer truly streams. The
+        // user's image rides along as a `localImage` turn input.
+        AgentKind::Codex => run_codex_app_server(
+            &binary,
+            prompt,
+            url,
+            token,
+            &work_dir,
+            image.as_ref().map(|img| img.path.clone()),
+            GENERATE_TIMEOUT,
+            cancel,
+            on_tool,
+            on_answer,
+        ),
+        // Claude: headless `-p` with stream-json + partial messages → token-level
+        // `content_block_delta` we relay live; the final `result` event is authoritative.
+        // Scope hard: --strict-mcp-config (ignore the user's other servers), --tools ""
+        // (no built-in fs/shell), allow only our server's tools, bypass the prompt.
         AgentKind::Claude => {
-            // streamable-HTTP MCP server with a bearer header; scope hard:
-            // --strict-mcp-config (ignore the user's other MCP servers), --tools ""
-            // (no built-in fs/shell), allow only our server's tools, bypass the
-            // interactive permission prompt for those read-only tools.
             let mcp_config = serde_json::json!({
                 "mcpServers": {
                     "lumenfolio": {
@@ -664,11 +679,10 @@ where
                 }
             })
             .to_string();
+            let mut cmd = Command::new(&binary);
             cmd.args([
                 "-p",
                 prompt,
-                // stream-json + partial messages → token-level `content_block_delta`
-                // events we relay live; `--verbose` is required for stream-json under -p.
                 "--output-format",
                 "stream-json",
                 "--include-partial-messages",
@@ -683,48 +697,12 @@ where
                 "--permission-mode",
                 "bypassPermissions",
             ]);
-        }
-        AgentKind::Codex => {
-            // Headless Codex cancels MCP tool calls under any sandbox/approval combo
-            // except the bypass flag (verified P2-3) — so the OS sandbox is off and we
-            // rely on the empty cwd + scrubbed env for isolation. --ignore-user-config
-            // drops the user's other MCP servers; -c injects only ours (token via env).
-            let mcp_cfg = format!(
-                "mcp_servers.lumenfolio={{url=\"{url}\", bearer_token_env_var=\"{MCP_TOKEN_ENV}\"}}"
-            );
-            cmd.args([
-                "exec",
-                "--json",
-                "--skip-git-repo-check",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--ignore-user-config",
-                "-c",
-                &mcp_cfg,
-            ]);
-            // Prompt MUST precede `-i` (multi-value `--image` would eat it otherwise).
-            cmd.arg(prompt);
-            if let Some(image) = &image {
-                cmd.arg("-i").arg(&image.path);
-            }
-            cmd.env(MCP_TOKEN_ENV, token);
-        }
-    }
-    cmd.current_dir(&work_dir)
-        .env_remove("ANTHROPIC_API_KEY") // never bill an API key — use the subscription
-        .env_remove("OPENAI_API_KEY")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let result = match kind {
-        // Codex `--json` is a verified JSONL stream: read it line-by-line so tool
-        // calls surface live, then take the final agent_message as the answer.
-        // Codex emits the answer atomically (no token deltas), so on_answer is unused.
-        AgentKind::Codex => stream_codex_agentic(cmd, GENERATE_TIMEOUT, cancel, on_tool),
-        // Claude `--output-format stream-json --include-partial-messages` is a JSONL
-        // stream: relay tool calls live AND token-stream the answer via on_answer; the
-        // final `result` event is the authoritative answer (fallback if no deltas).
-        AgentKind::Claude => {
+            cmd.current_dir(&work_dir)
+                .env_remove("ANTHROPIC_API_KEY") // never bill an API key — use the subscription
+                .env_remove("OPENAI_API_KEY")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
             stream_claude_agentic(cmd, GENERATE_TIMEOUT, cancel, on_tool, on_answer)
         }
     };
@@ -732,27 +710,68 @@ where
     result
 }
 
-/// Drive Codex `exec --json`, parsing its JSONL stream as it arrives: emit an
-/// `AgentToolEvent` for each `mcp_tool_call` start/finish and return the last
-/// `agent_message` text. A hard deadline kills the child if it stalls.
-fn stream_codex_agentic<F>(
-    mut cmd: Command,
+/// Accumulator for one Codex app-server run.
+#[derive(Default)]
+struct CodexAppServerState {
+    /// Text assembled from `item/agentMessage/delta`.
+    answer: String,
+    /// Authoritative final answer from the terminal `item/completed` agentMessage.
+    final_answer: Option<String>,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    /// MCP tool calls started but not yet completed (FIFO).
+    pending_tools: std::collections::VecDeque<String>,
+    done: bool,
+}
+
+/// Drive Codex through the **app-server** JSON-RPC protocol (stdio). Unlike
+/// `exec --json` (which delivers the answer in one atomic `agent_message`), the
+/// app-server streams token-level `item/agentMessage/delta` notifications, so the
+/// answer truly streams. Flow: initialize → thread/start → turn/start → read
+/// notifications. MCP tool calls surface via `item/started`/`item/completed`.
+/// A hard deadline kills a stall; a cancel sends `turn/interrupt` then kills.
+fn run_codex_app_server<F, G>(
+    binary: &str,
+    prompt: &str,
+    mcp_url: &str,
+    mcp_token: &str,
+    work_dir: &std::path::Path,
+    image_path: Option<PathBuf>,
     timeout: Duration,
     cancel: &CancellationToken,
     on_tool: &F,
+    on_answer: &G,
 ) -> Result<String, String>
 where
     F: Fn(AgentToolEvent),
+    G: Fn(String),
 {
-    let mut child = cmd
+    // Inject ONLY our loopback MCP server (replacing any user-config servers) and
+    // pass its bearer token via env so it never lands in argv/ps output.
+    let mcp_cfg = format!(
+        "mcp_servers={{lumenfolio={{url=\"{mcp_url}\", bearer_token_env_var=\"{MCP_TOKEN_ENV}\"}}}}"
+    );
+    let mut child = Command::new(binary)
+        .args(["app-server", "-c", &mcp_cfg])
+        .current_dir(work_dir)
+        .env(MCP_TOKEN_ENV, mcp_token)
+        .env_remove("ANTHROPIC_API_KEY") // never bill an API key — use the subscription
+        .env_remove("OPENAI_API_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("Failed to launch the local agent: {err}"))?;
+
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Local agent produced no input stream".to_string())?;
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| "Local agent produced no output stream".to_string())?;
 
-    // Drain stderr on a side thread so a full pipe can't deadlock the child.
     let (err_tx, err_rx) = mpsc::channel();
     if let Some(stderr) = child.stderr.take() {
         std::thread::spawn(move || {
@@ -762,7 +781,6 @@ where
         });
     }
 
-    // Stream stdout lines over a channel so the deadline can interrupt a stall.
     let (line_tx, line_rx) = mpsc::channel::<String>();
     let reader = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
@@ -777,93 +795,210 @@ where
         }
     });
 
+    // Send one newline-delimited JSON-RPC frame.
+    let send = |stdin: &mut std::process::ChildStdin, msg: serde_json::Value| {
+        use std::io::Write;
+        let mut line = msg.to_string();
+        line.push('\n');
+        let _ = stdin.write_all(line.as_bytes());
+        let _ = stdin.flush();
+    };
+
+    // Kick off the handshake; the rest is driven by responses below.
+    send(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "clientInfo": { "name": "lumenfolio", "version": env!("CARGO_PKG_VERSION") } }
+        }),
+    );
+
     let deadline = Instant::now() + timeout;
-    let mut answer: Option<String> = None;
+    let mut state = CodexAppServerState::default();
+    let stop = |child: &mut std::process::Child, reader: std::thread::JoinHandle<()>| {
+        let _ = child.kill();
+        let _ = reader.join();
+    };
     loop {
-        // Stop button: kill the CLI mid-run when the user cancels.
+        // Stop button: ask the server to interrupt the turn, then kill the child.
         if cancel.is_cancelled() {
-            let _ = child.kill();
-            let _ = reader.join();
+            if let (Some(tid), Some(turn)) = (&state.thread_id, &state.turn_id) {
+                send(
+                    &mut stdin,
+                    serde_json::json!({"jsonrpc":"2.0","id":99,"method":"turn/interrupt",
+                        "params":{"threadId":tid,"turnId":turn}}),
+                );
+            }
+            stop(&mut child, reader);
             return Err(GENERATION_STOPPED.to_string());
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            let _ = child.kill();
-            let _ = reader.join();
+            stop(&mut child, reader);
             return Err(
                 "The local agent timed out. Try again, or pick a model provider.".to_string(),
             );
         }
-        // Poll in short slices so cancellation/timeout are checked promptly even
-        // when the CLI is quiet (a real timeout is caught by the deadline check).
         let poll = remaining.min(Duration::from_millis(150));
-        match line_rx.recv_timeout(poll) {
-            Ok(line) => handle_codex_line(&line, on_tool, &mut answer),
+        let line = match line_rx.recv_timeout(poll) {
+            Ok(line) => line,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break, // stdout closed → done
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let Ok(msg) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        let has_id = msg.get("id").is_some();
+        let is_response = has_id && (msg.get("result").is_some() || msg.get("error").is_some());
+        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+
+        if is_response {
+            // Responses to OUR requests, keyed by the id we sent.
+            match msg.get("id").and_then(|i| i.as_i64()) {
+                Some(1) => {
+                    // initialize done → ack, then open a thread.
+                    send(&mut stdin, serde_json::json!({"jsonrpc":"2.0","method":"initialized","params":{}}));
+                    send(
+                        &mut stdin,
+                        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"thread/start",
+                            "params":{"sandbox":"danger-full-access","approvalPolicy":"never",
+                                "cwd": work_dir.to_string_lossy()}}),
+                    );
+                }
+                Some(2) => {
+                    // thread open → capture its id and start the turn with the prompt
+                    // (and the user's image as a localImage input, if any).
+                    let tid = msg["result"]["thread"]["id"].as_str().map(str::to_string);
+                    match tid {
+                        Some(tid) => {
+                            state.thread_id = Some(tid.clone());
+                            let mut input = vec![serde_json::json!({"type":"text","text":prompt})];
+                            if let Some(path) = &image_path {
+                                input.push(serde_json::json!({"type":"localImage","path": path.to_string_lossy()}));
+                            }
+                            send(
+                                &mut stdin,
+                                serde_json::json!({"jsonrpc":"2.0","id":3,"method":"turn/start",
+                                    "params":{"threadId":tid,"input":input,"approvalPolicy":"never"}}),
+                            );
+                        }
+                        None => {
+                            stop(&mut child, reader);
+                            return Err("Codex app-server: thread/start returned no thread id".to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if has_id && !method.is_empty() {
+            // A server→client REQUEST (approval, etc.). With approvalPolicy=never we
+            // don't expect these, but answer "approved" defensively so nothing hangs.
+            if let Some(id) = msg.get("id") {
+                send(&mut stdin, serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"decision":"approved"}}));
+            }
+            continue;
+        }
+
+        if !method.is_empty() {
+            handle_app_server_notification(method, &msg["params"], &mut state, on_tool, on_answer);
+            if state.done {
+                break;
+            }
         }
     }
     let _ = reader.join();
+    let _ = child.kill();
 
-    let status = child
-        .wait()
-        .map_err(|err| format!("Local agent did not exit cleanly: {err}"))?;
-    if !status.success() {
-        let stderr = err_rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
-        return Err(classify_error(AgentKind::Codex, stderr.trim()));
-    }
-    answer
+    state
+        .final_answer
         .filter(|a| !a.is_empty())
-        .ok_or_else(|| format!("{} returned no answer.", AgentKind::Codex.label()))
+        .or_else(|| Some(state.answer.trim().to_string()).filter(|a| !a.is_empty()))
+        .ok_or_else(|| {
+            let stderr = err_rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+            if stderr.trim().is_empty() {
+                format!("{} returned no answer.", AgentKind::Codex.label())
+            } else {
+                classify_error(AgentKind::Codex, stderr.trim())
+            }
+        })
 }
 
-/// Parse one Codex JSONL line: report tool-call start/finish via `on_tool`, and
-/// keep the latest `agent_message` text as the running answer.
-fn handle_codex_line<F>(line: &str, on_tool: &F, answer: &mut Option<String>)
-where
+/// Route one Codex app-server notification: token deltas → `on_answer`, MCP
+/// tool-call lifecycle → `on_tool`, terminal agentMessage/turn → final answer/done.
+fn handle_app_server_notification<F, G>(
+    method: &str,
+    params: &serde_json::Value,
+    state: &mut CodexAppServerState,
+    on_tool: &F,
+    on_answer: &G,
+) where
     F: Fn(AgentToolEvent),
+    G: Fn(String),
 {
-    let line = line.trim();
-    if line.is_empty() {
-        return;
-    }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-        return;
-    };
-    let event_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    let Some(item) = value.get("item") else {
-        return;
-    };
-    let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
-    match (event_type, item_type) {
-        ("item.started", "mcp_tool_call") => {
-            on_tool(AgentToolEvent {
-                tool: item
-                    .get("tool")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("tool")
-                    .to_string(),
-                phase: AgentToolPhase::Started,
-                ok: true,
-            });
+    match method {
+        "turn/started" => {
+            state.turn_id = params["turnId"]
+                .as_str()
+                .or_else(|| params["turn"]["id"].as_str())
+                .map(str::to_string);
         }
-        ("item.completed", "mcp_tool_call") => {
-            let ok = item.get("status").and_then(|s| s.as_str()) == Some("completed");
-            on_tool(AgentToolEvent {
-                tool: item
-                    .get("tool")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("tool")
-                    .to_string(),
-                phase: AgentToolPhase::Completed,
-                ok,
-            });
-        }
-        ("item.completed", "agent_message") => {
-            if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                *answer = Some(text.trim().to_string());
+        "item/agentMessage/delta" => {
+            if let Some(delta) = params["delta"].as_str() {
+                if !delta.is_empty() {
+                    state.answer.push_str(delta);
+                    on_answer(delta.to_string());
+                }
             }
         }
+        "item/started" => {
+            let item = &params["item"];
+            if item["type"].as_str() == Some("mcpToolCall") {
+                let tool = item["tool"]
+                    .as_str()
+                    .or_else(|| item["name"].as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                state.pending_tools.push_back(tool.clone());
+                on_tool(AgentToolEvent {
+                    tool,
+                    phase: AgentToolPhase::Started,
+                    ok: true,
+                });
+            }
+        }
+        "item/completed" => {
+            let item = &params["item"];
+            match item["type"].as_str() {
+                Some("mcpToolCall") => {
+                    let ok = item["status"]
+                        .as_str()
+                        .map(|s| s != "failed" && s != "error")
+                        .unwrap_or(true);
+                    let tool = state
+                        .pending_tools
+                        .pop_front()
+                        .or_else(|| item["tool"].as_str().map(str::to_string))
+                        .unwrap_or_else(|| "tool".to_string());
+                    on_tool(AgentToolEvent {
+                        tool,
+                        phase: AgentToolPhase::Completed,
+                        ok,
+                    });
+                }
+                Some("agentMessage") => {
+                    if let Some(text) = item["text"].as_str() {
+                        if !text.trim().is_empty() {
+                            state.final_answer = Some(text.trim().to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        "turn/completed" | "turn/failed" | "error" => state.done = true,
         _ => {}
     }
 }
