@@ -20,7 +20,7 @@ Lumenfolio is a local-first desktop AI reading workspace for academic PDFs. It c
 
 It is not just "chat over a PDF". Lumenfolio is built around local document evidence: pages, blocks, chunks, structure, tables, visual regions, citations, and bounding boxes that can point back to the original PDF. That evidence can also be exposed through local MCP tools so your signed-in Codex / Claude Code CLI can gather evidence and answer inside the reading workflow.
 
-![Lumenfolio demo](./docs/assets/lumenfolio-demo.gif)
+![Lumenfolio demo](./resources/screenshot/lumenfolio-demo-cut-speed-compact.gif)
 
 If Lumenfolio helps your paper-reading workflow, a star helps more researchers discover it.
 
