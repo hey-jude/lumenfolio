@@ -514,7 +514,7 @@ pub(crate) struct AgentToolEvent {
     pub ok: bool,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AgentToolPhase {
     Started,
     Completed,
@@ -569,7 +569,7 @@ const MCP_TOKEN_ENV: &str = "LUMENFOLIO_MCP_TOKEN";
 /// and return the answer + the citations the server served. `on_tool` is invoked
 /// live for each tool-call step (Codex's `--json` stream is parsed incrementally).
 /// Offloaded subprocess I/O is wrapped around the (async) server lifecycle.
-pub(crate) async fn generate_answer_agentic<F>(
+pub(crate) async fn generate_answer_agentic<F, G>(
     kind: AgentKind,
     db_path: PathBuf,
     document_id: String,
@@ -577,16 +577,27 @@ pub(crate) async fn generate_answer_agentic<F>(
     image_data_url: Option<String>,
     cancel: CancellationToken,
     on_tool: F,
+    on_answer: G,
 ) -> Result<AgenticOutcome, String>
 where
     F: Fn(AgentToolEvent) + Send + 'static,
+    G: Fn(String) + Send + 'static,
 {
     let server = mcp_server::start_mcp_server(db_path, document_id).await?;
     let url = server.url.clone();
     let token = server.token.clone();
 
     let answer = tauri::async_runtime::spawn_blocking(move || {
-        run_cli_agentic(kind, &prompt, &url, &token, image_data_url.as_deref(), &cancel, &on_tool)
+        run_cli_agentic(
+            kind,
+            &prompt,
+            &url,
+            &token,
+            image_data_url.as_deref(),
+            &cancel,
+            &on_tool,
+            &on_answer,
+        )
     })
     .await
     .map_err(|err| format!("Local-agent task failed: {err}"));
@@ -612,7 +623,7 @@ where
     })
 }
 
-fn run_cli_agentic<F>(
+fn run_cli_agentic<F, G>(
     kind: AgentKind,
     prompt: &str,
     url: &str,
@@ -620,9 +631,11 @@ fn run_cli_agentic<F>(
     image_data_url: Option<&str>,
     cancel: &CancellationToken,
     on_tool: &F,
+    on_answer: &G,
 ) -> Result<String, String>
 where
     F: Fn(AgentToolEvent),
+    G: Fn(String),
 {
     let binary = resolve_path(kind.binary()).unwrap_or_else(|| kind.binary().to_string());
     // Per-run empty working dir so that — with Codex's OS sandbox necessarily off
@@ -654,8 +667,12 @@ where
             cmd.args([
                 "-p",
                 prompt,
+                // stream-json + partial messages → token-level `content_block_delta`
+                // events we relay live; `--verbose` is required for stream-json under -p.
                 "--output-format",
-                "json",
+                "stream-json",
+                "--include-partial-messages",
+                "--verbose",
                 "--mcp-config",
                 &mcp_config,
                 "--strict-mcp-config",
@@ -702,18 +719,14 @@ where
     let result = match kind {
         // Codex `--json` is a verified JSONL stream: read it line-by-line so tool
         // calls surface live, then take the final agent_message as the answer.
+        // Codex emits the answer atomically (no token deltas), so on_answer is unused.
         AgentKind::Codex => stream_codex_agentic(cmd, GENERATE_TIMEOUT, cancel, on_tool),
-        // Claude path stays atomic for now (its MCP path is implemented but not yet
-        // live-verified — see plan doc); no incremental trace.
-        AgentKind::Claude => run_command_timeout(cmd, GENERATE_TIMEOUT, cancel).and_then(|output| {
-            if !output.status.success() {
-                return Err(classify_error(
-                    kind,
-                    String::from_utf8_lossy(&output.stderr).trim(),
-                ));
-            }
-            parse_claude_json(kind, &String::from_utf8_lossy(&output.stdout))
-        }),
+        // Claude `--output-format stream-json --include-partial-messages` is a JSONL
+        // stream: relay tool calls live AND token-stream the answer via on_answer; the
+        // final `result` event is the authoritative answer (fallback if no deltas).
+        AgentKind::Claude => {
+            stream_claude_agentic(cmd, GENERATE_TIMEOUT, cancel, on_tool, on_answer)
+        }
     };
     let _ = std::fs::remove_dir_all(&work_dir);
     result
@@ -855,9 +868,251 @@ where
     }
 }
 
+/// Accumulator for one Claude `stream-json` run.
+#[derive(Default)]
+struct ClaudeStreamState {
+    /// Text assembled from `content_block_delta` (or a fallback assistant message).
+    answer: String,
+    /// The authoritative final answer from the terminal `result` event.
+    final_result: Option<String>,
+    /// Tool names started but not yet completed (FIFO — Claude calls them in order).
+    pending_tools: std::collections::VecDeque<String>,
+    /// Whether any answer token was streamed live (for diagnostics/fallback).
+    streamed: bool,
+}
+
+/// Drive Claude `-p --output-format stream-json --include-partial-messages`,
+/// parsing its JSONL as it arrives: token deltas go to `on_answer` (live answer
+/// streaming), MCP tool-call start/finish go to `on_tool`, and the final `result`
+/// event is taken as the authoritative answer. A hard deadline kills a stall.
+fn stream_claude_agentic<F, G>(
+    mut cmd: Command,
+    timeout: Duration,
+    cancel: &CancellationToken,
+    on_tool: &F,
+    on_answer: &G,
+) -> Result<String, String>
+where
+    F: Fn(AgentToolEvent),
+    G: Fn(String),
+{
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| format!("Failed to launch the local agent: {err}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Local agent produced no output stream".to_string())?;
+
+    // Drain stderr on a side thread so a full pipe can't deadlock the child.
+    let (err_tx, err_rx) = mpsc::channel();
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = BufReader::new(stderr).read_to_string(&mut buf);
+            let _ = err_tx.send(buf);
+        });
+    }
+
+    let (line_tx, line_rx) = mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(l) => {
+                    if line_tx.send(l).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = Instant::now() + timeout;
+    let mut state = ClaudeStreamState::default();
+    loop {
+        // Stop button: kill the CLI mid-run when the user cancels.
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = reader.join();
+            return Err(GENERATION_STOPPED.to_string());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            let _ = child.kill();
+            let _ = reader.join();
+            return Err(
+                "The local agent timed out. Try again, or pick a model provider.".to_string(),
+            );
+        }
+        let poll = remaining.min(Duration::from_millis(150));
+        match line_rx.recv_timeout(poll) {
+            Ok(line) => handle_claude_line(&line, on_tool, on_answer, &mut state),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break, // stdout closed → done
+        }
+    }
+    let _ = reader.join();
+
+    let status = child
+        .wait()
+        .map_err(|err| format!("Local agent did not exit cleanly: {err}"))?;
+    if !status.success() {
+        let stderr = err_rx.recv_timeout(Duration::from_secs(1)).unwrap_or_default();
+        return Err(classify_error(AgentKind::Claude, stderr.trim()));
+    }
+    // Prefer the authoritative `result` text; fall back to the streamed/assembled text.
+    state
+        .final_result
+        .filter(|a| !a.is_empty())
+        .or_else(|| Some(state.answer.trim().to_string()).filter(|a| !a.is_empty()))
+        .ok_or_else(|| format!("{} returned no answer.", AgentKind::Claude.label()))
+}
+
+/// Parse one Claude `stream-json` line: relay token deltas, tool-call steps, and
+/// capture the terminal result. Unknown shapes are ignored (robust to version drift).
+fn handle_claude_line<F, G>(line: &str, on_tool: &F, on_answer: &G, state: &mut ClaudeStreamState)
+where
+    F: Fn(AgentToolEvent),
+    G: Fn(String),
+{
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return;
+    };
+    match value.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+        // Partial streaming events (enabled by --include-partial-messages).
+        "stream_event" => {
+            let event = &value["event"];
+            match event.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                "content_block_delta" => {
+                    if let Some(text) = event["delta"]["text"].as_str() {
+                        if !text.is_empty() {
+                            state.answer.push_str(text);
+                            state.streamed = true;
+                            on_answer(text.to_string());
+                        }
+                    }
+                }
+                // A tool_use block opening → a tool call is starting.
+                "content_block_start" => {
+                    let block = &event["content_block"];
+                    if block["type"].as_str() == Some("tool_use") {
+                        let tool = block["name"].as_str().unwrap_or("tool").to_string();
+                        state.pending_tools.push_back(tool.clone());
+                        on_tool(AgentToolEvent {
+                            tool,
+                            phase: AgentToolPhase::Started,
+                            ok: true,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Tool results return as a user message carrying tool_result blocks.
+        "user" => {
+            if let Some(content) = value["message"]["content"].as_array() {
+                for block in content {
+                    if block["type"].as_str() == Some("tool_result") {
+                        let ok = block["is_error"].as_bool() != Some(true);
+                        let tool = state
+                            .pending_tools
+                            .pop_front()
+                            .unwrap_or_else(|| "tool".to_string());
+                        on_tool(AgentToolEvent {
+                            tool,
+                            phase: AgentToolPhase::Completed,
+                            ok,
+                        });
+                    }
+                }
+            }
+        }
+        // Fallback when partial deltas are absent: a complete assistant message. Emit
+        // its text once so the bubble still streams something.
+        "assistant" => {
+            if !state.streamed {
+                if let Some(content) = value["message"]["content"].as_array() {
+                    let text: String = content
+                        .iter()
+                        .filter(|block| block["type"].as_str() == Some("text"))
+                        .filter_map(|block| block["text"].as_str())
+                        .collect();
+                    if !text.is_empty() {
+                        on_answer(text.clone());
+                        state.answer.push_str(&text);
+                        state.streamed = true;
+                    }
+                }
+            }
+        }
+        // Authoritative final answer.
+        "result" => {
+            if let Some(text) = value["result"].as_str() {
+                state.final_result = Some(text.trim().to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_stream_emits_token_deltas_and_captures_result() {
+        use std::cell::RefCell;
+        let deltas = RefCell::new(Vec::new());
+        let tools = RefCell::new(Vec::new());
+        let on_answer = |d: String| deltas.borrow_mut().push(d);
+        let on_tool = |ev: AgentToolEvent| tools.borrow_mut().push((ev.tool, ev.phase, ev.ok));
+        let mut state = ClaudeStreamState::default();
+
+        for line in [
+            r#"{"type":"system","subtype":"init"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"mcp__lumenfolio__search_chunks"}}}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","is_error":false}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}}"#,
+            r#"{"type":"result","subtype":"success","result":"Hello"}"#,
+        ] {
+            handle_claude_line(line, &on_tool, &on_answer, &mut state);
+        }
+
+        assert_eq!(*deltas.borrow(), vec!["Hel".to_string(), "lo".to_string()]);
+        assert_eq!(state.answer, "Hello");
+        assert_eq!(state.final_result.as_deref(), Some("Hello"));
+        let tools = tools.borrow();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].1, AgentToolPhase::Started);
+        assert_eq!(tools[0].0, "mcp__lumenfolio__search_chunks");
+        assert_eq!(tools[1].1, AgentToolPhase::Completed);
+        assert_eq!(tools[1].0, "mcp__lumenfolio__search_chunks");
+    }
+
+    #[test]
+    fn claude_stream_falls_back_to_complete_assistant_message() {
+        // No partial deltas (e.g. --include-partial-messages unsupported): a full
+        // assistant message is emitted once so the bubble still gets the answer.
+        use std::cell::RefCell;
+        let deltas = RefCell::new(Vec::new());
+        let on_answer = |d: String| deltas.borrow_mut().push(d);
+        let on_tool = |_ev: AgentToolEvent| {};
+        let mut state = ClaudeStreamState::default();
+        handle_claude_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Atomic answer."}]}}"#,
+            &on_tool,
+            &on_answer,
+            &mut state,
+        );
+        assert_eq!(*deltas.borrow(), vec!["Atomic answer.".to_string()]);
+        assert_eq!(state.answer, "Atomic answer.");
+    }
 
     #[test]
     fn parse_version_extracts_dotted_token() {

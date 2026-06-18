@@ -674,6 +674,11 @@ pub async fn run_agentic_probe_from_env() -> Result<(), String> {
             };
             println!("TRACE {phase} {}", ev.tool);
         },
+        |delta: String| {
+            use std::io::Write;
+            print!("{delta}");
+            let _ = std::io::stdout().flush();
+        },
     )
     .await?;
 

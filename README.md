@@ -123,6 +123,16 @@ This path is not another cloud API form. It connects your existing local agent s
 
 In practice, Lumenfolio exposes its local PDF evidence layer to your local agent, so Codex / Claude Code can read a paper more like it reads a codebase: by stepping through structure, evidence, figures, tables, and context.
 
+## Multimodal Chat
+
+Lumenfolio chat can handle image questions, not only text questions. Paste or attach a screenshot, figure, table, diagram, equation crop, or UI image into the composer, then ask a vision-capable model to explain it in the context of your current reading session.
+
+This is useful when a paper's key idea lives in a figure rather than a paragraph: you can paste the image, ask what the architecture means, compare it with the surrounding PDF evidence, and keep the discussion in the same chat where citations, notes, and agent traces already live.
+
+![Lumenfolio multimodal image question composer](./docs/assets/lumenfolio-multimodal-image-composer.png)
+
+![Lumenfolio multimodal image answer](./docs/assets/lumenfolio-multimodal-image-answer.png)
+
 ## Agent Sessions
 
 The agent area is an independent multi-session workspace, not a chat box bolted onto one PDF. Sessions are decoupled from documents:
@@ -221,6 +231,7 @@ The agent is aware of what you are looking at and can reach beyond the focused P
 - Native tool-calling agent loop for capable models, with a rule-driven fallback for weaker/local models
 - Local agent providers: auto-detect Codex / Claude Code CLI and use them as no-extra-API-key local chat models
 - Local-agent MCP mode: let Codex / Claude call Lumenfolio read-only tools for pages, sections, tables, and visual evidence
+- Multimodal chat: paste screenshots or images and ask a vision-capable model about figures, tables, diagrams, equations, or external screenshots
 - Cross-document chat: `@`-mention up to 4 other indexed papers in one question
 - Knowledge precipitation (summary, entities, concepts, keywords) per document, fully local
 - Cross-document knowledge graph: reader-side concept-bridge graph + full-screen library graph with communities and insights

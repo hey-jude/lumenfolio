@@ -977,6 +977,8 @@ async fn test_local_agent_connection(
         None,
         tokio_util::sync::CancellationToken::new(),
         on_tool,
+        // Connection health check — the answer text is discarded, so don't stream it.
+        |_delta: String| {},
     )
     .await
     {
@@ -3054,6 +3056,21 @@ questions spanning their library use search_library_knowledge / query_knowledge_
                     ),
                 );
             };
+            // Live answer streaming (Claude stream-json): relay each token delta to
+            // the chat bubble via the same answer-delta event the HTTP path uses.
+            let answer_app = app.clone();
+            let answer_event_id = activity_event_id.clone();
+            let on_answer = move |delta: String| {
+                if let Some(event_id) = answer_event_id.as_deref() {
+                    let _ = answer_app.emit(
+                        "lumenfolio://answer-delta",
+                        AnswerDeltaEventOutput {
+                            event_id: event_id.to_string(),
+                            delta,
+                        },
+                    );
+                }
+            };
             match local_agent::generate_answer_agentic(
                 kind,
                 std::path::PathBuf::from(db_path.unwrap_or_default()),
@@ -3062,6 +3079,7 @@ questions spanning their library use search_library_knowledge / query_knowledge_
                 input.image_data_url.clone(),
                 agent_cancel.clone(),
                 on_tool,
+                on_answer,
             )
             .await
             {

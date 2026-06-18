@@ -123,6 +123,16 @@ Lumenfolio 可以把本机已安装的 Codex 和 Claude Code CLI 变成“本地
 
 因此 Lumenfolio 不只是“接一个大模型回答 PDF”，而是把本地 PDF 证据层暴露给本机 agent：让 Codex / Claude Code 像读代码仓库一样，分步读取论文结构、证据、图表和上下文。
 
+## 多模态 Chat
+
+Lumenfolio 的 Chat 不只处理文本问题，也可以处理图片问题。用户可以直接把截图、论文图、表格、架构图、公式局部或其它 UI 图片粘贴 / 附加到输入框里，再让支持视觉的模型结合当前阅读上下文解释图片内容。
+
+这对论文阅读很实用：很多关键贡献不是写在段落里，而是藏在方法图、系统架构图、实验表格或公式推导截图中。你可以粘贴图片后直接问“大图表达了什么”“这张表的结论是什么”“这个模块和正文描述怎么对应”，并把讨论留在同一个 Chat 中，继续使用 citation、笔记和 agent trace。
+
+![Lumenfolio 多模态图片提问输入框](./docs/assets/lumenfolio-multimodal-image-composer.png)
+
+![Lumenfolio 多模态图片回答](./docs/assets/lumenfolio-multimodal-image-answer.png)
+
 ## Agent 会话
 
 Agent 区是一个独立的多会话工作区，而不是绑在某一篇 PDF 上的聊天框。会话与文档解耦：
@@ -221,6 +231,7 @@ Agent 知道你当前在看什么,并能在 **任意视图** 越过当前 PDF �
 - 面向支持工具调用模型的 native tool-calling agent loop，弱 / 本地模型自动回退到规则路径
 - 本地 Agent Provider：自动检测 Codex / Claude Code CLI，支持免 API key 的本机 agent 回答
 - 本地 agent MCP 模式：让 Codex / Claude 调用 Lumenfolio 只读工具检索页面、章节、表格和视觉证据
+- 多模态 Chat：直接粘贴截图 / 图片，向支持视觉的模型询问图、表格、架构图、公式或外部截图
 - 跨文档对话：一次提问可 `@` 引用至多 4 篇其它已索引论文
 - 知识沉淀（摘要、实体、概念、关键词），逐文档、全本地
 - 跨文档知识图谱：阅读侧概念桥接图 + 全屏库级图谱（社区聚类与洞察）
