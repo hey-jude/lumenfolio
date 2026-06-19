@@ -1,15 +1,22 @@
-// Fetch the ONNX models bundled with the app into `.models/`.
+// Fetch the native libraries / ONNX models bundled with the app into `.models/`.
 //
 // `.models/` is gitignored, so a fresh clone / CI machine has no models. Run
 // `npm run fetch:models` to download them. Existing files of the right size are
 // skipped, so re-running is cheap and idempotent.
 //
-// Models:
-//   OCR — PP-OCRv4 mobile (RapidOCR / PaddleOCR), Apache-2.0
+// Contents:
+//   OCR    — PP-OCRv4 mobile (RapidOCR / PaddleOCR), Apache-2.0
+//   Pdfium — bblanchon/pdfium-binaries (per-platform native lib). The Rust
+//            backend dlopen()s this at index time; without it every document
+//            reindex fails and reading silently falls back to PDF.js. The lib is
+//            placed at `.models/pdfium/lib/<platform lib name>`, which is exactly
+//            where vision::pdfium_dir_from_env_or_default() looks.
 
-import { createWriteStream, existsSync, mkdirSync, statSync } from 'node:fs'
+import { copyFileSync, createWriteStream, existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { tmpdir } from 'node:os'
+import { execFileSync } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 
@@ -43,6 +50,20 @@ const FILES = [
   },
 ]
 
+// Pdfium ships as a per-platform tarball. Pick the asset + the library member to
+// extract, and the canonical name pdfium-render expects inside `.models/pdfium/lib/`.
+const PDFIUM_RELEASE =
+  'https://github.com/bblanchon/pdfium-binaries/releases/latest/download'
+const PDFIUM_TARGETS = {
+  'darwin-arm64': { asset: 'pdfium-mac-arm64.tgz', member: 'lib/libpdfium.dylib', libName: 'libpdfium.dylib' },
+  'darwin-x64': { asset: 'pdfium-mac-x64.tgz', member: 'lib/libpdfium.dylib', libName: 'libpdfium.dylib' },
+  'linux-x64': { asset: 'pdfium-linux-x64.tgz', member: 'lib/libpdfium.so', libName: 'libpdfium.so' },
+  'linux-arm64': { asset: 'pdfium-linux-arm64.tgz', member: 'lib/libpdfium.so', libName: 'libpdfium.so' },
+  'win32-x64': { asset: 'pdfium-win-x64.tgz', member: 'bin/pdfium.dll', libName: 'pdfium.dll' },
+  'win32-arm64': { asset: 'pdfium-win-arm64.tgz', member: 'bin/pdfium.dll', libName: 'pdfium.dll' },
+}
+const PDFIUM_MIN_BYTES = 2_000_000
+
 function isPresent(absPath, minBytes) {
   if (!existsSync(absPath)) return false
   try {
@@ -59,6 +80,43 @@ async function download(url, absPath) {
     throw new Error(`HTTP ${response.status} for ${url}`)
   }
   await pipeline(Readable.fromWeb(response.body), createWriteStream(absPath))
+}
+
+// Download the platform pdfium tarball and extract just the native library into
+// `.models/pdfium/lib/`. Returns 'downloaded' | 'skipped'.
+async function fetchPdfium() {
+  const key = `${process.platform}-${process.arch}`
+  const target = PDFIUM_TARGETS[key]
+  if (!target) {
+    console.log(`  skip  pdfium (no prebuilt binary mapped for ${key})`)
+    return 'skipped'
+  }
+  const destPath = join(modelsRoot, 'pdfium', 'lib', target.libName)
+  if (isPresent(destPath, PDFIUM_MIN_BYTES)) {
+    console.log(`  skip  pdfium/lib/${target.libName} (already present)`)
+    return 'skipped'
+  }
+  process.stdout.write(`  get   pdfium/lib/${target.libName} ... `)
+  const tmpDir = join(tmpdir(), `lumenfolio-pdfium-${process.pid}`)
+  const tgzPath = join(tmpDir, target.asset)
+  mkdirSync(tmpDir, { recursive: true })
+  try {
+    await download(`${PDFIUM_RELEASE}/${target.asset}`, tgzPath)
+    // tar is available on macOS, Linux, and Windows 10+ (bsdtar).
+    execFileSync('tar', ['-xzf', tgzPath, '-C', tmpDir, target.member])
+    mkdirSync(dirname(destPath), { recursive: true })
+    copyFileSync(join(tmpDir, target.member), destPath)
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true })
+  }
+  const size = statSync(destPath).size
+  if (size < PDFIUM_MIN_BYTES) {
+    throw new Error(
+      `Extracted pdfium is only ${size} bytes (expected >= ${PDFIUM_MIN_BYTES}); the source may have moved.`,
+    )
+  }
+  console.log(`${(size / 1_000_000).toFixed(1)} MB`)
+  return 'downloaded'
 }
 
 async function main() {
@@ -83,6 +141,8 @@ async function main() {
     console.log(`${(size / 1_000_000).toFixed(1)} MB`)
     downloaded += 1
   }
+  if ((await fetchPdfium()) === 'downloaded') downloaded += 1
+  else skipped += 1
   console.log(`Done: ${downloaded} downloaded, ${skipped} skipped.`)
   console.log('Note: TSR is optional and is not bundled by this release model fetcher.')
 }

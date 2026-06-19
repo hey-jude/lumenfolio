@@ -40,7 +40,8 @@
     "targets": "all",
     "resources": [
       "../resources/pdf2zh-sidecar",
-      "../.models/ocr"
+      "../.models/ocr",
+      "../.models/pdfium"
     ],
     "icon": [
       "icons/32x32.png",

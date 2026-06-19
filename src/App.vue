@@ -4148,11 +4148,15 @@ function handleDocumentIndexEvent(payload) {
       payload.stageLabel || '',
     )
     target.backendIndexFailed = true
+    // Surface a short, localized message; keep the raw backend error (which can be a
+    // multi-line native stack, e.g. a Pdfium dlopen failure) in the console for debugging
+    // rather than dumping it into the sidebar.
+    if (payload.error) {
+      console.warn('Backend document index failed', payload.error)
+    }
     workspaceError.value = String(payload.error || '').includes('SCANNED_PDF_NO_TEXT')
       ? ui.value.scannedPdfUnsupported
-      : payload.error
-        ? `Backend reindex failed, falling back to PDF.js: ${payload.error}`
-        : 'Backend reindex failed, falling back to PDF.js'
+      : ui.value.backendIndexFallback
     if (selectedDocId.value === documentId) {
       viewerReloadKey.value += 1
     }
