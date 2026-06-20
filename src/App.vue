@@ -767,6 +767,28 @@ const selectedDocument = computed(() => (
   || allDocs.value[0]
   || emptyDocument.value
 ))
+// Starter questions shown in the chat empty state. Two layers, no extra LLM call:
+// (A) static common questions, always available even before indexing finishes; and
+// (B) document-specific prompts derived from the already-computed knowledge card's
+// top concepts. Empty when there's no real document open.
+const suggestedQuestions = computed(() => {
+  if (!selectedDocument.value || selectedDocument.value.id === 'empty') return []
+  const t = ui.value
+  const questions = [
+    t.suggestQSummary,
+    t.suggestQContributions,
+    t.suggestQMethods,
+    t.suggestQLimitations,
+  ]
+  const concepts = Array.isArray(knowledgeCard.value?.concepts)
+    ? knowledgeCard.value.concepts
+    : []
+  for (const concept of concepts.slice(0, 2)) {
+    const name = String(concept?.name || '').trim()
+    if (name) questions.push(t.suggestQExplainConcept.replace('{concept}', name))
+  }
+  return questions.filter(Boolean)
+})
 // Show the Trending discovery feed when explicitly opened, OR when there is no
 // real document to read (empty reader doubles as the discovery surface). Never
 // when the user has disabled online discovery.
@@ -4895,6 +4917,7 @@ onMounted(() => {
       :model-configured="chatModelConfigured"
       :pending-selection="lastSelection"
       :focus-request="chatFocusRequest"
+      :suggested-questions="suggestedQuestions"
       :sessions="sessionTabs"
       :history-items="sessionHistoryItems"
       :history-open="sessionHistoryOpen"

@@ -104,6 +104,13 @@ const props = defineProps({
     type: Object,
     required: true,
   },
+  // Suggested starter questions shown in the empty state (before the first turn).
+  // Built by the parent from static common questions + the document's knowledge
+  // card; clicking one sends it immediately.
+  suggestedQuestions: {
+    type: Array,
+    default: () => [],
+  },
 })
 
 const emit = defineEmits([
@@ -463,6 +470,19 @@ function handleSubmit(event) {
   clearMentions()
   closeMentionPicker()
   composerDrafts.delete(props.session?.id || '')
+  autoFollowMessages.value = true
+  scrollMessagesToBottom({ force: true })
+}
+
+function sendSuggestedQuestion(text) {
+  const question = String(text || '').trim()
+  if (!question || !chatInputEnabled.value) return
+  emit('send', {
+    text: question,
+    imageDataUrl: '',
+    imageName: '',
+    mentionedDocIds: [],
+  })
   autoFollowMessages.value = true
   scrollMessagesToBottom({ force: true })
 }
@@ -1761,6 +1781,22 @@ function evidenceSourceLabel(source) {
         <div v-if="!visibleMessages.length" class="chat-empty-state">
           <div class="chat-empty-title">{{ ui.chatEmptyTitle }}</div>
           <div class="chat-empty-copy">{{ ui.chatEmptyHint }}</div>
+          <div
+            v-if="chatInputEnabled && suggestedQuestions.length"
+            class="chat-suggestions"
+          >
+            <div class="chat-suggestions-label">{{ ui.suggestedQuestionsTitle }}</div>
+            <button
+              v-for="(question, index) in suggestedQuestions"
+              :key="index"
+              type="button"
+              class="chat-suggestion-chip"
+              :title="question"
+              @click="sendSuggestedQuestion(question)"
+            >
+              {{ question }}
+            </button>
+          </div>
         </div>
           <article
             v-for="message in visibleMessages"
@@ -2727,6 +2763,41 @@ function evidenceSourceLabel(source) {
   margin-top: 8px;
   font-size: 13px;
   line-height: 1.65;
+}
+
+.chat-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 30rem;
+  margin-top: 16px;
+}
+
+.chat-suggestions-label {
+  width: 100%;
+  margin-bottom: 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.chat-suggestion-chip {
+  max-width: 100%;
+  padding: 7px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  color: var(--text-primary);
+  font-size: 12.5px;
+  line-height: 1.3;
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.chat-suggestion-chip:hover {
+  border-color: var(--accent, #8ae8ff);
+  background: rgba(138, 232, 255, 0.1);
 }
 
 .message-role,
