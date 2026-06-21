@@ -290,6 +290,342 @@ fn related_inter_links(
         .collect())
 }
 
+// ---- Post-answer recommendations (turn-contextual) -------------------------
+
+const TURN_RELATED_LIMIT: usize = 5;
+const TURN_CLAIMS_LIMIT: usize = 4;
+// A recommendation block auto-expands in the chat only when the top neighbour
+// shares at least this many concepts; otherwise it stays a quiet affordance.
+const CONFIDENT_MIN_SHARED: usize = 2;
+// Recent claims scanned when matching prior knowledge to this turn's concepts.
+const CLAIMS_SCAN_LIMIT: usize = 200;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RelatedClaim {
+    pub document_id: String,
+    pub title: String,
+    pub claim: String,
+    pub question: String,
+    pub shared_concepts: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TurnRecommendationsPayload {
+    pub related: Vec<RelatedDocument>,
+    pub claims: Vec<RelatedClaim>,
+    pub confident: bool,
+}
+
+/// Whether `needle` (already lowercased) occurs in `haystack` as a concept
+/// mention. For ASCII needles we require word boundaries so a short name like
+/// "ai"/"gan" doesn't match inside "maintain"/"organ"; CJK and other scripts have
+/// no word separators, so there we fall back to plain substring containment.
+fn concept_mentioned(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let word_like = needle
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b' ' || b == b'-');
+    if !word_like {
+        return haystack.contains(needle);
+    }
+    let bytes = haystack.as_bytes();
+    let nlen = needle.len();
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + nlen;
+        let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1; // needle is ASCII here, so +1 lands on a char boundary
+    }
+    false
+}
+
+/// Recommendations shown after a completed chat turn: other library papers and
+/// prior knowledge (precipitated claims) relevant to *what this turn was about*.
+///
+/// Unlike `get_related_documents` (keyed on the whole focus document), the seed
+/// here is the subset of the focus doc's concepts/entities actually mentioned in
+/// this turn's question + distilled claims — so the picks track the question, not
+/// the paper. Pure SQL over already-precipitated data: no LLM call (honouring the
+/// zero-LLM conversation-time contract).
+#[tauri::command]
+pub(crate) fn get_turn_recommendations(
+    turn_id: String,
+    database: tauri::State<'_, AppDatabase>,
+) -> Result<TurnRecommendationsPayload, String> {
+    use std::collections::{HashMap, HashSet};
+    let turn_id = turn_id.trim().to_string();
+    let empty = TurnRecommendationsPayload {
+        related: Vec::new(),
+        claims: Vec::new(),
+        confident: false,
+    };
+    if turn_id.is_empty() {
+        return Ok(empty);
+    }
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+
+    // 1. The turn's focus doc + the text it was about (question + every claim).
+    let mut focus_document_id = String::new();
+    let mut text_parts: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT document_id, question, claim FROM knowledge_claims WHERE turn_id = ?1")
+            .map_err(|err| format!("Failed to prepare turn claims query: {err}"))?;
+        let rows = stmt
+            .query_map(params![turn_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|err| format!("Failed to query turn claims: {err}"))?;
+        for row in rows.filter_map(Result::ok) {
+            let (doc, question, claim) = row;
+            if focus_document_id.is_empty() {
+                focus_document_id = doc;
+            }
+            if !question.trim().is_empty() {
+                text_parts.push(question);
+            }
+            text_parts.push(claim);
+        }
+    }
+    // No precipitated claims for this turn (e.g. knowledge disabled, or the answer
+    // produced none) → nothing turn-specific to recommend on.
+    if focus_document_id.is_empty() {
+        return Ok(empty);
+    }
+
+    // 2. Seed concepts: focus-doc concepts/entities whose name appears in the
+    //    turn text, falling back to the doc's top-salience concepts.
+    let haystack = text_parts.join(" \n ").to_lowercase();
+    let mut seed: HashMap<String, String> = HashMap::new(); // normalized -> display name
+    let mut fallback: Vec<(String, String)> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT normalized, name FROM document_artifacts
+                 WHERE document_id = ?1 AND kind IN ('entity','concept') AND normalized <> ''
+                 ORDER BY salience DESC",
+            )
+            .map_err(|err| format!("Failed to prepare seed query: {err}"))?;
+        let rows = stmt
+            .query_map(params![focus_document_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|err| format!("Failed to query seed concepts: {err}"))?;
+        for row in rows.filter_map(Result::ok) {
+            let (normalized, name) = row;
+            let needle = name.trim().to_lowercase();
+            if needle.len() >= 2 && concept_mentioned(&haystack, &needle) {
+                seed.entry(normalized.clone()).or_insert_with(|| name.clone());
+            }
+            if fallback.len() < 8 {
+                fallback.push((normalized, name));
+            }
+        }
+    }
+    if seed.is_empty() {
+        for (normalized, name) in fallback {
+            seed.entry(normalized).or_insert(name);
+        }
+    }
+    if seed.is_empty() {
+        return Ok(empty);
+    }
+    let seed_keys: Vec<String> = seed.keys().cloned().collect();
+
+    // 3. Document frequency per concept (Adamic-Adar rarity). Scoped to the seed
+    //    keys (only their df is read) so this stays cheap on the chat hot path
+    //    instead of grouping the whole artifact table every answer.
+    let doc_freq: HashMap<String, i64> = {
+        let placeholders = seed_keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT normalized, COUNT(DISTINCT document_id)
+             FROM document_artifacts
+             WHERE kind IN ('entity','concept') AND normalized IN ({placeholders})
+             GROUP BY normalized"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|err| format!("Failed to prepare doc-frequency query: {err}"))?;
+        let bind = rusqlite::params_from_iter(seed_keys.iter().cloned());
+        let map = stmt
+            .query_map(bind, |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(|err| format!("Failed to query doc frequency: {err}"))?
+            .filter_map(Result::ok)
+            .collect();
+        map
+    };
+
+    // 4. Rank OTHER documents by how many seed concepts they share.
+    struct Acc {
+        title: String,
+        seen: HashSet<String>,
+        names: Vec<String>,
+        overlap: f64,
+        adamic_adar: f64,
+    }
+    let mut acc: HashMap<String, Acc> = HashMap::new();
+    {
+        let placeholders = seed_keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT a.document_id, d.title, a.name, a.normalized, a.kind
+             FROM document_artifacts a
+             JOIN documents d ON d.id = a.document_id
+             WHERE a.document_id <> ?1
+               AND a.kind IN ('entity','concept')
+               AND a.normalized IN ({placeholders})"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|err| format!("Failed to prepare turn-related query: {err}"))?;
+        let bind = rusqlite::params_from_iter(
+            std::iter::once(focus_document_id.clone()).chain(seed_keys.iter().cloned()),
+        );
+        let rows = stmt
+            .query_map(bind, |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(|err| format!("Failed to query turn-related: {err}"))?;
+        for row in rows.filter_map(Result::ok) {
+            let (other_id, title, name, normalized, kind) = row;
+            let entry = acc.entry(other_id).or_insert_with(|| Acc {
+                title,
+                seen: HashSet::new(),
+                names: Vec::new(),
+                overlap: 0.0,
+                adamic_adar: 0.0,
+            });
+            if !entry.seen.insert(normalized.clone()) {
+                continue;
+            }
+            let affinity = if kind == "entity" { ENTITY_AFFINITY } else { 1.0 };
+            entry.overlap += affinity;
+            let df = (*doc_freq.get(&normalized).unwrap_or(&2)).max(2) as f64;
+            entry.adamic_adar += affinity / df.ln();
+            if entry.names.len() < MAX_SHARED_NAMES {
+                entry.names.push(name);
+            }
+        }
+    }
+
+    let mut related: Vec<RelatedDocument> = acc
+        .into_iter()
+        .map(|(document_id, item)| RelatedDocument {
+            document_id,
+            title: item.title,
+            score: item.overlap * W_OVERLAP + item.adamic_adar * W_ADAMIC_ADAR,
+            shared_concepts: item.names,
+            co_citation: 0.0,
+        })
+        .filter(|item| item.score > 0.0)
+        .collect();
+    related.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    related.truncate(TURN_RELATED_LIMIT);
+
+    // 5. Prior knowledge: recent claims from OTHER turns whose text mentions a
+    //    seed concept. The matched concept names are the "why" shown to the user.
+    let seed_needles: Vec<(String, String)> = seed
+        .iter()
+        .map(|(_, name)| (name.trim().to_lowercase(), name.clone()))
+        .filter(|(needle, _)| needle.len() >= 2)
+        .collect();
+    let mut claims: Vec<RelatedClaim> = Vec::new();
+    if !seed_needles.is_empty() {
+        let mut seen_claims: HashSet<String> = HashSet::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT kc.document_id, d.title, kc.claim, kc.question
+                 FROM knowledge_claims kc
+                 JOIN documents d ON d.id = kc.document_id
+                 WHERE kc.turn_id <> ?1 AND kc.document_id <> ?2
+                 ORDER BY kc.created_at DESC
+                 LIMIT ?3",
+            )
+            .map_err(|err| format!("Failed to prepare related-claims query: {err}"))?;
+        let rows = stmt
+            .query_map(
+                params![turn_id, focus_document_id, CLAIMS_SCAN_LIMIT as i64],
+                |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|err| format!("Failed to query related claims: {err}"))?;
+        for row in rows.filter_map(Result::ok) {
+            let (document_id, title, claim, question) = row;
+            let claim_lc = claim.to_lowercase();
+            let mut matched: Vec<String> = Vec::new();
+            for (needle, name) in &seed_needles {
+                if concept_mentioned(&claim_lc, needle) && !matched.iter().any(|m| m == name) {
+                    matched.push(name.clone());
+                }
+            }
+            if matched.is_empty() {
+                continue;
+            }
+            let dedup_key = claim_lc.clone();
+            if !seen_claims.insert(dedup_key) {
+                continue;
+            }
+            matched.truncate(MAX_SHARED_NAMES);
+            claims.push(RelatedClaim {
+                document_id,
+                title,
+                claim,
+                question,
+                shared_concepts: matched,
+            });
+            if claims.len() >= TURN_CLAIMS_LIMIT {
+                break;
+            }
+        }
+    }
+
+    // Auto-expand only when the top pick shares ≥2 concepts: one shared concept —
+    // even a rare one — scores ~3.9 (1·W_OVERLAP + 1/ln(2)·W_ADAMIC_ADAR), so a
+    // score gate would auto-expand almost everything and defeat the quiet default.
+    let confident = related
+        .first()
+        .is_some_and(|top| top.shared_concepts.len() >= CONFIDENT_MIN_SHARED);
+
+    Ok(TurnRecommendationsPayload {
+        related,
+        claims,
+        confident,
+    })
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct LibraryHit {

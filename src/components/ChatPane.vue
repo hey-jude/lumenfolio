@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import MarkdownText from './MarkdownText.vue'
 import { startWindowDrag } from '../windowDrag'
 import { testAttrs } from '../testAttrs'
@@ -132,7 +132,40 @@ const emit = defineEmits([
   'toggle-notes',
   'set-focus-doc',
   'edit-resend',
+  'open-doc',
 ])
+
+// Post-answer recommendations (related papers / prior knowledge) attach to the
+// assistant message as `message.recommendations`. The block auto-expands when the
+// backend judged the picks confident; the user can still toggle it per message.
+const recommendationOverrides = reactive({})
+
+function messageRecommendations(message) {
+  const rec = message?.recommendations
+  if (!rec) return null
+  const hasRelated = Array.isArray(rec.related) && rec.related.length > 0
+  const hasClaims = Array.isArray(rec.claims) && rec.claims.length > 0
+  // Return the stored object (stable identity) rather than a fresh literal, so
+  // the several template reads per render don't each allocate a new object.
+  return hasRelated || hasClaims ? rec : null
+}
+
+function recommendationCount(message) {
+  const rec = messageRecommendations(message)
+  if (!rec) return 0
+  return rec.related.length + rec.claims.length
+}
+
+function isRecExpanded(message) {
+  const override = recommendationOverrides[message?.id]
+  if (typeof override === 'boolean') return override
+  return Boolean(message?.recommendations?.confident)
+}
+
+function toggleRecommendations(message) {
+  if (!message?.id) return
+  recommendationOverrides[message.id] = !isRecExpanded(message)
+}
 
 // Inline edit of the last user question ("edit & re-ask"). Only one message is
 // editable at a time; submitting replaces the last turn (handled by the parent).
@@ -2027,6 +2060,49 @@ function evidenceSourceLabel(source) {
               </div>
             </div>
 
+            <div v-if="messageRecommendations(message)" class="chat-recommendations">
+              <button
+                type="button"
+                class="rec-toggle"
+                :aria-expanded="isRecExpanded(message)"
+                @click="toggleRecommendations(message)"
+              >
+                <span class="rec-toggle-label">{{ ui.recommendationsTitle }}</span>
+                <span class="rec-toggle-count">{{ recommendationCount(message) }}</span>
+                <span class="rec-toggle-caret" aria-hidden="true">{{ isRecExpanded(message) ? '▾' : '▸' }}</span>
+              </button>
+              <div v-if="isRecExpanded(message)" class="rec-body">
+                <div v-if="messageRecommendations(message).related.length" class="rec-section">
+                  <div class="rec-section-label">{{ ui.recommendationsRelatedPapers }}</div>
+                  <button
+                    v-for="doc in messageRecommendations(message).related"
+                    :key="`${message.id}-rec-doc-${doc.documentId}`"
+                    type="button"
+                    class="rec-item"
+                    :title="doc.title"
+                    @click="emit('open-doc', doc.documentId)"
+                  >
+                    <span class="rec-item-title">{{ doc.title }}</span>
+                    <span v-if="doc.sharedConcepts.length" class="rec-item-why">{{ doc.sharedConcepts.join(' · ') }}</span>
+                  </button>
+                </div>
+                <div v-if="messageRecommendations(message).claims.length" class="rec-section">
+                  <div class="rec-section-label">{{ ui.recommendationsRelatedKnowledge }}</div>
+                  <button
+                    v-for="(claim, index) in messageRecommendations(message).claims"
+                    :key="`${message.id}-rec-claim-${index}`"
+                    type="button"
+                    class="rec-item rec-claim"
+                    :title="claim.question || claim.claim"
+                    @click="emit('open-doc', claim.documentId)"
+                  >
+                    <span class="rec-item-title">{{ claim.claim }}</span>
+                    <span class="rec-item-why">{{ claim.title }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
             <details
               v-if="message.retrievalTrace || message.activityEvents?.length"
               class="agent-activity agent-trace-drawer"
@@ -3019,6 +3095,117 @@ function evidenceSourceLabel(source) {
 
 .evidence-group {
   margin-top: 12px;
+}
+
+/* Post-answer recommendations: related papers + prior knowledge. */
+.chat-recommendations {
+  margin-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 10px;
+}
+
+.rec-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.rec-toggle:hover {
+  color: var(--text-secondary);
+}
+
+.rec-toggle-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(106, 169, 255, 0.16);
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.rec-toggle-caret {
+  margin-left: auto;
+  font-size: 10px;
+}
+
+.rec-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.rec-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rec-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.rec-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+.rec-item:hover {
+  border-color: rgba(106, 169, 255, 0.45);
+  background: rgba(106, 169, 255, 0.08);
+}
+
+.rec-item-title {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rec-claim .rec-item-title {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.rec-item-why {
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Multi-document "Sources:" line above the evidence strip. */

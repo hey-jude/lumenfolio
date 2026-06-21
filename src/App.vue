@@ -589,6 +589,7 @@ async function ensureSessionHistory(session) {
         persisted: true,
       }))
       mergeSessionHistoryMessages(session, historyMessages)
+      hydrateHistoryRecommendations(session)
       if (session.id === activeSessionId.value) {
         activeCitationId.value = session.messages.flatMap((message) => message.citations || [])[0]?.id || ''
       }
@@ -2283,6 +2284,46 @@ function applyAskDocumentMetadata(message, result) {
   if (message.sessionId) {
     const session = chatSessions.get(message.sessionId)
     if (session) void maybeGenerateSessionTitle(session)
+  }
+  // After the answer settles, surface related papers + prior knowledge for it.
+  void loadTurnRecommendations(message)
+}
+
+// Reloaded history turns also carry recommendations (the backend still has their
+// claims). Fetch only the most recent assistant turns so opening a long session
+// doesn't fire dozens of queries; fire-and-forget so it never blocks the load.
+function hydrateHistoryRecommendations(session) {
+  if (!knowledgeEnabled.value || !session) return
+  const turns = (session.messages || []).filter(
+    (message) => message.role === 'assistant'
+      && (message.turnId || message.activityEventId)
+      && !message.recommendations,
+  )
+  for (const message of turns.slice(-10)) {
+    void loadTurnRecommendations(message)
+  }
+}
+
+// Post-answer intelligent recommendations: ask the backend for other library
+// papers + precipitated claims relevant to *this* turn (graph-only, no LLM). The
+// turn's persisted id is its activityEventId (== backend turn_id). Best-effort —
+// recommendations are a nicety, never block or surface an error.
+async function loadTurnRecommendations(message) {
+  if (!knowledgeEnabled.value || !message) return
+  const turnId = String(message.turnId || message.activityEventId || '').trim()
+  if (!turnId) return
+  try {
+    const payload = await invoke('get_turn_recommendations', { turnId })
+    const related = Array.isArray(payload?.related) ? payload.related : []
+    const claims = Array.isArray(payload?.claims) ? payload.claims : []
+    if (!related.length && !claims.length) return
+    message.recommendations = {
+      related,
+      claims,
+      confident: Boolean(payload?.confident),
+    }
+  } catch {
+    // Ignore: a missing recommendation block is not worth a banner.
   }
 }
 
@@ -4941,6 +4982,7 @@ onMounted(() => {
       @set-focus-doc="handleSetSessionFocus"
       @edit-resend="handleEditResend"
       @send="handleSend"
+      @open-doc="selectDoc"
     />
 
     <Transition name="notes-drawer">

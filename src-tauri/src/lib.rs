@@ -5261,6 +5261,7 @@ pub fn run() {
             runtime::precipitation::consolidate_knowledge,
             runtime::knowledge_graph::get_knowledge_graph,
             runtime::knowledge_graph::get_related_documents,
+            runtime::knowledge_graph::get_turn_recommendations,
             update_check::check_for_update,
             open_external_url,
             local_agent::get_local_agent_status,

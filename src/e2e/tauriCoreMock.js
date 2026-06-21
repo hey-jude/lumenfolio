@@ -18,5 +18,9 @@ export async function invoke(command) {
   // e2e there is no Rust backend to emit them, so a no-op resolve is sufficient
   // to keep the composer flow (including @-mention payloads) from throwing.
   if (command === 'ask_document_stream') return null
+  // Post-answer recommendations are a best-effort enhancement; e2e has no graph.
+  if (command === 'get_turn_recommendations') {
+    return { related: [], claims: [], confident: false }
+  }
   throw new Error(`Unhandled e2e Tauri invoke: ${command}`)
 }
