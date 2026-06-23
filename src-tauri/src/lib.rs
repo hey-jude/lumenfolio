@@ -317,6 +317,10 @@ struct AskDocumentInput {
     /// sedimentation). Defaults to true for legacy callers.
     #[serde(default)]
     knowledge_enabled: Option<bool>,
+    /// Whether the chat's "联网" (web search) toggle is on for this turn. Gates the
+    /// web_search/web_fetch tools in the agentic + tool-calling paths. Default off.
+    #[serde(default)]
+    web_enabled: Option<bool>,
     /// Which app surface the user is on right now (reader / trending / graph),
     /// so the agent can resolve "the current trending papers" to the right list
     /// and knows when the question is about something other than the focus PDF.
@@ -639,6 +643,21 @@ struct TranslationSettingsOutput {
     microsoft_endpoint: String,
     microsoft_region: String,
     microsoft_has_api_key: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveWebSearchSettingsInput {
+    /// New Exa API key. None / omitted → keep the existing key. Empty string →
+    /// clear it (revert to the keyless DuckDuckGo fallback).
+    exa_api_key: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebSearchSettingsOutput {
+    /// Whether an Exa key is stored — the key itself is never sent to the frontend.
+    exa_has_api_key: bool,
 }
 
 struct TranslationCacheRecord {
@@ -975,6 +994,7 @@ async fn test_local_agent_connection(
         document_id,
         prompt,
         None,
+        false,
         tokio_util::sync::CancellationToken::new(),
         on_tool,
         // Connection health check — the answer text is discarded, so don't stream it.
@@ -3077,6 +3097,7 @@ questions spanning their library use search_library_knowledge / query_knowledge_
                 document_id.to_string(),
                 prompt,
                 input.image_data_url.clone(),
+                input.web_enabled.unwrap_or(false),
                 agent_cancel.clone(),
                 on_tool,
                 on_answer,
@@ -3961,6 +3982,41 @@ fn save_translation_settings(
         microsoft_endpoint,
         microsoft_region,
         microsoft_has_api_key: !microsoft_api_key.trim().is_empty(),
+    })
+}
+
+#[tauri::command]
+fn load_web_search_settings(
+    database: State<'_, AppDatabase>,
+) -> Result<WebSearchSettingsOutput, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    Ok(WebSearchSettingsOutput {
+        exa_has_api_key: load_app_setting(&conn, "exa_api_key")?
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+    })
+}
+
+#[tauri::command]
+fn save_web_search_settings(
+    input: SaveWebSearchSettingsInput,
+    database: State<'_, AppDatabase>,
+) -> Result<WebSearchSettingsOutput, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    // None → leave the stored key untouched; Some("") → clear; Some(key) → set.
+    if let Some(raw) = input.exa_api_key {
+        save_app_setting(&conn, "exa_api_key", raw.trim())?;
+    }
+    Ok(WebSearchSettingsOutput {
+        exa_has_api_key: load_app_setting(&conn, "exa_api_key")?
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
     })
 }
 
@@ -5303,6 +5359,8 @@ pub fn run() {
             stop_ask_document,
             load_translation_settings,
             save_translation_settings,
+            load_web_search_settings,
+            save_web_search_settings,
             remove_workspace_root,
             list_model_providers,
             save_model_provider,

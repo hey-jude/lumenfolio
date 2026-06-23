@@ -158,6 +158,9 @@ const trendingEnabled = usePersistedRef('trendingEnabled', true)
 // Knowledge precipitation (Stream 1 LLM extraction). Default on; when off, no
 // per-document LLM extraction is triggered. Turning it on triggers a backfill.
 const knowledgeEnabled = usePersistedRef('knowledgeEnabled', true)
+// Chat web search ("联网"). Default off; when on, the agent is offered the
+// web_search / web_fetch tools (Exa when a key is configured, else DuckDuckGo).
+const webSearchEnabled = usePersistedRef('webSearchEnabled', false)
 // Knowledge card for the currently-open document (loaded from get_document_knowledge).
 const knowledgeCard = ref(null) // { status, summary, entities[], concepts[], keywords[], error }
 // Reader-area 阅读/知识 tab: true shows the full-area knowledge view over the
@@ -272,6 +275,9 @@ let localProviderDraftCounter = 1
 let localModelDraftCounter = 0
 const providerForm = reactive(createEmptyProviderForm())
 const microsoftForm = reactive(createEmptyMicrosoftForm())
+// Exa web-search key. `apiKey` is the editable field (blank = unchanged on save);
+// `hasApiKey` reflects whether a key is stored, `status` drives the save button.
+const webSearchForm = reactive({ apiKey: '', hasApiKey: false, status: 'idle' })
 const pdfTranslationRuntime = ref({
   checked: false,
   ok: false,
@@ -1446,6 +1452,32 @@ async function loadTranslationSettings() {
   }
 }
 
+async function loadWebSearchSettings() {
+  try {
+    const settings = await invoke('load_web_search_settings')
+    webSearchForm.apiKey = ''
+    webSearchForm.hasApiKey = Boolean(settings?.exaHasApiKey)
+    webSearchForm.status = 'idle'
+  } catch (err) {
+    console.warn('Failed to load web search settings', err)
+  }
+}
+
+async function saveWebSearchSettings() {
+  webSearchForm.status = 'saving'
+  try {
+    const settings = await invoke('save_web_search_settings', {
+      input: { exaApiKey: webSearchForm.apiKey },
+    })
+    webSearchForm.apiKey = ''
+    webSearchForm.hasApiKey = Boolean(settings?.exaHasApiKey)
+    webSearchForm.status = 'saved'
+  } catch (err) {
+    console.warn('Failed to save web search settings', err)
+    webSearchForm.status = 'error'
+  }
+}
+
 async function openSettings() {
   settingsOpen.value = true
   settingsSection.value = 'chat'
@@ -1455,6 +1487,7 @@ async function openSettings() {
   providerTestMessage.value = ''
   modelFetchStatus.value = 'idle'
   modelFetchMessage.value = ''
+  await loadWebSearchSettings()
   await loadTranslationSettings()
   initializeEditableProviders()
 }
@@ -2045,6 +2078,7 @@ async function handleSend(payload, selection = null) {
         retrievalAttemptOffset,
         activityEventId,
         knowledgeEnabled: knowledgeEnabled.value,
+        webEnabled: webSearchEnabled.value,
         // Ambient surface so the agent can resolve "the current trending papers"
         // and knows when the question isn't about the focus PDF.
         viewContext: {
@@ -4959,6 +4993,7 @@ onMounted(() => {
       :pending-selection="lastSelection"
       :focus-request="chatFocusRequest"
       :suggested-questions="suggestedQuestions"
+      :web-search-enabled="webSearchEnabled"
       :sessions="sessionTabs"
       :history-items="sessionHistoryItems"
       :history-open="sessionHistoryOpen"
@@ -4972,6 +5007,7 @@ onMounted(() => {
       @clear-history="openClearChatHistoryConfirm"
       @new-session="handleNewSession"
       @export-chat="handleExportChat"
+      @toggle-web-search="webSearchEnabled = !webSearchEnabled"
       @stop-generation="handleStopGeneration"
       @select-session="setActiveSession"
       @close-session="closeSessionTab"
@@ -5175,6 +5211,15 @@ onMounted(() => {
             >
               <span>{{ ui.chatProvidersNav }}</span>
               <small>{{ ui.chatProvidersNavHint }}</small>
+            </button>
+            <button
+              type="button"
+              class="settings-nav-item"
+              :class="{ active: settingsSection === 'websearch' }"
+              @click="switchSettingsSection('websearch')"
+            >
+              <span>{{ ui.webSearchNav }}</span>
+              <small>{{ ui.webSearchNavHint }}</small>
             </button>
             <button
               type="button"
@@ -5472,6 +5517,32 @@ onMounted(() => {
                 </button>
               </div>
             </section>
+          </div>
+
+          <div v-if="settingsSection === 'websearch'" class="settings-panel settings-body">
+            <div class="settings-section-title full">{{ ui.webSearchSection }}</div>
+            <div class="settings-note full">{{ ui.webSearchSectionNote }}</div>
+            <label class="settings-field full">
+              <span>{{ ui.exaApiKey }}</span>
+              <input
+                v-model="webSearchForm.apiKey"
+                type="password"
+                autocomplete="off"
+                :placeholder="webSearchForm.hasApiKey ? ui.apiKeyPlaceholder : ui.exaApiKeyPlaceholder"
+              />
+            </label>
+            <div v-if="webSearchForm.hasApiKey" class="settings-note full">{{ ui.exaApiKeySaved }}</div>
+            <div v-else class="settings-note full">{{ ui.exaFallbackNote }}</div>
+            <div class="settings-inline-actions">
+              <button
+                type="button"
+                class="settings-btn"
+                :disabled="webSearchForm.status === 'saving'"
+                @click="saveWebSearchSettings"
+              >
+                {{ webSearchForm.status === 'saving' ? ui.saving : ui.saveWebSearchKey }}
+              </button>
+            </div>
           </div>
 
           <div v-if="settingsSection === 'translation'" class="settings-panel settings-body">

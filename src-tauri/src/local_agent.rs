@@ -575,6 +575,7 @@ pub(crate) async fn generate_answer_agentic<F, G>(
     document_id: String,
     prompt: String,
     image_data_url: Option<String>,
+    web_enabled: bool,
     cancel: CancellationToken,
     on_tool: F,
     on_answer: G,
@@ -583,7 +584,7 @@ where
     F: Fn(AgentToolEvent) + Send + 'static,
     G: Fn(String) + Send + 'static,
 {
-    let server = mcp_server::start_mcp_server(db_path, document_id).await?;
+    let server = mcp_server::start_mcp_server(db_path, document_id, web_enabled).await?;
     let url = server.url.clone();
     let token = server.token.clone();
 

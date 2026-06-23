@@ -115,6 +115,7 @@ pub async fn run_from_env() -> Result<(), String> {
         activity_event_id: None,
         reference_document_ids: None,
         knowledge_enabled: None,
+        web_enabled: Some(env::var("LUMEN_VERIFY_WEB").is_ok()),
         view_context: None,
     };
     let current_view_metadata = crate::build_current_view_gate_metadata(
@@ -599,7 +600,9 @@ pub async fn run_mcp_verify_from_env() -> Result<(), String> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(600);
 
-    let server = crate::local_agent::mcp_server::start_mcp_server(PathBuf::from(db), doc).await?;
+    let server =
+        crate::local_agent::mcp_server::start_mcp_server(PathBuf::from(db), doc, env::var("LUMEN_VERIFY_WEB").is_ok())
+            .await?;
     println!("MCP_URL={}", server.url);
     println!("MCP_TOKEN={}", server.token);
     println!("MCP_READY alive={secs}s");
@@ -660,6 +663,7 @@ pub async fn run_agentic_probe_from_env() -> Result<(), String> {
         doc,
         prompt,
         image_data_url,
+        env::var("LUMEN_VERIFY_WEB").is_ok(),
         tokio_util::sync::CancellationToken::new(),
         |ev| {
             let phase = match ev.phase {

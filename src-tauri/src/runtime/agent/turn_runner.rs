@@ -301,6 +301,7 @@ where
             fallback_query,
             rag::RagToolCapabilities {
                 vision_enabled: false,
+                web_enabled: false,
                 max_quote_chars: request.context_budget.max_quote_chars,
             },
         );
@@ -374,6 +375,7 @@ where
                 fallback_query,
                 rag::RagToolCapabilities {
                     vision_enabled: false,
+                    web_enabled: false,
                     max_quote_chars: request.context_budget.max_quote_chars,
                 },
             );

@@ -156,6 +156,8 @@ struct InitialRetrievalLimits {
 #[derive(Clone, Copy, Debug)]
 pub struct RagToolCapabilities {
     pub vision_enabled: bool,
+    /// Whether the chat's "联网" toggle is on — gates the web_search/web_fetch tools.
+    pub web_enabled: bool,
     pub max_quote_chars: usize,
 }
 
@@ -163,6 +165,7 @@ impl Default for RagToolCapabilities {
     fn default() -> Self {
         Self {
             vision_enabled: false,
+            web_enabled: false,
             max_quote_chars: default_citation_quote_chars(),
         }
     }
@@ -388,6 +391,8 @@ enum RagToolName {
     QueryKnowledgeGraph,
     SearchLibraryKnowledge,
     ListTrendingPapers,
+    WebSearch,
+    WebFetch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -435,11 +440,16 @@ impl RagToolName {
             Self::QueryKnowledgeGraph => "query_knowledge_graph",
             Self::SearchLibraryKnowledge => "search_library_knowledge",
             Self::ListTrendingPapers => "list_trending_papers",
+            Self::WebSearch => "web_search",
+            Self::WebFetch => "web_fetch",
         }
     }
 }
 
-pub fn rag_tool_specs_for_capabilities(vision_enabled: bool) -> Vec<RagToolSpec> {
+pub fn rag_tool_specs_for_capabilities(
+    vision_enabled: bool,
+    web_enabled: bool,
+) -> Vec<RagToolSpec> {
     let mut specs = vec![
         RagToolSpec {
             name: "inspect_tree",
@@ -689,6 +699,31 @@ pub fn rag_tool_specs_for_capabilities(vision_enabled: bool) -> Vec<RagToolSpec>
             }),
         });
     }
+    if web_enabled {
+        specs.push(RagToolSpec {
+            name: "web_search",
+            description: "Search the public web for current/external information not in the user's documents (news, recent papers, docs, definitions). Returns titles, URLs and snippets. Cite sources as Markdown links in your answer. Use only when the document library cannot answer.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "The web search query" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Max results (default 5)" }
+                },
+                "required": ["query"]
+            }),
+        });
+        specs.push(RagToolSpec {
+            name: "web_fetch",
+            description: "Fetch a specific web page (by URL) and return its readable text. Use to read a result returned by web_search, or a URL the user provided. Cite the page as a Markdown link.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "The http(s) URL to fetch" }
+                },
+                "required": ["url"]
+            }),
+        });
+    }
     specs
 }
 
@@ -704,7 +739,7 @@ pub fn is_registered_rag_tool_for_capabilities(
 }
 
 fn normalize_rag_tool_name(tool: &str, capabilities: RagToolCapabilities) -> Option<&'static str> {
-    rag_tool_specs_for_capabilities(capabilities.vision_enabled)
+    rag_tool_specs_for_capabilities(capabilities.vision_enabled, capabilities.web_enabled)
         .into_iter()
         .find(|spec| spec.name == tool)
         .map(|spec| spec.name)
@@ -947,6 +982,9 @@ pub fn execute_rag_tool_call_for_capabilities(
         // Library-wide / cross-surface tools: not scoped to any single document.
         "search_library_knowledge" => execute_search_library_knowledge_tool(&registry, args),
         "list_trending_papers" => execute_list_trending_papers_tool(&registry, args),
+        // Web tools: not document-scoped. The Exa key (if any) lives in app_settings.
+        "web_search" => execute_web_search_tool(&registry, args, fallback_query),
+        "web_fetch" => execute_web_fetch_tool(&registry, args),
         _ => execute_search_chunks_tool(&registry, args, fallback_query),
     };
 
@@ -1322,6 +1360,90 @@ fn execute_list_trending_papers_tool(
             RagToolName::ListTrendingPapers,
             serde_json::json!({ "period": period, "query": query, "limit": limit }),
             count,
+        ),
+    })
+}
+
+/// Read the configured Exa API key from app_settings (empty/absent → keyless mode).
+fn exa_api_key(conn: &Connection) -> Option<String> {
+    crate::load_app_setting(conn, "exa_api_key")
+        .ok()
+        .flatten()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
+/// `web_search`: query the public web (Exa when keyed, else DuckDuckGo). Results
+/// are returned as non-document citations (page 0, no document) carrying
+/// title/URL/snippet — the model cites them as Markdown links in the answer.
+fn execute_web_search_tool(
+    registry: &RagToolRegistry<'_>,
+    args: &serde_json::Value,
+    fallback_query: &str,
+) -> Result<RagToolExecutionOutput, String> {
+    let query = string_arg(args, "query").unwrap_or(fallback_query).trim().to_string();
+    let limit = u32_arg(args, "limit", 5, 1, 10) as usize;
+    let api_key = exa_api_key(registry.conn);
+    let hits = crate::runtime::web_search::web_search(api_key.as_deref(), &query, limit)?;
+    let citations: Vec<Citation> = hits
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| {
+            let snippet = truncate_chars(hit.snippet.trim(), registry.max_quote_chars);
+            Citation {
+                id: format!("web-{index}"),
+                label: format!("[{}]", index + 1),
+                page: 0,
+                block_id: String::new(),
+                section_title: Some("web result".to_string()),
+                quote: format!("{}\n{}\n{}", hit.title.trim(), hit.url.trim(), snippet),
+                bbox_list: serde_json::json!([]),
+                document_id: String::new(),
+                source: "web_search".to_string(),
+            }
+        })
+        .collect();
+    let count = citations.len();
+    Ok(RagToolExecutionOutput {
+        citations,
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::WebSearch,
+            serde_json::json!({ "query": query, "limit": limit, "engine": if api_key.is_some() { "exa" } else { "duckduckgo" } }),
+            count,
+        ),
+    })
+}
+
+/// `web_fetch`: retrieve a URL and return its readable text as a single citation.
+fn execute_web_fetch_tool(
+    registry: &RagToolRegistry<'_>,
+    args: &serde_json::Value,
+) -> Result<RagToolExecutionOutput, String> {
+    let url = string_arg(args, "url")
+        .ok_or_else(|| "web_fetch requires a url".to_string())?
+        .to_string();
+    let text = crate::runtime::web_search::web_fetch(&url, registry.max_quote_chars)?;
+    let citation = Citation {
+        id: "web-fetch-0".to_string(),
+        label: "[1]".to_string(),
+        page: 0,
+        block_id: String::new(),
+        section_title: Some("web page".to_string()),
+        quote: format!("{url}\n{text}"),
+        bbox_list: serde_json::json!([]),
+        document_id: String::new(),
+        source: "web_fetch".to_string(),
+    };
+    Ok(RagToolExecutionOutput {
+        citations: vec![citation],
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::WebFetch,
+            serde_json::json!({ "url": url }),
+            1,
         ),
     })
 }
@@ -7469,7 +7591,7 @@ mod tests {
 
     #[test]
     fn rag_tool_registry_exposes_supported_tools() {
-        let names = rag_tool_specs_for_capabilities(false)
+        let names = rag_tool_specs_for_capabilities(false, false)
             .into_iter()
             .map(|tool| tool.name)
             .collect::<std::collections::BTreeSet<_>>();
@@ -7496,12 +7618,19 @@ mod tests {
                 "list_trending_papers"
             ])
         );
-        let vision_names = rag_tool_specs_for_capabilities(true)
+        let vision_names = rag_tool_specs_for_capabilities(true, false)
             .into_iter()
             .map(|tool| tool.name)
             .collect::<std::collections::BTreeSet<_>>();
         assert!(vision_names.contains("analyze_visual"));
         assert!(vision_names.contains("analyze_page"));
+        let web_names = rag_tool_specs_for_capabilities(false, true)
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(web_names.contains("web_search"));
+        assert!(web_names.contains("web_fetch"));
+        assert!(!web_names.contains("analyze_visual"));
         assert!(is_registered_rag_tool("open_section"));
         assert!(is_registered_rag_tool("read_tree_node_lines"));
         assert!(is_registered_rag_tool("search_table_facts"));
@@ -8555,6 +8684,7 @@ mod tests {
     fn cross_doc_caps() -> RagToolCapabilities {
         RagToolCapabilities {
             vision_enabled: false,
+            web_enabled: false,
             max_quote_chars: 400,
         }
     }

@@ -413,8 +413,10 @@ fn build_answerability_judge_prompt(
     vision_enabled: bool,
     budget: &crate::model_catalog::ModelContextBudget,
 ) -> Result<String, String> {
+    // Web tools are scoped to the tool-calling/agentic paths, not the M4 judge.
     let tools = serde_json::to_string_pretty(&runtime::rag::rag_tool_specs_for_capabilities(
         vision_enabled,
+        false,
     ))
     .map_err(|err| format!("Failed to encode RAG tool specs: {err}"))?;
     let evidence = citations
@@ -438,7 +440,7 @@ fn build_answerability_judge_prompt(
         serde_json::to_string_pretty(tool_feedback)
             .map_err(|err| format!("Failed to encode judge tool feedback: {err}"))?
     };
-    let allowed_tools = runtime::rag::rag_tool_specs_for_capabilities(vision_enabled)
+    let allowed_tools = runtime::rag::rag_tool_specs_for_capabilities(vision_enabled, false)
         .into_iter()
         .map(|tool| tool.name)
         .collect::<Vec<_>>()

@@ -111,11 +111,13 @@ pub(crate) async fn run_unified_agent_loop(
         .capabilities
         .iter()
         .any(|capability| capability == "vision");
+    let web_enabled = ctx.input.web_enabled.unwrap_or(false);
     let rag_capabilities = runtime::rag::RagToolCapabilities {
         vision_enabled,
+        web_enabled,
         max_quote_chars: agent_run.retrieval_run.context_budget.max_quote_chars,
     };
-    let tools = build_openai_tools(vision_enabled, ctx.library_is_large);
+    let tools = build_openai_tools(vision_enabled, web_enabled, ctx.library_is_large);
     let mut messages = build_initial_messages(&ctx, agent_run);
 
     let client = reqwest::Client::builder()
@@ -432,9 +434,13 @@ fn run_one_tool(
 
 /// Build the OpenAI `tools` array from the RAG tool specs, plus the library
 /// discovery tools when the workspace is large (progressive disclosure).
-fn build_openai_tools(vision_enabled: bool, library_is_large: bool) -> Vec<serde_json::Value> {
+fn build_openai_tools(
+    vision_enabled: bool,
+    web_enabled: bool,
+    library_is_large: bool,
+) -> Vec<serde_json::Value> {
     let mut tools: Vec<serde_json::Value> =
-        runtime::rag::rag_tool_specs_for_capabilities(vision_enabled)
+        runtime::rag::rag_tool_specs_for_capabilities(vision_enabled, web_enabled)
             .into_iter()
             // The unified loop runs the SYNCHRONOUS RAG executor, which only stubs
             // analyze_visual/analyze_page (they need the async multimodal provider
@@ -994,7 +1000,7 @@ mod tests {
 
     #[test]
     fn build_openai_tools_maps_specs_to_function_shape() {
-        let tools = build_openai_tools(false, false);
+        let tools = build_openai_tools(false, false, false);
         assert!(!tools.is_empty());
         // Every entry is a function tool with a name + parameters object.
         for tool in &tools {
@@ -1013,7 +1019,7 @@ mod tests {
 
     #[test]
     fn build_openai_tools_adds_discovery_tools_for_large_library() {
-        let names_owned: Vec<String> = build_openai_tools(false, true)
+        let names_owned: Vec<String> = build_openai_tools(false, false, true)
             .iter()
             .filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string))
             .collect();

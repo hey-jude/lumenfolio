@@ -44,6 +44,8 @@ const MCP_MAX_QUOTE_CHARS: usize = 16_000;
 pub(crate) struct LumenfolioMcpServer {
     db_path: PathBuf,
     document_id: String,
+    /// Whether the chat's "联网" toggle is on — exposes web_search/web_fetch.
+    web_enabled: bool,
     /// Citations served this run, for the agentic dispatch to surface as evidence.
     citations: Arc<Mutex<Vec<Citation>>>,
     /// Trace candidates served this run — they carry `section_title` keyed by
@@ -75,7 +77,7 @@ impl ServerHandler for LumenfolioMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = rag::rag_tool_specs_for_capabilities(false)
+        let tools = rag::rag_tool_specs_for_capabilities(false, self.web_enabled)
             .into_iter()
             .map(|spec| {
                 let schema = spec
@@ -115,6 +117,7 @@ impl ServerHandler for LumenfolioMcpServer {
                 &fallback_query,
                 RagToolCapabilities {
                     vision_enabled: false,
+                    web_enabled: self.web_enabled,
                     max_quote_chars: MCP_MAX_QUOTE_CHARS,
                 },
             );
@@ -257,6 +260,7 @@ fn unauthorized() -> hyper::Response<BoxBody<Bytes, std::convert::Infallible>> {
 pub(crate) async fn start_mcp_server(
     db_path: PathBuf,
     document_id: String,
+    web_enabled: bool,
 ) -> Result<RunningMcpServer, String> {
     let token = random_token();
     let citations: Arc<Mutex<Vec<Citation>>> = Arc::new(Mutex::new(Vec::new()));
@@ -271,6 +275,7 @@ pub(crate) async fn start_mcp_server(
             Ok(LumenfolioMcpServer {
                 db_path: factory_path.clone(),
                 document_id: factory_doc.clone(),
+                web_enabled,
                 citations: factory_citations.clone(),
                 candidates: factory_candidates.clone(),
             })

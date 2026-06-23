@@ -111,6 +111,11 @@ const props = defineProps({
     type: Array,
     default: () => [],
   },
+  // Whether the chat "联网" (web search) toggle is on.
+  webSearchEnabled: {
+    type: Boolean,
+    default: false,
+  },
 })
 
 const emit = defineEmits([
@@ -133,6 +138,7 @@ const emit = defineEmits([
   'set-focus-doc',
   'edit-resend',
   'open-doc',
+  'toggle-web-search',
 ])
 
 // Post-answer recommendations (related papers / prior knowledge) attach to the
@@ -2305,6 +2311,22 @@ function evidenceSourceLabel(source) {
             <button v-if="supportsVision" class="icon-btn" type="button" :disabled="!chatInputEnabled" :title="ui.attach" :aria-label="ui.attach" @click="openImagePicker">
               <span class="icon-plus" aria-hidden="true"></span>
             </button>
+            <button
+              class="icon-btn web-toggle"
+              :class="{ active: props.webSearchEnabled }"
+              type="button"
+              :disabled="!chatInputEnabled"
+              :title="props.webSearchEnabled ? ui.webSearchOn : ui.webSearchOff"
+              :aria-label="ui.webSearch"
+              :aria-pressed="props.webSearchEnabled"
+              @click="emit('toggle-web-search')"
+            >
+              <svg class="icon-globe" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" />
+                <path d="M3 12h18" />
+                <path d="M12 3c2.5 2.5 3.8 5.6 3.8 9s-1.3 6.5-3.8 9c-2.5-2.5-3.8-5.6-3.8-9S9.5 5.5 12 3z" />
+              </svg>
+            </button>
             <div v-if="document.chatReady" class="capability-pill" :title="capabilityTitle">
               <span class="capability-icon text" :title="ui.capabilityText"></span>
               <span v-if="supportsVision" class="capability-icon vision" :title="ui.capabilityVision"></span>
@@ -4272,6 +4294,17 @@ button.agent-process-head:disabled {
   background: var(--accent-soft);
   border-color: rgba(106, 169, 255, 0.24);
   color: var(--text-primary);
+}
+
+/* "联网" toggle: lit accent when active, so the user can see web search is on. */
+.web-toggle.active {
+  background: var(--accent-soft);
+  border-color: rgba(106, 169, 255, 0.45);
+  color: var(--accent, #6aa9ff);
+}
+
+.icon-globe {
+  display: inline-block;
 }
 
 .capability-pill {

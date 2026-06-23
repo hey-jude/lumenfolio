@@ -335,6 +335,9 @@ pub(crate) async fn improve_retrieval_with_llm_judge(
             .any(|capability| capability == "vision");
         let rag_capabilities = runtime::rag::RagToolCapabilities {
             vision_enabled,
+            // Web tools are scoped to the unified-loop / local-agent paths, not the
+            // M3/M4 judge-driven retrieval.
+            web_enabled: false,
             max_quote_chars: agent_run.retrieval_run.context_budget.max_quote_chars,
         };
         if !runtime::rag::is_registered_rag_tool_for_capabilities(&call.tool, rag_capabilities) {
@@ -1366,6 +1369,7 @@ fn maybe_open_table_page_fallback(
                     .capabilities
                     .iter()
                     .any(|capability| capability == "vision"),
+                web_enabled: false,
                 max_quote_chars: agent_run.retrieval_run.context_budget.max_quote_chars,
             },
         )
