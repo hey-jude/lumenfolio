@@ -655,6 +655,18 @@ fn run_document_reindex_job(
     agent_sessions: &AgentSessionState,
     app: &tauri::AppHandle,
 ) -> Result<DocumentIndexResult, String> {
+    // Knowledge-base pivot (P0): dispatch indexing by source kind. PDF is the
+    // only ingestable type today; web / markdown / note / office ingestors plug
+    // in here in P2/P3. The `ContentIngestor` trait is deliberately deferred to
+    // P2 — the right interface only emerges once a real second ingestor exists
+    // (this PDF worker's pdfium/OCR/progress shape must not be locked in as the
+    // contract). For now this is the explicit dispatch seam.
+    let content_type = document_content_type(document_id, database)?;
+    if content_type != "pdf" {
+        return Err(format!(
+            "Indexing is not yet supported for content type '{content_type}'."
+        ));
+    }
     emit_reindex_progress(
         app,
         database,
@@ -943,6 +955,23 @@ fn index_input_counts(input: &UpsertDocumentIndexInput) -> (u32, usize, usize) {
         .map(|page| page.lines.as_ref().map_or(0, Vec::len))
         .sum();
     (input.page_count, block_count, line_count)
+}
+
+/// The source-kind discriminator for a document (KB pivot). Drives the ingestion
+/// dispatch in `run_document_reindex_job`.
+fn document_content_type(document_id: &str, database: &AppDatabase) -> Result<String, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    conn.query_row(
+        "SELECT content_type FROM documents WHERE id = ?1 LIMIT 1",
+        params![document_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|err| format!("Failed to load document content type: {err}"))?
+    .ok_or_else(|| "Document is no longer available".to_string())
 }
 
 fn document_pdf_path_from_db(document_id: &str, database: &AppDatabase) -> Result<PathBuf, String> {
