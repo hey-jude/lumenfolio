@@ -189,6 +189,10 @@ const chatBrowsingLabel = computed(() => {
     return `${periodLabel} ${ui.value.trendingPapers}`.trim()
   }
   if (showGraph.value) return ui.value.knowledgeGraph
+  // KB pivot (P1): no focus document → the chat is library-wide ("ask my
+  // knowledge base"), so label it as such instead of leaving it blank.
+  const focus = activeFocusDoc.value
+  if (!focus || focus.id === 'empty') return ui.value.askKnowledgeBase
   return ''
 })
 // Persisted so the discovery feed re-opens on next launch if that's where the
