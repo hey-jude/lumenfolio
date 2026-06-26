@@ -2732,11 +2732,21 @@ async fn run_ask_document(
         return Err("No question to ask".to_string());
     }
     let document_id = input.document_id.trim();
-    if document_id.is_empty() {
-        return Err("No document selected".to_string());
+    // KB pivot (P1): a library-wide "ask my knowledge base" turn has no focus
+    // document — allowed as long as it carries a session. Downstream is forgiving:
+    // doc-scoped retrieval seeds empty (P0-d) and the agent leans on the library-
+    // wide tools. Existing callers always send a document_id, so the focused path
+    // is unchanged.
+    let has_session = input
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if document_id.is_empty() && !has_session {
+        return Err("No document or session selected".to_string());
     }
     // The conversation this turn belongs to. Memory + persistence key off this;
-    // retrieval still targets `document_id` (the session's focus document).
+    // retrieval targets `document_id` when present, else goes library-wide.
     let session_id = resolve_session_id(input.session_id.as_deref(), document_id)?;
     let reference_document_ids = normalize_reference_document_ids(
         input.reference_document_ids.as_deref().unwrap_or(&[]),
@@ -3519,6 +3529,11 @@ fn persist_chat_turn(
         .map_err(|err| format!("Failed to encode retrieval trace: {err}"))?;
     let referenced_document_ids_json = serde_json::to_string(input.referenced_document_ids)
         .map_err(|err| format!("Failed to encode referenced document ids: {err}"))?;
+    // KB pivot (P1): a library-wide / no-focus turn has no document — store NULL
+    // (the column is nullable; the FK rejects an empty-string id).
+    let document_id_param: Option<&str> = Some(input.document_id)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let conn = database
         .conn
         .lock()
@@ -3526,7 +3541,7 @@ fn persist_chat_turn(
     // Make sure the session row exists before we attach turns to it. This keeps
     // persistence self-sufficient for legacy callers (no explicit session) and
     // back-fills the focus document from the turn being saved.
-    ensure_chat_session_row(&conn, input.session_id, Some(input.document_id))?;
+    ensure_chat_session_row(&conn, input.session_id, document_id_param)?;
     conn.execute(
         "INSERT INTO chat_turns
             (id, session_id, document_id, provider_id, model_key, provider_label, user_message,
@@ -3537,7 +3552,7 @@ fn persist_chat_turn(
         params![
             turn_id,
             input.session_id,
-            input.document_id,
+            document_id_param,
             input.provider_id.unwrap_or(""),
             input.model_key.unwrap_or(""),
             input.provider_label,
