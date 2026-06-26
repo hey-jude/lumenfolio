@@ -551,7 +551,10 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
 
         CREATE TABLE IF NOT EXISTS chat_turns (
           id TEXT PRIMARY KEY,
-          document_id TEXT NOT NULL,
+          -- Knowledge-base pivot (P1): nullable so a turn can be library-wide
+          -- (no focus document → NULL). Existing NOT NULL databases are rebuilt
+          -- by migrate_chat_turns_document_id_nullable.
+          document_id TEXT,
           provider_id TEXT NOT NULL DEFAULT '',
           model_key TEXT NOT NULL DEFAULT '',
           provider_label TEXT NOT NULL DEFAULT '',
@@ -685,6 +688,7 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|err| format!("Failed to create chat turn session index: {err}"))?;
     migrate_chat_turns_to_sessions(conn)?;
+    migrate_chat_turns_document_id_nullable(conn)?;
     ensure_column(
         conn,
         "document_blocks",
@@ -776,6 +780,122 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
 /// keep the two in sync), and that document's orphaned turns are
 /// back-filled to point at it. Re-running is a no-op because the second pass
 /// finds no rows with `session_id = ''`.
+/// Knowledge-base pivot (P1): make `chat_turns.document_id` nullable so a turn
+/// can be library-wide (no focus document → NULL). SQLite can't ALTER a column's
+/// NOT NULL, so rebuild the table once, copying every column by name and keeping
+/// the nullable FK + cascade. Idempotent: skips when `document_id` is already
+/// nullable (fresh DBs created by the updated CREATE TABLE, or already migrated).
+fn migrate_chat_turns_document_id_nullable(conn: &Connection) -> Result<(), String> {
+    if !column_is_not_null(conn, "chat_turns", "document_id")? {
+        return Ok(());
+    }
+    // Copy only the columns that actually exist in this database. A column the new
+    // table has but the old one lacks (older schema) gets its DEFAULT; live columns
+    // are a subset of the canonical set, so no data is dropped.
+    let live = table_columns(conn, "chat_turns")?;
+    let shared: Vec<&str> = CHAT_TURNS_COLUMNS
+        .iter()
+        .copied()
+        .filter(|col| live.iter().any(|name| name == col))
+        .collect();
+    let col_list = shared.join(", ");
+    let sql = format!(
+        "BEGIN;
+        CREATE TABLE chat_turns__kb_new (
+          id TEXT PRIMARY KEY,
+          document_id TEXT,
+          provider_id TEXT NOT NULL DEFAULT '',
+          model_key TEXT NOT NULL DEFAULT '',
+          provider_label TEXT NOT NULL DEFAULT '',
+          user_message TEXT NOT NULL,
+          assistant_answer TEXT NOT NULL,
+          reasoning_content TEXT NOT NULL DEFAULT '',
+          selected_text TEXT NOT NULL DEFAULT '',
+          image_data_url TEXT NOT NULL DEFAULT '',
+          citations_json TEXT NOT NULL DEFAULT '[]',
+          claims_json TEXT NOT NULL DEFAULT '[]',
+          retrieval_trace_json TEXT NOT NULL DEFAULT '{{}}',
+          referenced_document_ids_json TEXT NOT NULL DEFAULT '[]',
+          index_version INTEGER NOT NULL DEFAULT 0,
+          session_id TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+        INSERT INTO chat_turns__kb_new ({col_list}) SELECT {col_list} FROM chat_turns;
+        DROP TABLE chat_turns;
+        ALTER TABLE chat_turns__kb_new RENAME TO chat_turns;
+        CREATE INDEX IF NOT EXISTS idx_chat_turns_document_created
+          ON chat_turns(document_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_chat_turns_session_created
+          ON chat_turns(session_id, created_at DESC);
+        COMMIT;"
+    );
+    // Disable FK enforcement around the table swap (SQLite-recommended for
+    // rebuilds): a legacy database can hold orphan turns (a turn whose document
+    // was removed before the FK/cascade existed); the copy must preserve them, not
+    // fail. The connection runs with foreign_keys=ON, so restore it afterward.
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")
+        .map_err(|err| format!("Failed to disable foreign keys for rebuild: {err}"))?;
+    let result = conn.execute_batch(&sql);
+    let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
+    result.map_err(|err| format!("Failed to make chat_turns.document_id nullable: {err}"))
+}
+
+/// The canonical chat_turns column set (the new table's columns). The rebuild
+/// copies whichever of these the live table actually has.
+const CHAT_TURNS_COLUMNS: [&str; 18] = [
+    "id",
+    "document_id",
+    "provider_id",
+    "model_key",
+    "provider_label",
+    "user_message",
+    "assistant_answer",
+    "reasoning_content",
+    "selected_text",
+    "image_data_url",
+    "citations_json",
+    "claims_json",
+    "retrieval_trace_json",
+    "referenced_document_ids_json",
+    "index_version",
+    "session_id",
+    "created_at",
+    "updated_at",
+];
+
+/// Column names of `table` (via PRAGMA table_info).
+fn table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|err| format!("Failed to inspect {table} schema: {err}"))?;
+    let cols = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|err| format!("Failed to read {table} columns: {err}"))?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|err| format!("Failed to read {table} columns: {err}"))?;
+    Ok(cols)
+}
+
+/// Whether `column` in `table` carries a NOT NULL constraint (via table_info).
+fn column_is_not_null(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|err| format!("Failed to inspect {table} schema: {err}"))?;
+    let cols = stmt
+        .query_map([], |row| {
+            // table_info columns: cid(0), name(1), type(2), notnull(3), ...
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(3)?))
+        })
+        .map_err(|err| format!("Failed to read {table} columns: {err}"))?
+        .collect::<Result<Vec<(String, i64)>, _>>()
+        .map_err(|err| format!("Failed to read {table} columns: {err}"))?;
+    Ok(cols
+        .iter()
+        .any(|(name, notnull)| name == column && *notnull != 0))
+}
+
 fn migrate_chat_turns_to_sessions(conn: &Connection) -> Result<(), String> {
     conn.execute(
         "INSERT OR IGNORE INTO chat_sessions
@@ -965,6 +1085,61 @@ mod tests {
     use crate::CURRENT_INDEX_VERSION;
 
     use super::*;
+
+    #[test]
+    fn migrate_chat_turns_document_id_nullable_preserves_rows_and_allows_null() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        // Simulate a legacy database: chat_turns.document_id is NOT NULL.
+        conn.execute_batch(
+            "CREATE TABLE documents (id TEXT PRIMARY KEY);
+             CREATE TABLE chat_turns (
+               id TEXT PRIMARY KEY,
+               document_id TEXT NOT NULL,
+               provider_id TEXT NOT NULL DEFAULT '',
+               model_key TEXT NOT NULL DEFAULT '',
+               provider_label TEXT NOT NULL DEFAULT '',
+               user_message TEXT NOT NULL,
+               assistant_answer TEXT NOT NULL,
+               reasoning_content TEXT NOT NULL DEFAULT '',
+               selected_text TEXT NOT NULL DEFAULT '',
+               image_data_url TEXT NOT NULL DEFAULT '',
+               citations_json TEXT NOT NULL DEFAULT '[]',
+               claims_json TEXT NOT NULL DEFAULT '[]',
+               retrieval_trace_json TEXT NOT NULL DEFAULT '{}',
+               referenced_document_ids_json TEXT NOT NULL DEFAULT '[]',
+               index_version INTEGER NOT NULL DEFAULT 0,
+               session_id TEXT NOT NULL DEFAULT '',
+               created_at INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL,
+               FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+             );
+             INSERT INTO documents (id) VALUES ('doc-1');
+             INSERT INTO chat_turns (id, document_id, user_message, assistant_answer, created_at, updated_at)
+               VALUES ('turn-1', 'doc-1', 'q', 'a', 1, 1);",
+        )
+        .expect("legacy schema");
+        assert!(column_is_not_null(&conn, "chat_turns", "document_id").unwrap());
+
+        migrate_chat_turns_document_id_nullable(&conn).expect("migrate");
+
+        // Column is now nullable, the existing row survived, and a library-wide
+        // (NULL document_id) turn can be inserted.
+        assert!(!column_is_not_null(&conn, "chat_turns", "document_id").unwrap());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_turns WHERE id = 'turn-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        conn.execute(
+            "INSERT INTO chat_turns (id, document_id, user_message, assistant_answer, created_at, updated_at)
+               VALUES ('turn-2', NULL, 'library q', 'library a', 2, 2)",
+            [],
+        )
+        .expect("null document_id insert should succeed");
+
+        // Idempotent: a second run is a no-op.
+        migrate_chat_turns_document_id_nullable(&conn).expect("idempotent");
+        assert!(!column_is_not_null(&conn, "chat_turns", "document_id").unwrap());
+    }
 
     #[test]
     fn reset_interrupted_index_jobs_unsticks_startup_state() {
