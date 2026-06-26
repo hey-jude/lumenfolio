@@ -83,14 +83,19 @@
 
 节奏决策：**先 P0 → P1**（用现有 PDF 知识重构体验、验证方向），再做多源/Office 的重活。
 
-### P0 — 地基（仅后端、不可见、向后兼容）
+### P0 — 地基（仅后端、不可见、向后兼容）✅ 已闭环
 
-- 给 `documents` 加 `content_type`；`page_no` / `bbox_*` / `page_count` 改可空（新增列 + 默认值，纯增量）。
-- 引用锚点抽象（页/bbox 可选 + 锚点 `kind`）。
-- `ContentIngestor` trait + 分发器（把 PDF 路径收到 trait 后面，行为不变）。
-- 检索：`document_id` 可选；无焦点时走全库种子兜底。
-- `chat_turns.document_id` 改可空。
-- **风险：** 低。无 UI 变化。保持现有 PDF 行为。
+**已落地（commit 25a006d / f67e52d / f8f0572 / + P0-d）：**
+- **P0-a** `documents.content_type`（默认 `'pdf'` + 幂等迁移 backfill）。
+- **P0-b** 摄入按 `content_type` **分发接缝**（pdf→现有路径；其它→明确报错，待 P2/P3 接入）。
+- **P0-c** `CitationAnchor{Paged,Reference}` + `Citation::anchor()`，**形式化 `page==0` 锚点约定**。
+- **P0-d** `build_retrieval_run` **焦点可选**：空 `document_id` → 返回空的有效 run，交给库级工具（含单测）。
+
+**实施中的三处工程取舍（替代原措辞，理由=避免无消费者的过早抽象/高风险迁移）：**
+- **`ContentIngestor` trait → 延后到 P2**：现仅 PDF 一个实现，trait 会过早固化 pdfium/OCR/progress 形状；先落分发接缝，待第二个 ingestor 出现再抽。
+- **引用锚点不 `Option` 化 → 延后到 P2**：`page==0` 哨兵已能表达非分页源（trending/web 在用、证据 chip 过滤已认），Option 化波及几乎所有构造点且更难用；P0 先形式化约定，精确 chunk-id/偏移定位留 P2。
+- **`chat_turns.document_id` 改可空 → 延后到 P1**：该列 `NOT NULL` 且带 FK，需"建新表→拷数据→改名→重建 2 个索引"的**数据承载型重建**；当前无消费者（无焦点首页对话是 P1 才有），speculative 重建用户聊天历史风险高收益零。检索接缝（P0-d）已就位，P1 接首页时一起做该迁移。
+- **风险：** 低。无 UI 变化，保持现有 PDF 行为。`page_no/bbox/page_count` 的 `Option` 化亦随各自消费者（P2/P3）增量进行。
 
 ### P1 — "问我的知识库" + 知识库首页（重构体验，几乎全复用）
 
@@ -259,7 +264,7 @@ v1（P1）图标栏先上 5 个：来源 / 搜索 / 概念 / 图谱 / 会话；�
 - **独立笔记 = 可编辑来源**：笔记正文存 **Markdown 文本**（`body_md`），保存即重新切块回流（§7.3）。md/txt 导入的来源同样可编辑。
 - **链接（`[[ ]]` / backlinks）**：新增 `links` 表（`source_id` → `target_kind`(note|source|concept) + `target_id`），驱动反链面板。（P2.5）
 - **逻辑集合（folders/collections）**：新增表（如 `collections` + `collection_items`），与磁盘解耦、可嵌套、任意 `source` 可多/单归属；默认「收件箱」集合。取代"文件夹=扫描目录"的旧假设（旧的扫描目录可作为导入时的自动归类来源）。（P2）
-- `chat_turns`：`document_id` 改可空。
+- `chat_turns`：`document_id` 改可空（**P1**：NOT NULL+FK，需数据承载型表重建 + 重建 2 个索引；随首页无焦点对话的消费者一起做）。
 - `Citation`：`page` / `block_id` / `bbox_list` 可选 + 一个锚点 `kind` 鉴别符。
 
 所有改动都力求**增量 / 向后兼容**（新增可空列 + 默认值），使现有 PDF 数据与行为在 P0–P1 期间继续可用。

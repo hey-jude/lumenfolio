@@ -3237,6 +3237,26 @@ pub fn build_retrieval_run(
     request: RetrievalRequest<'_>,
 ) -> Result<RetrievalRun, String> {
     let intent = infer_intent(request.question);
+    // Knowledge-base pivot (P0-d): focus-optional retrieval. With no focus
+    // document, skip the single-doc seeding chain and return an empty run — the
+    // agentic loop then relies on the library-wide tools (search_library_knowledge
+    // / query_knowledge_graph) to gather evidence across the whole library.
+    // NB: persisting a no-focus turn additionally needs chat_turns.document_id
+    // nullable (a data-bearing table rebuild deferred to P1, where the no-focus
+    // "ask my knowledge base" home is the consumer). This is the retrieval seam.
+    if request.document_id.trim().is_empty() {
+        let run_id = retrieval_run_id(conn)?;
+        let finalize_gate = build_finalize_gate(&[], &request.context_budget);
+        let trace = build_retrieval_trace(&run_id, &intent, &[], &[], &[], &finalize_gate);
+        return Ok(RetrievalRun {
+            id: run_id,
+            intent,
+            prompt_context: String::new(),
+            citations: Vec::new(),
+            trace,
+            context_budget: request.context_budget,
+        });
+    }
     let tools = RagToolRegistry::new(
         conn,
         request.document_id,
@@ -7617,6 +7637,32 @@ mod tests {
         assert_eq!(hit.citations.len(), 1);
         assert_eq!(hit.citations[0].document_id, "d1");
         assert!(hit.citations[0].quote.contains("model training"));
+    }
+
+    #[test]
+    fn build_retrieval_run_focus_optional_returns_empty_run() {
+        // KB pivot (P0-d): no focus document → an empty, valid run (the agent then
+        // uses library-wide tools). The empty-doc path only hits retrieval_run_id's
+        // table-less query, so a schema-less in-memory conn suffices.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        let request = RetrievalRequest {
+            document_id: "",
+            question: "what do I know about RAG citation granularity?",
+            retrieval_query: None,
+            selected_text: None,
+            selected_block_id: None,
+            selected_bbox_list: None,
+            client_context: None,
+            page: None,
+            page_mode: None,
+            page_source: None,
+            context_budget: crate::model_catalog::ModelContextBudget::default(),
+            force_document_start: false,
+        };
+        let run = build_retrieval_run(&conn, request).expect("focus-optional run");
+        assert!(run.citations.is_empty());
+        assert!(run.prompt_context.is_empty());
+        assert!(!run.id.is_empty());
     }
 
     #[test]
