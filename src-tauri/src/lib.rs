@@ -76,6 +76,8 @@ struct PdfDocument {
     title: String,
     short_title: String,
     path: String,
+    /// Source kind: 'pdf' today; the KB pivot adds 'docx'|'web'|'note'|… later.
+    content_type: String,
     size: u64,
     modified: u64,
     page_count: u32,

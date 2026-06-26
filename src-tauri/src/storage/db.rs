@@ -116,6 +116,10 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           page_count INTEGER NOT NULL DEFAULT 0,
           last_page INTEGER NOT NULL DEFAULT 1,
           zoom REAL NOT NULL DEFAULT 1.18,
+          -- Knowledge-base pivot: source kind. 'pdf' today; future ingestors set
+          -- 'docx'|'xlsx'|'pptx'|'web'|'markdown'|'text'|'note'. Default keeps every
+          -- existing row a PDF (backward-compatible).
+          content_type TEXT NOT NULL DEFAULT 'pdf',
           index_status TEXT NOT NULL DEFAULT 'pending',
           index_version INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
@@ -609,6 +613,14 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         "documents",
         "index_version",
         "ALTER TABLE documents ADD COLUMN index_version INTEGER NOT NULL DEFAULT 0",
+    )?;
+    // Knowledge-base pivot (P0): source-kind discriminator. Existing rows are PDFs,
+    // so the default backfills them all to 'pdf'.
+    ensure_column(
+        conn,
+        "documents",
+        "content_type",
+        "ALTER TABLE documents ADD COLUMN content_type TEXT NOT NULL DEFAULT 'pdf'",
     )?;
     // Recognized text inside figure/chart/image crops (OCR). The crop image
     // itself (image_path) is always preserved as the primary evidence; this
