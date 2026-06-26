@@ -1950,9 +1950,13 @@ async function handleSend(payload, selection = null) {
   const session = await ensureActiveSession()
   if (!session) return
   // The focus document is the session's default retrieval target; readiness and
-  // citations are scoped to it.
+  // citations are scoped to it. KB pivot (P1): with no focus document the chat
+  // goes library-wide ("ask my knowledge base") — focusDocId is empty and the
+  // backend seeds retrieval across the whole library.
   const doc = activeFocusDoc.value
-  if (!doc || doc.id === 'empty') return
+  if (!doc) return
+  const focusDocId = doc.id && doc.id !== 'empty' ? doc.id : ''
+  const libraryWide = !focusDocId
   if (!session.chatHistoryLoaded) {
     await ensureSessionHistory(session)
   }
@@ -1964,7 +1968,7 @@ async function handleSend(payload, selection = null) {
   const retrievalAttemptOffset = Number(payloadObject?.retrievalAttemptOffset || 0)
   // "@-referenced" papers selected in the composer; never includes the active doc.
   const referenceDocumentIds = Array.isArray(payloadObject?.mentionedDocIds)
-    ? payloadObject.mentionedDocIds.filter((id) => id && id !== doc.id)
+    ? payloadObject.mentionedDocIds.filter((id) => id && id !== focusDocId)
     : []
   if (!chatModelConfigured.value) return
   const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
@@ -1977,7 +1981,7 @@ async function handleSend(payload, selection = null) {
       blockId: selectedQuote.blockId || '',
       quote: selectedQuote.text,
       bboxList: selectedQuote.bboxList || [],
-      documentId: doc.id,
+      documentId: focusDocId,
       source: 'selection',
       sourceType: selectedQuote.sourceType || 'selection',
     }]
@@ -1987,7 +1991,7 @@ async function handleSend(payload, selection = null) {
   const assistantMessageId = nextLocalId('a')
   const activityEventId = `agent-${assistantMessageId}`
   chatStreamDebug('send', {
-    documentId: doc.id,
+    documentId: focusDocId,
     eventId: activityEventId,
     modelProviderId: providerId,
     modelKey,
@@ -2008,8 +2012,9 @@ async function handleSend(payload, selection = null) {
   })
   // Still indexing (or index went stale): the backend has no evidence to answer
   // from yet, so reply in natural language instead of querying. A selected quote
-  // can be answered from the selection, so that path proceeds normally.
-  if (!doc.chatReady && !selectedQuote) {
+  // can be answered from the selection, so that path proceeds normally. Library-
+  // wide chat has no single document to be "ready", so it always proceeds.
+  if (!libraryWide && !doc.chatReady && !selectedQuote) {
     session.messages.push({
       id: assistantMessageId,
       sessionId: session.id,
@@ -2054,7 +2059,7 @@ async function handleSend(payload, selection = null) {
   try {
     await invoke('ask_document_stream', {
       input: {
-        documentId: doc.id,
+        documentId: focusDocId,
         sessionId: session.id,
         question: messageText.trim() || ui.value.imageOnlyPrompt,
         locale: locale.value,
