@@ -1,0 +1,37 @@
+<svg viewBox="0 0 540 470" role="img" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, system-ui, sans-serif">
+<title>侧栏：图标栏 + 面板 + 捕获</title><desc>Obsidian 式：48px 图标栏切换面板；来源面板是文件夹树（任意类型混放）；右上加号弹出捕获菜单。新捕获默认落根级，可后归档，无独立收件箱。</desc>
+<rect width="540" height="470" fill="#f4f3ef"/>
+<rect x="0" y="0" width="50" height="470" fill="#e9e8e1"/>
+<g text-anchor="middle" font-size="10" fill="#8b9099">
+<rect x="9" y="14" width="32" height="32" rx="7" fill="#e8f0fe"/><rect x="18" y="22" width="16" height="14" rx="2" fill="none" stroke="#2f6fed" stroke-width="1.6"/><text x="25" y="58" fill="#2f6fed">来源</text>
+<circle cx="25" cy="84" r="6" fill="none" stroke="#8b9099" stroke-width="1.6"/><line x1="29" y1="88" x2="33" y2="92" stroke="#8b9099" stroke-width="1.6"/><text x="25" y="106">搜索</text>
+<text x="25" y="138" font-size="15">#</text><text x="25" y="152">概念</text>
+<circle cx="18" cy="180" r="3" fill="none" stroke="#8b9099" stroke-width="1.4"/><circle cx="32" cy="176" r="3" fill="none" stroke="#8b9099" stroke-width="1.4"/><circle cx="30" cy="189" r="3" fill="none" stroke="#8b9099" stroke-width="1.4"/><line x1="20" y1="180" x2="29" y2="177" stroke="#8b9099" stroke-width="1.2"/><line x1="31" y1="179" x2="30" y2="186" stroke="#8b9099" stroke-width="1.2"/><text x="25" y="204">图谱</text>
+<rect x="16" y="226" width="18" height="14" rx="3" fill="none" stroke="#8b9099" stroke-width="1.5"/><text x="25" y="256">会话</text>
+<rect x="17" y="278" width="16" height="18" rx="2" fill="none" stroke="#8b9099" stroke-width="1.5"/><line x1="20" y1="284" x2="30" y2="284" stroke="#8b9099" stroke-width="1.2"/><text x="25" y="308">笔记</text>
+<circle cx="25" cy="432" r="7" fill="none" stroke="#8b9099" stroke-width="1.5"/><text x="25" y="456">设置</text>
+</g>
+<rect x="50" y="0" width="490" height="470" fill="#ffffff"/>
+<text x="70" y="40" font-size="16" fill="#23262b">来源</text>
+<rect x="476" y="22" width="44" height="26" rx="7" fill="#2f6fed"/><text x="498" y="40" font-size="15" fill="#ffffff" text-anchor="middle">+</text>
+<rect x="70" y="58" width="46" height="22" rx="11" fill="#eef4ff"/><text x="93" y="73" font-size="11" fill="#2f6fed" text-anchor="middle">全部</text>
+<rect x="122" y="58" width="40" height="22" rx="11" fill="#f3f3ef" stroke="#e2e2dd"/><text x="142" y="73" font-size="11" fill="#7c818a" text-anchor="middle">PDF</text>
+<rect x="168" y="58" width="50" height="22" rx="11" fill="#f3f3ef" stroke="#e2e2dd"/><text x="193" y="73" font-size="11" fill="#7c818a" text-anchor="middle">Office</text>
+<rect x="224" y="58" width="44" height="22" rx="11" fill="#f3f3ef" stroke="#e2e2dd"/><text x="246" y="73" font-size="11" fill="#7c818a" text-anchor="middle">笔记</text>
+<g font-size="13" fill="#3a3f46">
+<text x="74" y="110">未命名想法 <tspan fill="#9aa0a8" font-size="11">笔记</tspan></text>
+<text x="74" y="136">Codex 协议 (剪藏) <tspan fill="#9aa0a8" font-size="11">网页</tspan></text>
+<text x="74" y="170" fill="#6c727c">▾ 📁 强化学习</text>
+<text x="96" y="196">DR Tulu-8B 综述 <tspan fill="#9aa0a8" font-size="11">PDF</tspan></text>
+<text x="96" y="220">agent loop 设计 <tspan fill="#9aa0a8" font-size="11">MD</tspan></text>
+<text x="74" y="252" fill="#6c727c">▸ 📁 项目 / 实验</text>
+<text x="74" y="284" fill="#6c727c">▸ 📁 待读</text>
+</g>
+<rect x="300" y="48" width="186" height="116" rx="10" fill="#ffffff" stroke="#d8d8d2"/>
+<g font-size="13" fill="#2c3038">
+<text x="318" y="76">＋ 新建笔记</text>
+<text x="318" y="104">⤓ 导入文件</text>
+<text x="318" y="132">🔗 剪藏网页</text>
+</g>
+<text x="318" y="156" font-size="11" fill="#9aa0a8">捕获菜单</text>
+</svg>

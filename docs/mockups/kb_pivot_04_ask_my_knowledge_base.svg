@@ -1,0 +1,29 @@
+<svg viewBox="0 0 760 470" role="img" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, system-ui, sans-serif">
+<title>全库问答</title><desc>聊天从“问这篇 PDF”改为“问我的知识库”，默认全库检索；引用来自混合来源（论文/笔记/网页），可把答案存为笔记。</desc>
+<rect width="760" height="470" fill="#f4f3ef"/>
+<rect x="20" y="18" width="720" height="434" rx="12" fill="#ffffff" stroke="#e2e2dd"/>
+<text x="44" y="50" font-size="16" fill="#23262b">问我的知识库</text>
+<rect x="170" y="34" width="58" height="24" rx="12" fill="#eef4ff"/><text x="199" y="51" font-size="11" fill="#2f6fed" text-anchor="middle">全库</text>
+<rect x="640" y="32" width="78" height="28" rx="8" fill="#f3f3ef" stroke="#e2e2dd"/><text x="679" y="51" font-size="12" fill="#7c818a" text-anchor="middle">＋ 新会话</text>
+<line x1="20" y1="70" x2="740" y2="70" stroke="#eeeee9"/>
+<rect x="372" y="88" width="346" height="34" rx="10" fill="#eef4ff"/><text x="700" y="110" font-size="13" fill="#2c4a86" text-anchor="end">RAG 引用粒度我之前怎么想的？</text>
+<text x="44" y="150" font-size="11" fill="#9aa0a8">助手</text>
+<g font-size="13" fill="#2c3038">
+<text x="44" y="176">你倾向非分页源用 chunk-id+偏移做锚点</text>
+<text x="44" y="200">，页+bbox 只保留给 PDF<tspan fill="#2f6fed"> [1]</tspan><tspan fill="#2f6fed"> [2]</tspan>；</text>
+<text x="44" y="224">Exa 检索结果可作外部佐证<tspan fill="#2f6fed"> [3]</tspan>。</text>
+</g>
+<text x="44" y="262" font-size="11" fill="#9aa0a8">来源</text>
+<g font-size="12">
+<rect x="44" y="272" width="674" height="30" rx="7" fill="#f7f7f4"/>
+<text x="58" y="291" fill="#2f6fed">[1]</text><text x="86" y="291" fill="#3a3f46">关于 RAG 引用粒度的想法</text><text x="704" y="291" fill="#9aa0a8" text-anchor="end">笔记</text>
+<rect x="44" y="308" width="674" height="30" rx="7" fill="#f7f7f4"/>
+<text x="58" y="327" fill="#2f6fed">[2]</text><text x="86" y="327" fill="#3a3f46">DR Tulu-8B 强化学习综述 · p.4</text><text x="704" y="327" fill="#9aa0a8" text-anchor="end">PDF</text>
+<rect x="44" y="344" width="674" height="30" rx="7" fill="#f7f7f4"/>
+<text x="58" y="363" fill="#2f6fed">[3]</text><text x="86" y="363" fill="#2f6fed" text-decoration="underline">exa.ai/…/citation-granularity</text><text x="704" y="363" fill="#9aa0a8" text-anchor="end">网页</text>
+</g>
+<rect x="44" y="388" width="120" height="26" rx="8" fill="#eef4ff" stroke="#cfe0fb"/><text x="104" y="405" font-size="12" fill="#2f6fed" text-anchor="middle">＋ 答案存为笔记</text>
+<rect x="44" y="424" width="610" height="14" rx="7" fill="#f3f3ef"/>
+<rect x="664" y="420" width="26" height="22" rx="6" fill="none" stroke="#cfe0fb"/><circle cx="677" cy="431" r="6" fill="none" stroke="#2f6fed" stroke-width="1.4"/><line x1="671" y1="431" x2="683" y2="431" stroke="#2f6fed" stroke-width="1.2"/>
+<rect x="696" y="420" width="26" height="22" rx="6" fill="#2f6fed"/><path d="M703 431 L717 431 M712 426 L717 431 L712 436" stroke="#fff" stroke-width="1.4" fill="none"/>
+</svg>

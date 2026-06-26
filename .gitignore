@@ -61,6 +61,9 @@ docs/assets/*
 !docs/assets/lumenfolio-trending-papers.png
 !docs/assets/lumenfolio-multimodal-image-composer.png
 !docs/assets/lumenfolio-multimodal-image-answer.png
+!docs/knowledge_base_pivot_plan.md
+!docs/mockups/
+!docs/mockups/**
 sotarium-api/src/sotarium_api.egg-info
 scripts/.embedding-venv
 articles/

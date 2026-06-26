@@ -1,0 +1,32 @@
+<svg viewBox="0 0 820 360" role="img" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, system-ui, sans-serif">
+<title>单一对话 + 自适应中央舞台</title>
+<desc>只有一个对话：没开文档时撑满中央；打开来源或笔记后，文档占中央，同一对话缩回右栏。中央只放来源/笔记两类文档，对话不是中央的一个标签。</desc>
+<rect width="820" height="360" fill="#f4f3ef"/>
+<rect x="16" y="18" width="384" height="300" rx="12" fill="#ffffff" stroke="#e2e2dd"/>
+<rect x="17" y="19" width="26" height="298" rx="10" fill="#e9e8e1"/>
+<g fill="#9aa0a8"><circle cx="30" cy="40" r="3.4"/><circle cx="30" cy="64" r="3.4"/><circle cx="30" cy="88" r="3.4"/><circle cx="30" cy="112" r="3.4"/><circle cx="30" cy="136" r="3.4"/></g>
+<text x="58" y="46" font-size="13" fill="#23262b">问我的知识库</text>
+<rect x="186" y="33" width="48" height="20" rx="10" fill="#eef4ff"/><text x="210" y="47" font-size="11" fill="#2f6fed" text-anchor="middle">全库</text>
+<rect x="58" y="64" width="232" height="42" rx="10" fill="#f5f5f2"/><text x="72" y="82" font-size="12" fill="#3a3f46">非分页源用 chunk-id+偏移做锚点，</text><text x="72" y="98" font-size="12" fill="#3a3f46">页+bbox 留给 PDF。 [1][2]</text>
+<rect x="150" y="114" width="240" height="28" rx="10" fill="#eef4ff"/><text x="378" y="132" font-size="12" fill="#2c4a86" text-anchor="end">RAG 引用粒度我之前怎么想的？</text>
+<rect x="58" y="150" width="300" height="42" rx="10" fill="#f5f5f2"/><text x="72" y="168" font-size="12" fill="#3a3f46">综合你的笔记与综述，建议……</text><text x="72" y="184" font-size="12" fill="#9aa0a8">来源：笔记 · DR Tulu · 网页</text>
+<rect x="58" y="204" width="118" height="22" rx="11" fill="#f3f3ef" stroke="#e2e2dd"/><text x="117" y="219" font-size="11" fill="#7c818a" text-anchor="middle">强化学习综述?</text>
+<rect x="182" y="204" width="96" height="22" rx="11" fill="#f3f3ef" stroke="#e2e2dd"/><text x="230" y="219" font-size="11" fill="#7c818a" text-anchor="middle">本周新增?</text>
+<rect x="58" y="248" width="330" height="40" rx="10" fill="#f7f7f4" stroke="#dcdcd6"/><text x="74" y="272" font-size="12" fill="#9aa0a8">问我的知识库…</text><rect x="356" y="256" width="24" height="24" rx="7" fill="#2f6fed"/><path d="M363 268 L375 268 M370 263 L375 268 L370 273" stroke="#fff" stroke-width="1.4" fill="none"/>
+<text x="208" y="338" font-size="12" fill="#6c727c" text-anchor="middle">首页 · 无文档 → 对话撑满中央</text>
+<rect x="420" y="18" width="384" height="300" rx="12" fill="#ffffff" stroke="#e2e2dd"/>
+<rect x="421" y="19" width="26" height="298" rx="10" fill="#e9e8e1"/>
+<g fill="#9aa0a8"><circle cx="434" cy="40" r="3.4"/><circle cx="434" cy="64" r="3.4"/><circle cx="434" cy="88" r="3.4"/><circle cx="434" cy="112" r="3.4"/><circle cx="434" cy="136" r="3.4"/></g>
+<rect x="458" y="30" width="120" height="22" rx="6" fill="#eef4ff"/><text x="468" y="45" font-size="11" fill="#2c4a86">DR Tulu 综述 · PDF</text>
+<rect x="582" y="30" width="62" height="22" rx="6" fill="#f3f3ef"/><text x="592" y="45" font-size="11" fill="#9aa0a8">想法.md</text>
+<text x="458" y="78" font-size="13" fill="#23262b">DR Tulu-8B 强化学习综述</text>
+<g stroke="#e7e7e2" stroke-width="8" stroke-linecap="round"><line x1="460" y1="98" x2="630" y2="98"/><line x1="460" y1="116" x2="618" y2="116"/><line x1="460" y1="134" x2="630" y2="134"/><line x1="460" y1="152" x2="588" y2="152"/></g>
+<rect x="460" y="170" width="170" height="40" rx="6" fill="#f3f1ea"/><text x="470" y="194" font-size="11" fill="#9a8a66">表 3 / 图 2 …</text>
+<g stroke="#e7e7e2" stroke-width="8" stroke-linecap="round"><line x1="460" y1="234" x2="624" y2="234"/><line x1="460" y1="252" x2="600" y2="252"/></g>
+<line x1="648" y1="28" x2="648" y2="306" stroke="#eeeee9"/>
+<text x="662" y="46" font-size="11" fill="#9aa0a8">同一对话 · 本文</text>
+<rect x="662" y="56" width="128" height="34" rx="9" fill="#f5f5f2"/><text x="672" y="70" font-size="11" fill="#3a3f46">表 3 是什么指标？</text><text x="672" y="84" font-size="11" fill="#9aa0a8">→ Rounds/Success…</text>
+<rect x="690" y="98" width="100" height="22" rx="9" fill="#eef4ff"/><text x="782" y="113" font-size="11" fill="#2c4a86" text-anchor="end">解释一下表 3</text>
+<rect x="662" y="270" width="128" height="30" rx="9" fill="#f7f7f4" stroke="#dcdcd6"/><text x="674" y="289" font-size="11" fill="#9aa0a8">追问…</text>
+<text x="612" y="338" font-size="12" fill="#6c727c" text-anchor="middle">打开文档 → 文档占中央，对话缩回右栏</text>
+</svg>

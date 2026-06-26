@@ -1,0 +1,38 @@
+<svg viewBox="0 0 820 470" role="img" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, system-ui, sans-serif">
+<title>Markdown 笔记编辑器</title><desc>左侧 Markdown 源码、右侧实时预览；支持 [[ ]] 双向链接、AI 辅助写作、底部反向链接。笔记是中央舞台的“可编辑文档”。</desc>
+<rect width="820" height="470" fill="#f4f3ef"/>
+<rect x="20" y="18" width="780" height="434" rx="12" fill="#ffffff" stroke="#e2e2dd"/>
+<text x="44" y="52" font-size="16" fill="#23262b">关于 RAG 引用粒度的想法</text>
+<rect x="606" y="32" width="92" height="30" rx="8" fill="#eef4ff" stroke="#cfe0fb"/><text x="652" y="52" font-size="13" fill="#2f6fed" text-anchor="middle">✨ AI 辅助</text>
+<text x="776" y="52" font-size="11" fill="#9aa0a8" text-anchor="end">已保存</text>
+<line x1="20" y1="72" x2="800" y2="72" stroke="#eeeee9"/>
+<line x1="410" y1="72" x2="410" y2="386" stroke="#eeeee9"/>
+<text x="44" y="92" font-size="11" fill="#9aa0a8">Markdown 源码</text>
+<text x="430" y="92" font-size="11" fill="#9aa0a8">实时预览</text>
+<g font-size="13" font-family="ui-monospace, monospace" fill="#454b54">
+<text x="44" y="120"><tspan fill="#2f6fed">## </tspan>核心问题</text>
+<text x="44" y="146">页+bbox 只对 PDF 有意义。</text>
+<text x="44" y="172">非分页源(网页/笔记)应当用</text>
+<text x="44" y="198"><tspan fill="#cf7a00">`chunk-id + 偏移`</tspan> 作锚点。</text>
+<text x="44" y="232">关联：<tspan fill="#2f6fed">[[引用锚点抽象]]</tspan></text>
+<text x="44" y="258">参见来源 <tspan fill="#2f6fed">[[DR Tulu-8B 综述]]</tspan></text>
+<text x="44" y="290">公式：<tspan fill="#cf7a00">$f(x)=\sum w_i$</tspan></text>
+</g>
+<g fill="#2c3038">
+<text x="430" y="122" font-size="15" fill="#23262b">核心问题</text>
+<text x="430" y="148" font-size="13">页+bbox 只对 PDF 有意义。</text>
+<text x="430" y="172" font-size="13">非分页源（网页/笔记）应当用</text>
+<rect x="430" y="184" width="120" height="20" rx="4" fill="#f3f1ea"/><text x="438" y="199" font-size="12" font-family="ui-monospace, monospace" fill="#9a5b00">chunk-id + 偏移</text>
+<text x="556" y="199" font-size="13"> 作锚点。</text>
+<text x="430" y="232" font-size="13">关联：<tspan fill="#2f6fed">引用锚点抽象</tspan></text>
+<text x="430" y="258" font-size="13">参见来源 <tspan fill="#2f6fed">DR Tulu-8B 综述</tspan></text>
+<text x="430" y="290" font-size="13">公式：</text><text x="478" y="290" font-size="13" font-style="italic" fill="#23262b">f(x)=Σ wᵢ</text>
+</g>
+<rect x="120" y="206" width="178" height="92" rx="9" fill="#ffffff" stroke="#d8d8d2"/>
+<text x="134" y="228" font-size="11" fill="#9aa0a8">AI · 选中文字</text>
+<g font-size="13" fill="#2c3038"><text x="134" y="252">扩写这段</text><text x="134" y="276">总结为要点</text><text x="214" y="252">改写润色</text><text x="214" y="276">续写</text></g>
+<line x1="20" y1="386" x2="800" y2="386" stroke="#eeeee9"/>
+<text x="44" y="412" font-size="12" fill="#6c727c">⮌ 反向链接 (3)</text>
+<g font-size="12" fill="#2f6fed"><text x="150" y="412">引用锚点抽象</text><text x="270" y="412">P0 地基笔记</text><text x="380" y="412">RAG 设计</text></g>
+<text x="776" y="412" font-size="12" fill="#9aa0a8" text-anchor="end">保存即重新索引 →</text>
+</svg>
