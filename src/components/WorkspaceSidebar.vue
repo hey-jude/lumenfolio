@@ -369,6 +369,38 @@ function triggerDeleteRoot(root, event = null) {
     </template>
 
     <template v-else>
+    <div class="sidebar-expanded">
+      <!-- Knowledge-base pivot (P1): Obsidian-style icon rail. Sources (the tree)
+           is the default panel; the other icons reuse the existing navigation. -->
+      <nav class="sidebar-rail-strip" aria-label="Knowledge base sections">
+        <button type="button" class="rail-mode active" :title="ui.sources || 'Sources'" :aria-label="ui.sources || 'Sources'">
+          <span aria-hidden="true">📚</span>
+        </button>
+        <button
+          v-if="graphEnabled"
+          type="button"
+          class="rail-mode"
+          :class="{ active: graphActive }"
+          :title="ui.knowledgeGraph"
+          :aria-label="ui.knowledgeGraph"
+          @click="emit('open-graph')"
+        ><span aria-hidden="true">🕸</span></button>
+        <button
+          v-if="trendingEnabled"
+          type="button"
+          class="rail-mode"
+          :class="{ active: trendingActive }"
+          :title="ui.trendingPapers"
+          :aria-label="ui.trendingPapers"
+          @click="emit('open-trending')"
+        ><span aria-hidden="true">🔥</span></button>
+        <span class="rail-spacer"></span>
+        <button type="button" class="rail-mode" :title="ui.settings" :aria-label="ui.settings" @click="emit('open-settings')">
+          <span aria-hidden="true">⚙</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-main">
     <div class="sidebar-header" data-tauri-drag-region @mousedown="startWindowDrag">
       <div class="brand-block">
         <div class="brand-mark" aria-hidden="true">
@@ -512,6 +544,8 @@ function triggerDeleteRoot(root, event = null) {
       </button>
       <button class="footer-btn muted" @click="emit('open-settings')">{{ ui.settings }}</button>
     </div>
+      </div>
+    </div>
     </template>
   </aside>
 </template>
@@ -529,6 +563,62 @@ function triggerDeleteRoot(root, event = null) {
   padding: 0 14px 16px;
   gap: 14px;
   transition: width 180ms ease, min-width 180ms ease, padding 180ms ease;
+}
+
+/* Knowledge-base pivot (P1): icon rail + panel inside the expanded sidebar. */
+.sidebar-expanded {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 10px;
+}
+
+.sidebar-rail-strip {
+  flex: 0 0 auto;
+  width: 34px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding-top: 6px;
+}
+
+.rail-mode {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rail-mode:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+}
+
+.rail-mode.active {
+  background: var(--accent-soft, rgba(106, 169, 255, 0.14));
+  border-color: rgba(106, 169, 255, 0.3);
+  color: var(--accent, #6aa9ff);
+}
+
+.rail-spacer {
+  flex: 1;
+}
+
+.sidebar-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .sidebar.drag-active {

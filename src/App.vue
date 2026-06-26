@@ -56,6 +56,12 @@ const TrendingFeed = defineAsyncComponent({
   delay: 80,
   timeout: ASYNC_COMPONENT_TIMEOUT_MS,
 })
+const KnowledgeHome = defineAsyncComponent({
+  loader: () => import('./components/KnowledgeHome.vue'),
+  loadingComponent: AsyncPanelLoading,
+  delay: 80,
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
 const KnowledgePane = defineAsyncComponent({
   loader: () => import('./components/KnowledgePane.vue'),
   delay: 120,
@@ -1948,6 +1954,27 @@ function applyCitationJump(citation) {
 function nextLocalId(prefix) {
   localMessageCounter += 1
   return `${prefix}-${Date.now()}-${localMessageCounter}`
+}
+
+// Knowledge-home (P1): recent sources + precipitated concepts for the landing.
+const knowledgeHomeRecentDocs = computed(() =>
+  allDocs.value.filter((doc) => doc && doc.id && doc.id !== 'empty').slice(0, 12),
+)
+const knowledgeHomeConcepts = computed(() => {
+  const artifacts = graphData.value?.artifacts || graphData.value?.nodes || []
+  return artifacts
+    .filter((node) => (node?.kind || node?.type) === 'concept')
+    .map((node) => node?.name || node?.label)
+    .filter((label) => typeof label === 'string' && label.trim())
+    .slice(0, 12)
+})
+
+// Home ask box: send a library-wide question (no focus document → handleSend
+// goes library-wide and the answer streams into the right-pane chat).
+function handleKnowledgeHomeAsk(text) {
+  const question = String(text || '').trim()
+  if (!question) return
+  handleSend(question)
 }
 
 async function handleSend(payload, selection = null) {
@@ -4921,7 +4948,18 @@ onMounted(() => {
       @close="handleCloseGraph"
     />
 
-    <div v-if="!showTrending && !showGraph" class="reader-column">
+    <div v-if="!showTrending && !showGraph && selectedDocument.id === 'empty'" class="reader-column">
+      <KnowledgeHome
+        :ui="ui"
+        :recent-docs="knowledgeHomeRecentDocs"
+        :concepts="knowledgeHomeConcepts"
+        :model-configured="chatModelConfigured"
+        @ask="handleKnowledgeHomeAsk"
+        @open-doc="selectDoc"
+      />
+    </div>
+
+    <div v-else-if="!showTrending && !showGraph" class="reader-column">
     <ReaderPane
       :key="`${selectedDocument.id}:${viewerReloadKey}`"
       :document="selectedDocument"
