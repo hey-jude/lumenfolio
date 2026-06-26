@@ -125,7 +125,9 @@ impl ServerHandler for LumenfolioMcpServer {
             // page's enclosing structure node so the dispatch's evidence chips still
             // show a section (Introduction, Methodology, …) rather than just a page.
             for citation in &mut output.citations {
-                if citation.section_title.is_none() && citation.page > 0 {
+                if citation.section_title.is_none()
+                    && citation.anchor() == rag::CitationAnchor::Paged
+                {
                     citation.section_title =
                         rag::section_title_for_page(&conn, &citation.document_id, citation.page);
                 }

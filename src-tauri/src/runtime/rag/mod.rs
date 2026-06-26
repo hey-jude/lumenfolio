@@ -4,6 +4,15 @@ use std::collections::HashMap;
 
 use crate::runtime::agent::lexicon::{leading_reference_number, requested_table_number};
 
+/// A cited piece of evidence.
+///
+/// Knowledge-base pivot — anchor convention: a citation is anchored either by
+/// PAGE (a `page > 0` + `bbox_list` location in a paginated source: PDF, or
+/// Office-as-PDF later) or as a REFERENCE (`page == 0`, non-paginated: web clip,
+/// note, markdown, trending — located by source/section, not page). The
+/// `page == 0` sentinel is authoritative today; P2 adds an explicit stored kind
+/// plus precise chunk-id/offset locators for non-paged sources. Use
+/// [`Citation::anchor`] instead of testing `page` directly.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Citation {
@@ -16,6 +25,27 @@ pub struct Citation {
     pub bbox_list: serde_json::Value,
     pub document_id: String,
     pub source: String,
+}
+
+/// How a [`Citation`] is located in its source. See the `Citation` doc comment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CitationAnchor {
+    /// A page + bbox location in a paginated source (clickable → highlight).
+    Paged,
+    /// A non-paginated reference (web/note/markdown/trending), located by
+    /// source/section rather than page.
+    Reference,
+}
+
+impl Citation {
+    /// The anchor kind, derived from the `page == 0` convention (see struct doc).
+    pub fn anchor(&self) -> CitationAnchor {
+        if self.page > 0 {
+            CitationAnchor::Paged
+        } else {
+            CitationAnchor::Reference
+        }
+    }
 }
 
 #[derive(Clone)]
