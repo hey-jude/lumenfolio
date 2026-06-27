@@ -14,7 +14,7 @@ const props = defineProps({
   modelConfigured: { type: Boolean, default: true },
 })
 
-const emit = defineEmits(['ask', 'open-doc'])
+const emit = defineEmits(['ask', 'open-doc', 'new-note'])
 
 const question = ref('')
 
@@ -41,7 +41,13 @@ function docKindLabel(doc) {
 <template>
   <div class="kb-home">
     <div class="kb-home-inner">
-      <h1 class="kb-title">{{ ui.myKnowledgeBase }}</h1>
+      <div class="kb-title-row">
+        <h1 class="kb-title">{{ ui.myKnowledgeBase }}</h1>
+        <button type="button" class="kb-new-note" @click="emit('new-note')">
+          <span class="kb-new-note-plus" aria-hidden="true">+</span>
+          {{ ui.newNote }}
+        </button>
+      </div>
 
       <form class="kb-ask" @submit.prevent="submitAsk">
         <input
@@ -106,11 +112,43 @@ function docKindLabel(doc) {
   padding: 64px 28px 40px;
 }
 
+.kb-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 20px;
+}
+
 .kb-title {
   font-size: 22px;
   font-weight: 500;
   color: var(--text-primary);
-  margin: 0 0 20px;
+  margin: 0;
+}
+
+.kb-new-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line-soft);
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.kb-new-note:hover {
+  border-color: var(--accent, #6aa9ff);
+  color: var(--accent, #6aa9ff);
+}
+
+.kb-new-note-plus {
+  font-size: 15px;
+  line-height: 1;
 }
 
 .kb-ask {

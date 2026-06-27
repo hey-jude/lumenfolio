@@ -67,6 +67,12 @@ const KnowledgePane = defineAsyncComponent({
   delay: 120,
   timeout: ASYNC_COMPONENT_TIMEOUT_MS,
 })
+const NoteEditor = defineAsyncComponent({
+  loader: () => import('./components/NoteEditor.vue'),
+  loadingComponent: AsyncPanelLoading,
+  delay: 80,
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
 const KnowledgeGraphView = defineAsyncComponent({
   loader: () => import('./components/KnowledgeGraphView.vue'),
   loadingComponent: AsyncPanelLoading,
@@ -784,6 +790,13 @@ const selectedDocument = computed(() => (
   || allDocs.value[0]
   || emptyDocument.value
 ))
+
+// Knowledge-base pivot (P2): authored text sources open in the Markdown editor.
+const EDITABLE_CONTENT_TYPES = ['note', 'markdown', 'text', 'web']
+function isEditableSourceDoc(doc) {
+  return Boolean(doc) && doc.id !== 'empty' && EDITABLE_CONTENT_TYPES.includes(doc.contentType)
+}
+const editableSelected = computed(() => isEditableSourceDoc(selectedDocument.value))
 // Starter questions shown in the chat empty state. Two layers, no extra LLM call:
 // (A) static common questions, always available even before indexing finishes; and
 // (B) document-specific prompts derived from the already-computed knowledge card's
@@ -1975,6 +1988,42 @@ function handleKnowledgeHomeAsk(text) {
   const question = String(text || '').trim()
   if (!question) return
   handleSend(question)
+}
+
+// Knowledge-base pivot (P2): create a blank standalone note, merge it into the
+// workspace tree (virtual Knowledge Base root) and open it in the Markdown
+// editor. The backend already enqueues its first index pass.
+async function handleCreateNote() {
+  try {
+    const result = await invoke('create_note_source', {
+      input: { title: '', bodyMd: '' },
+    })
+    if (result?.snapshot) {
+      const { root } = upsertWorkspaceRootSnapshot(result.snapshot)
+      // Make sure the new note is visible (un-collapse the knowledge root).
+      if (root) root.collapsed = false
+    }
+    if (result?.documentId) {
+      await nextTick()
+      selectDoc(result.documentId)
+    }
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
+// After a note saves, reflect the new title in the tree and show the indexing
+// state — the global document-index listener flips it back to 'indexed'.
+function handleNoteSaved(payload) {
+  const target = allDocs.value.find((doc) => doc.id === payload?.documentId)
+  if (!target) return
+  if (payload.title) {
+    target.title = payload.title
+    target.shortTitle = payload.title
+  }
+  target.indexStatus = 'indexing'
+  target.status = 'indexing'
+  target.statusTone = 'warning'
 }
 
 async function handleSend(payload, selection = null) {
@@ -3645,6 +3694,8 @@ function handleDocumentIndexFailed(payload) {
 
 function scheduleDocumentVisualIndex(doc) {
   if (!doc || doc.id === 'empty') return
+  // Authored text sources (notes / clips / md) have no visual (TSR) layer.
+  if (isEditableSourceDoc(doc)) return
   if (doc.source !== 'local' || doc.indexStatus !== 'indexed' || !doc.treeReady) return
   if (Number(doc.indexVersion || 0) !== Number(doc.currentIndexVersion || 0)) return
   if (doc.visualIndexStatus === 'succeeded'
@@ -4398,12 +4449,17 @@ function createWorkspaceRoot(snapshot) {
   const collapsed = existing
     ? Boolean(existing.collapsed)
     : Boolean(persistedKey && collapsedRoots.value?.[persistedKey])
+  // Knowledge-base pivot (P2): the virtual root that owns notes/clips gets a
+  // friendly localized label instead of its synthetic `lumenfolio://` path.
+  const isKnowledgeRoot = rootId === 'root-knowledge-base'
   return {
     id: rootId,
-    name: {
-      en: workspaceRootName(path),
-      zh: workspaceRootName(path),
-    },
+    name: isKnowledgeRoot
+      ? { en: 'My knowledge base', zh: '我的知识库' }
+      : {
+        en: workspaceRootName(path),
+        zh: workspaceRootName(path),
+      },
     path,
     collapsed,
     folders: [{
@@ -4505,6 +4561,9 @@ function createLocalDocument(pdf) {
     id: pdf.id,
     source: 'local',
     workspaceRootId: pdf.workspace_root_id || '',
+    // Knowledge-base pivot (P2): source kind. Editable text sources
+    // (note/markdown/text/web) open in the Markdown editor instead of the reader.
+    contentType: pdf.content_type || 'pdf',
     path: pdf.path,
     title,
     shortTitle: pdf.short_title || title,
@@ -4894,6 +4953,7 @@ onMounted(() => {
       @update:filter="filter = $event"
       @open-trending="handleOpenTrending"
       @open-graph="handleOpenGraph"
+      @new-note="handleCreateNote"
       @select-doc="selectDoc"
       @add-folder="chooseWorkspace"
       @add-pdfs="addPdfsToRoot"
@@ -4956,6 +5016,17 @@ onMounted(() => {
         :model-configured="chatModelConfigured"
         @ask="handleKnowledgeHomeAsk"
         @open-doc="selectDoc"
+        @new-note="handleCreateNote"
+      />
+    </div>
+
+    <div v-else-if="!showTrending && !showGraph && editableSelected" class="reader-column">
+      <NoteEditor
+        :key="selectedDocument.id"
+        :document-id="selectedDocument.id"
+        :index-status="selectedDocument.indexStatus"
+        :ui="ui"
+        @saved="handleNoteSaved"
       />
     </div>
 

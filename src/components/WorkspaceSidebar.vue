@@ -70,6 +70,7 @@ const emit = defineEmits([
   'update:filter',
   'open-trending',
   'open-graph',
+  'new-note',
   'select-doc',
   'add-folder',
   'add-pdfs',
@@ -376,6 +377,13 @@ function triggerDeleteRoot(root, event = null) {
         <button type="button" class="rail-mode active" :title="ui.sources || 'Sources'" :aria-label="ui.sources || 'Sources'">
           <span aria-hidden="true">📚</span>
         </button>
+        <button
+          type="button"
+          class="rail-mode"
+          :title="ui.newNote"
+          :aria-label="ui.newNote"
+          @click="emit('new-note')"
+        ><span aria-hidden="true">📝</span></button>
         <button
           v-if="graphEnabled"
           type="button"
