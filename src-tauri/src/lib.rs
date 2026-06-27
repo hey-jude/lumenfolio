@@ -1369,6 +1369,68 @@ fn load_note_source(
     documents::load_text_document_body(&database, document_id.trim())
 }
 
+/// Derive a short, human title for a web clip: the first non-trivial line of the
+/// extracted text, else the URL host. Capped so it fits the sidebar.
+fn web_clip_title(extracted: &str, url: &str) -> String {
+    let from_text = extracted
+        .lines()
+        .map(str::trim)
+        .find(|line| line.len() >= 8 && line.len() <= 120);
+    let title = match from_text {
+        Some(line) => line.to_string(),
+        None => url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or(url)
+            .to_string(),
+    };
+    let title = title.trim();
+    if title.chars().count() > 80 {
+        format!("{}…", title.chars().take(80).collect::<String>())
+    } else {
+        title.to_string()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipWebPageInput {
+    url: String,
+}
+
+#[tauri::command]
+fn clip_web_page(
+    input: ClipWebPageInput,
+    database: State<'_, AppDatabase>,
+    app: tauri::AppHandle,
+) -> Result<CreateSourceOutput, String> {
+    let url = input.url.trim();
+    if url.is_empty() {
+        return Err("No URL provided".to_string());
+    }
+    // Reuse the chat web_fetch extractor (HTML stripped → readable text). A clip
+    // is just a captured snapshot stored as an editable 'web' source so it flows
+    // through the same chunk → graph → claims pipeline as notes.
+    let extracted = runtime::web_search::web_fetch(url, 40_000)?;
+    if extracted.trim().is_empty() {
+        return Err("No readable text could be extracted from that page".to_string());
+    }
+    let title = web_clip_title(&extracted, url);
+    // Front-matter keeps the origin visible in the editor body too (and survives
+    // export), beyond the structured source_url column.
+    let body_md = format!("> [{title}]({url})\n\n{extracted}");
+    let document_id =
+        documents::create_text_document(&database, "web", &title, &body_md, Some(url))?;
+    let _ = document_index::enqueue_document_reindex(document_id.clone(), app);
+    let snapshot = knowledge_root_snapshot(&database)?;
+    Ok(CreateSourceOutput {
+        document_id,
+        snapshot,
+    })
+}
+
 #[tauri::command]
 fn remove_workspace_root(
     root_id: String,
@@ -5415,6 +5477,7 @@ pub fn run() {
             create_note_source,
             update_note_source,
             load_note_source,
+            clip_web_page,
             trending::fetch_trending_papers,
             trending::add_trending_paper,
             runtime::precipitation::enqueue_document_knowledge,

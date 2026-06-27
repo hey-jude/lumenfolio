@@ -797,6 +797,8 @@ function isEditableSourceDoc(doc) {
   return Boolean(doc) && doc.id !== 'empty' && EDITABLE_CONTENT_TYPES.includes(doc.contentType)
 }
 const editableSelected = computed(() => isEditableSourceDoc(selectedDocument.value))
+// True while a web clip is being fetched (gates the home clip form).
+const clipBusy = ref(false)
 // Starter questions shown in the chat empty state. Two layers, no extra LLM call:
 // (A) static common questions, always available even before indexing finishes; and
 // (B) document-specific prompts derived from the already-computed knowledge card's
@@ -2009,6 +2011,31 @@ async function handleCreateNote() {
     }
   } catch (err) {
     workspaceError.value = err?.message || String(err)
+  }
+}
+
+// Knowledge-base pivot (P2): clip a web page into the knowledge base. The
+// backend fetches + strips the page, stores it as an editable 'web' source and
+// indexes it; we open the captured Markdown in the editor.
+async function handleClipWebPage(url) {
+  const target = String(url || '').trim()
+  if (!target || clipBusy.value) return
+  clipBusy.value = true
+  workspaceError.value = ''
+  try {
+    const result = await invoke('clip_web_page', { input: { url: target } })
+    if (result?.snapshot) {
+      const { root } = upsertWorkspaceRootSnapshot(result.snapshot)
+      if (root) root.collapsed = false
+    }
+    if (result?.documentId) {
+      await nextTick()
+      selectDoc(result.documentId)
+    }
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  } finally {
+    clipBusy.value = false
   }
 }
 
@@ -5014,9 +5041,11 @@ onMounted(() => {
         :recent-docs="knowledgeHomeRecentDocs"
         :concepts="knowledgeHomeConcepts"
         :model-configured="chatModelConfigured"
+        :clipping="clipBusy"
         @ask="handleKnowledgeHomeAsk"
         @open-doc="selectDoc"
         @new-note="handleCreateNote"
+        @clip-web="handleClipWebPage"
       />
     </div>
 

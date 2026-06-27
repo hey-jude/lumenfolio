@@ -12,11 +12,15 @@ const props = defineProps({
   concepts: { type: Array, default: () => [] },
   // Whether a chat model is configured (gates the ask box).
   modelConfigured: { type: Boolean, default: true },
+  // True while a web clip is being fetched (disables the clip form).
+  clipping: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['ask', 'open-doc', 'new-note'])
+const emit = defineEmits(['ask', 'open-doc', 'new-note', 'clip-web'])
 
 const question = ref('')
+const clipOpen = ref(false)
+const clipUrl = ref('')
 
 const topConcepts = computed(() => props.concepts.slice(0, 8))
 const recent = computed(() => props.recentDocs.slice(0, 8))
@@ -36,6 +40,18 @@ function docKindLabel(doc) {
   const map = props.ui.contentTypeLabels || {}
   return map[doc.contentType] || (doc.contentType ? doc.contentType.toUpperCase() : 'PDF')
 }
+
+function toggleClip() {
+  clipOpen.value = !clipOpen.value
+}
+
+function submitClip() {
+  const url = clipUrl.value.trim()
+  if (!url || props.clipping) return
+  emit('clip-web', url)
+  clipUrl.value = ''
+  clipOpen.value = false
+}
 </script>
 
 <template>
@@ -43,11 +59,30 @@ function docKindLabel(doc) {
     <div class="kb-home-inner">
       <div class="kb-title-row">
         <h1 class="kb-title">{{ ui.myKnowledgeBase }}</h1>
-        <button type="button" class="kb-new-note" @click="emit('new-note')">
-          <span class="kb-new-note-plus" aria-hidden="true">+</span>
-          {{ ui.newNote }}
-        </button>
+        <div class="kb-title-actions">
+          <button type="button" class="kb-new-note" @click="toggleClip">
+            <span class="kb-new-note-plus" aria-hidden="true">🔗</span>
+            {{ ui.clipWebPage }}
+          </button>
+          <button type="button" class="kb-new-note" @click="emit('new-note')">
+            <span class="kb-new-note-plus" aria-hidden="true">+</span>
+            {{ ui.newNote }}
+          </button>
+        </div>
       </div>
+
+      <form v-if="clipOpen" class="kb-clip" @submit.prevent="submitClip">
+        <input
+          v-model="clipUrl"
+          class="kb-clip-input"
+          type="url"
+          :disabled="clipping"
+          :placeholder="ui.clipUrlPlaceholder"
+        />
+        <button class="kb-clip-go" type="submit" :disabled="clipping || !clipUrl.trim()">
+          {{ clipping ? (ui.clipping || '…') : (ui.clipGo || 'Clip') }}
+        </button>
+      </form>
 
       <form class="kb-ask" @submit.prevent="submitAsk">
         <input
@@ -125,6 +160,49 @@ function docKindLabel(doc) {
   font-weight: 500;
   color: var(--text-primary);
   margin: 0;
+}
+
+.kb-title-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.kb-clip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.kb-clip-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--bg-elevated, rgba(255, 255, 255, 0.04));
+  color: var(--text-primary);
+  font-size: 14px;
+  height: 38px;
+  padding: 0 12px;
+  outline: none;
+}
+
+.kb-clip-go {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent, #6aa9ff);
+  color: #fff;
+  font-size: 13px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+
+.kb-clip-go:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .kb-new-note {
