@@ -110,14 +110,15 @@
 - **留作后续(非阻塞)**:概念/会话/搜索独立面板、完整"对话撑满中央"的自适应舞台、文档标签页 —— 视觉增强,按 mockup live 迭代。
 - **风险：** 低(全部增量、向后兼容)。需你在 app 里 live 验证视觉细节。
 
-### P2 — 独立摄入（第二大脑内核）
+### P2 — 独立摄入（第二大脑内核）✅ 已闭环（已测/已构建/已提交，待你 live 验证）
 
-- 一等公民的**独立笔记/想法**，配 **Markdown 编辑器**（§7 知识编辑/写作的核心）—— 创建、编辑、索引、沉淀；不绑文档/页。
-- **网页剪藏**摄入（复用 `web_fetch` 的正文提取）。
-- **Markdown / 纯文本**导入（且 md/txt 可继续编辑）。
-- 全部流入同一套 chunk → artifact → 图谱 → claims 管道，使用章节/偏移引用；**编辑保存即重新切块回流**。
-- **P2.5**：`[[ ]]` 双向链接 + 反向链接面板。
-- **风险：** 中。新摄入器 + Markdown 编辑器 + 链接。
+- **P2-a 数据模型 + CRUD**：`documents` 加可空 `body_md`（可编辑正文）+ `source_url`（剪藏来源）；虚拟「知识库」根（`root-knowledge-base`）承载脱离磁盘的来源，目录重扫只回收 `content_type='pdf'`，笔记永不被误删。命令 `create_note_source` / `update_note_source` / `load_note_source`（与既有"PDF 页内批注"`create_note` 区分命名）。
+- **P2-b 文本回流管道**：`run_document_reindex_job` 把 note/markdown/text/web 分发到**专用、无几何**的索引路径（PDF 块归一化是论文/几何专属，会破坏零几何文本块）。`upsert_text_document_index`：markdown → 标题/正文块（代码围栏整体保留）→ `document_chunks` + FTS + 结构树 + 沉淀队列，page=0（Reference 锚点），无视觉/TSR 层。**保存即从 `body_md` 重新切块**。
+- **P2-c Markdown 编辑器**：`NoteEditor.vue` —— CodeMirror 6（markdown/行号/历史/软换行/暗色主题）+ 实时 `MarkdownText` 预览；标题、保存（Ctrl/⌘-S）、剪藏来源链接、索引/已存状态。可编辑来源在中央以编辑器打开而非阅读器；新建入口=首页按钮 + 侧栏 📝。
+- **P2-d 网页剪藏**：`clip_web_page` 复用 `web_fetch` 抽正文 → 存为可编辑 `web` 来源（带 front-matter 原文链接）→ 走文本管道索引。首页「剪藏网页」表单。
+- **P2-e Markdown/txt 导入**：`import_workspace_paths` 按扩展名分发（.md→markdown、.txt→text），内容拷入 `body_md` 成为可继续编辑的知识库来源；文件选择器 + 拖拽均支持。
+- **P2.5 `[[ ]]` 双向链接 + 反链**：`note_links` 表（索引时重建出链）；`extract_wikilinks` 解析 `[[Title]]`/`[[Title|alias]]`；`load_note_links`（出链按当前标题动态解析 + 反链）；编辑器预览内 `[[ ]]` 可点击——已解析→跳转，未解析→新建同名笔记；编辑器底部反链/出链栏。
+- **风险：** 中（已落地）。`ContentIngestor` trait 仍未抽——文本路径就是"第二个 ingestor"，但它与 PDF 路径差异足够大（无几何/无视觉），共享的是下游（`upsert` 的结构树/沉淀/FTS 接缝）而非上游接口；待第三个 ingestor（Office, P3）出现再决定是否抽象。
 
 ### P3 — Office 格式 + 预览
 
