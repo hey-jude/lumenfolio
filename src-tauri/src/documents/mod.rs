@@ -516,12 +516,176 @@ pub(crate) fn stable_path_id(prefix: &str, path: &Path) -> String {
     format!("{prefix}-{hash:016x}")
 }
 
+// ---------------------------------------------------------------------------
+// Knowledge-base pivot (P2): disk-decoupled authored sources.
+//
+// Notes, web clips and imported markdown live in a single virtual "Knowledge
+// Base" workspace root rather than a scanned directory. Their authored body is
+// stored in `documents.body_md`; saving re-indexes straight from the DB (no
+// file on disk). The synthetic `path` (`<kind>:<id>`) only satisfies the
+// NOT NULL / UNIQUE constraint — it is never read from the filesystem.
+// ---------------------------------------------------------------------------
+
+/// Stable id of the virtual Knowledge Base root that owns authored sources.
+pub(crate) const KNOWLEDGE_ROOT_ID: &str = "root-knowledge-base";
+const KNOWLEDGE_ROOT_PATH: &str = "lumenfolio://knowledge";
+const KNOWLEDGE_ROOT_NAME: &str = "Knowledge Base";
+
+/// Content types whose body is editable in the Markdown editor.
+pub(crate) const EDITABLE_CONTENT_TYPES: &[&str] = &["note", "markdown", "text", "web"];
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TextDocumentBody {
+    pub document_id: String,
+    pub title: String,
+    pub body_md: String,
+    pub source_url: String,
+    pub content_type: String,
+}
+
+fn ensure_knowledge_root(conn: &Connection) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO workspace_roots (id, path, name, created_at, updated_at, last_opened_at)
+         VALUES (?1, ?2, ?3, unixepoch(), unixepoch(), unixepoch())
+         ON CONFLICT(id) DO NOTHING",
+        params![KNOWLEDGE_ROOT_ID, KNOWLEDGE_ROOT_PATH, KNOWLEDGE_ROOT_NAME],
+    )
+    .map_err(|err| format!("Failed to ensure knowledge root: {err}"))?;
+    Ok(())
+}
+
+fn new_text_document_id(content_type: &str) -> String {
+    format!(
+        "{content_type}-{:016x}{:016x}",
+        rand::random::<u64>(),
+        rand::random::<u64>()
+    )
+}
+
+/// Create a disk-decoupled authored source (note / web clip / imported md/txt)
+/// in the Knowledge Base root. Returns the new document id. The row starts
+/// `index_status = 'pending'`; the caller enqueues a reindex to chunk the body.
+pub(crate) fn create_text_document(
+    database: &State<'_, AppDatabase>,
+    content_type: &str,
+    title: &str,
+    body_md: &str,
+    source_url: Option<&str>,
+) -> Result<String, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    ensure_knowledge_root(&conn)?;
+    let id = new_text_document_id(content_type);
+    let path = format!("{content_type}:{id}");
+    let title = {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            "Untitled".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    conn.execute(
+        "INSERT INTO documents
+            (id, workspace_root_id, path, title, short_title, file_size, modified,
+             page_count, last_page, content_type, body_md, source_url,
+             index_status, index_version, created_at, updated_at, last_opened_at)
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5, unixepoch(), 0, 1, ?6, ?7, ?8,
+                 'pending', 0, unixepoch(), unixepoch(), unixepoch())",
+        params![
+            id,
+            KNOWLEDGE_ROOT_ID,
+            path,
+            title,
+            body_md.len() as i64,
+            content_type,
+            body_md,
+            source_url,
+        ],
+    )
+    .map_err(|err| format!("Failed to create text document: {err}"))?;
+    Ok(id)
+}
+
+/// Update an editable source's title + body and mark it stale so the next
+/// reindex re-chunks the new content. Errors if the row is missing or not an
+/// editable content type.
+pub(crate) fn update_text_document_body(
+    database: &State<'_, AppDatabase>,
+    document_id: &str,
+    title: &str,
+    body_md: &str,
+) -> Result<(), String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let title = {
+        let trimmed = title.trim();
+        if trimmed.is_empty() {
+            "Untitled".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let affected = conn
+        .execute(
+            "UPDATE documents
+             SET title = ?2, short_title = ?2, body_md = ?3, file_size = ?4,
+                 modified = unixepoch(), updated_at = unixepoch(),
+                 index_status = 'stale'
+             WHERE id = ?1
+               AND content_type IN ('note', 'markdown', 'text', 'web')",
+            params![document_id, title, body_md, body_md.len() as i64],
+        )
+        .map_err(|err| format!("Failed to update text document: {err}"))?;
+    if affected == 0 {
+        return Err("Note not found or is not an editable source".to_string());
+    }
+    Ok(())
+}
+
+/// Load an authored source's body for the editor.
+pub(crate) fn load_text_document_body(
+    database: &State<'_, AppDatabase>,
+    document_id: &str,
+) -> Result<TextDocumentBody, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    conn.query_row(
+        "SELECT title, COALESCE(body_md, ''), COALESCE(source_url, ''), content_type
+         FROM documents WHERE id = ?1",
+        params![document_id],
+        |row| {
+            Ok(TextDocumentBody {
+                document_id: document_id.to_string(),
+                title: row.get(0)?,
+                body_md: row.get(1)?,
+                source_url: row.get(2)?,
+                content_type: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|err| format!("Failed to load text document: {err}"))?
+    .ok_or_else(|| "Document not found".to_string())
+}
+
 fn load_existing_document_ids(
     tx: &rusqlite::Transaction<'_>,
     workspace_root_id: &str,
 ) -> Result<Vec<String>, String> {
+    // Knowledge-base pivot (P2): directory rescans reconcile only file-backed
+    // PDFs (the only kind `collect_pdfs` produces). Notes / web clips / imported
+    // markdown are not on the scanned disk tree, so they must never be reaped by
+    // the stale-deletion pass — restrict reconciliation to content_type='pdf'.
     let mut stmt = tx
-        .prepare("SELECT id FROM documents WHERE workspace_root_id = ?1")
+        .prepare("SELECT id FROM documents WHERE workspace_root_id = ?1 AND content_type = 'pdf'")
         .map_err(|err| format!("Failed to load existing documents: {err}"))?;
     let document_ids = stmt
         .query_map(params![workspace_root_id], |row| row.get::<_, String>(0))

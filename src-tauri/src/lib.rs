@@ -1283,6 +1283,92 @@ fn import_workspace_paths(
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// Knowledge-base pivot (P2): authored sources (notes / web clips / md imports).
+//
+// These are disk-decoupled — created, edited and re-indexed straight from the
+// `documents.body_md` column inside the virtual "Knowledge Base" root. The
+// frontend merges the returned snapshot into its workspace tree and selects the
+// new id; `update_note` re-chunks the body via the shared reindex path.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateSourceOutput {
+    document_id: String,
+    snapshot: WorkspaceRootSnapshot,
+}
+
+fn knowledge_root_snapshot(
+    database: &State<'_, AppDatabase>,
+) -> Result<WorkspaceRootSnapshot, String> {
+    let documents = documents::load_documents_for_root(database, documents::KNOWLEDGE_ROOT_ID)?;
+    Ok(WorkspaceRootSnapshot {
+        root: WorkspaceRoot {
+            id: documents::KNOWLEDGE_ROOT_ID.to_string(),
+            path: "lumenfolio://knowledge".to_string(),
+        },
+        documents,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateNoteSourceInput {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body_md: String,
+}
+
+#[tauri::command]
+fn create_note_source(
+    input: CreateNoteSourceInput,
+    database: State<'_, AppDatabase>,
+    app: tauri::AppHandle,
+) -> Result<CreateSourceOutput, String> {
+    let document_id =
+        documents::create_text_document(&database, "note", &input.title, &input.body_md, None)?;
+    // Index the new note (chunks → artifacts → graph) in the background so it
+    // is immediately askable / linkable. Failure to enqueue is non-fatal —
+    // selecting the note re-triggers indexing.
+    let _ = document_index::enqueue_document_reindex(document_id.clone(), app);
+    let snapshot = knowledge_root_snapshot(&database)?;
+    Ok(CreateSourceOutput {
+        document_id,
+        snapshot,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateNoteSourceInput {
+    document_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body_md: String,
+}
+
+#[tauri::command]
+fn update_note_source(
+    input: UpdateNoteSourceInput,
+    database: State<'_, AppDatabase>,
+    app: tauri::AppHandle,
+) -> Result<DocumentIndexEventOutput, String> {
+    let document_id = input.document_id.trim().to_string();
+    documents::update_text_document_body(&database, &document_id, &input.title, &input.body_md)?;
+    document_index::enqueue_document_reindex(document_id, app)
+}
+
+#[tauri::command]
+fn load_note_source(
+    document_id: String,
+    database: State<'_, AppDatabase>,
+) -> Result<documents::TextDocumentBody, String> {
+    documents::load_text_document_body(&database, document_id.trim())
+}
+
 #[tauri::command]
 fn remove_workspace_root(
     root_id: String,
@@ -5326,6 +5412,9 @@ pub fn run() {
             pdf_layout_dump::dump_pdf_layout,
             scan_workspace_pdfs,
             import_workspace_paths,
+            create_note_source,
+            update_note_source,
+            load_note_source,
             trending::fetch_trending_papers,
             trending::add_trending_paper,
             runtime::precipitation::enqueue_document_knowledge,

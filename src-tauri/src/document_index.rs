@@ -662,6 +662,13 @@ fn run_document_reindex_job(
     // (this PDF worker's pdfium/OCR/progress shape must not be locked in as the
     // contract). For now this is the explicit dispatch seam.
     let content_type = document_content_type(document_id, database)?;
+    // Knowledge-base pivot (P2): authored text sources (note / web clip /
+    // imported markdown|text) index straight from `documents.body_md` via a
+    // dedicated, geometry-free path — they have no PDF on disk and the
+    // PDF-centric block normalizer would mangle their zero-geometry blocks.
+    if is_text_source(&content_type) {
+        return run_text_document_reindex_job(document_id, database, agent_sessions, app);
+    }
     if content_type != "pdf" {
         return Err(format!(
             "Indexing is not yet supported for content type '{content_type}'."
@@ -972,6 +979,269 @@ fn document_content_type(document_id: &str, database: &AppDatabase) -> Result<St
     .optional()
     .map_err(|err| format!("Failed to load document content type: {err}"))?
     .ok_or_else(|| "Document is no longer available".to_string())
+}
+
+/// Whether a content type is an authored, disk-decoupled text source that is
+/// indexed from `documents.body_md` rather than a file on disk.
+fn is_text_source(content_type: &str) -> bool {
+    matches!(content_type, "note" | "markdown" | "text" | "web")
+}
+
+fn document_body_md(document_id: &str, database: &AppDatabase) -> Result<String, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    conn.query_row(
+        "SELECT COALESCE(body_md, '') FROM documents WHERE id = ?1 LIMIT 1",
+        params![document_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|err| format!("Failed to load document body: {err}"))?
+    .ok_or_else(|| "Document is no longer available for reindex".to_string())
+}
+
+/// Split authored markdown into index blocks in document order. Blank lines
+/// separate blocks; fenced code blocks (``` / ~~~) stay intact; a lone
+/// heading line (`#`..`######`) becomes a `heading` block (hashes stripped),
+/// everything else a `body` block. Returns (text, role) pairs.
+fn split_markdown_blocks(body: &str) -> Vec<(String, String)> {
+    let mut blocks: Vec<(String, String)> = Vec::new();
+    let mut buffer: Vec<String> = Vec::new();
+    let mut in_fence = false;
+    let mut fence_marker = "```";
+
+    for raw in body.lines() {
+        let trimmed_start = raw.trim_start();
+        let is_fence = trimmed_start.starts_with("```") || trimmed_start.starts_with("~~~");
+        if in_fence {
+            buffer.push(raw.to_string());
+            if is_fence && trimmed_start.starts_with(fence_marker) {
+                in_fence = false;
+            }
+            continue;
+        }
+        if is_fence {
+            push_markdown_block(&mut buffer, &mut blocks);
+            fence_marker = if trimmed_start.starts_with("```") {
+                "```"
+            } else {
+                "~~~"
+            };
+            in_fence = true;
+            buffer.push(raw.to_string());
+            continue;
+        }
+        if raw.trim().is_empty() {
+            push_markdown_block(&mut buffer, &mut blocks);
+        } else {
+            buffer.push(raw.to_string());
+        }
+    }
+    push_markdown_block(&mut buffer, &mut blocks);
+    blocks
+}
+
+fn push_markdown_block(buffer: &mut Vec<String>, blocks: &mut Vec<(String, String)>) {
+    if buffer.is_empty() {
+        return;
+    }
+    let text = buffer.join("\n");
+    buffer.clear();
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !trimmed.contains('\n') {
+        let line = trimmed.trim_start();
+        let hashes = line.chars().take_while(|ch| *ch == '#').count();
+        if (1..=6).contains(&hashes) {
+            let title = line[hashes..].trim();
+            if !title.is_empty() {
+                blocks.push((title.to_string(), "heading".to_string()));
+                return;
+            }
+        }
+    }
+    blocks.push((trimmed.to_string(), "body".to_string()));
+}
+
+/// Reindex an authored text source from `documents.body_md`: chunk the markdown
+/// into FTS-searchable blocks, rebuild the structure tree and queue knowledge
+/// precipitation — the same downstream pipeline PDFs feed, minus PDF geometry
+/// and the visual (TSR) layer. Citations land at page 0 (Reference anchor).
+fn run_text_document_reindex_job(
+    document_id: &str,
+    database: &AppDatabase,
+    agent_sessions: &AgentSessionState,
+    app: &tauri::AppHandle,
+) -> Result<DocumentIndexResult, String> {
+    emit_reindex_progress(
+        app,
+        database,
+        document_id,
+        5,
+        "mark_running",
+        "Preparing index job",
+    );
+    mark_text_index_job_running(document_id, database)?;
+    let body_md = document_body_md(document_id, database)?;
+    emit_reindex_progress(app, database, document_id, 40, "chunk", "Chunking note");
+    let result = upsert_text_document_index(document_id, &body_md, database);
+    if result.is_ok() {
+        agent_sessions.clear_session(&crate::migrated_session_id(document_id));
+    }
+    match result {
+        Ok(result) => {
+            emit_reindex_progress(
+                app,
+                database,
+                document_id,
+                97,
+                "finalizing",
+                "Finalizing index",
+            );
+            mark_text_index_job_succeeded(document_id, database)?;
+            Ok(result)
+        }
+        Err(err) => {
+            mark_text_index_job_failed(document_id, database, &err)?;
+            Err(err)
+        }
+    }
+}
+
+/// Write the chunk/block/structure rows for an authored text source. Geometry
+/// is empty (`[]`) and the single logical page is `page_no = 0` so citations
+/// resolve to the Reference anchor rather than a non-existent PDF page.
+fn upsert_text_document_index(
+    document_id: &str,
+    body_md: &str,
+    database: &AppDatabase,
+) -> Result<DocumentIndexResult, String> {
+    let blocks = split_markdown_blocks(body_md);
+    let mut conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("Failed to start text index transaction: {err}"))?;
+
+    for table in [
+        "document_pages",
+        "document_blocks",
+        "document_lines",
+        "document_text_units",
+        "document_layout_lines",
+        "document_layout_regions",
+        "document_outlines",
+        "document_chunks",
+        "document_chunks_fts",
+    ] {
+        tx.execute(
+            &format!("DELETE FROM {table} WHERE document_id = ?1"),
+            params![document_id],
+        )
+        .map_err(|err| format!("Failed to clear {table}: {err}"))?;
+    }
+
+    let page_no: u32 = 0;
+    let empty_bbox = "[]";
+    let page_text = blocks
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    tx.execute(
+        "INSERT INTO document_pages (document_id, page_no, width, height, text)
+         VALUES (?1, ?2, 0, 0, ?3)",
+        params![document_id, page_no, page_text],
+    )
+    .map_err(|err| format!("Failed to insert note page: {err}"))?;
+
+    let mut structure_blocks = Vec::new();
+    for (index, (text, role)) in blocks.iter().enumerate() {
+        let block_index = (index + 1) as u32;
+        let block_id = format!("{document_id}-p0-b{block_index}");
+        tx.execute(
+            "INSERT INTO document_blocks
+                (id, document_id, page_no, block_index, text, bbox_json, block_role, region_index, region_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, '')",
+            params![block_id, document_id, page_no, block_index, text, empty_bbox, role],
+        )
+        .map_err(|err| format!("Failed to insert note block: {err}"))?;
+
+        let chunk_id = format!("chunk-{block_id}");
+        tx.execute(
+            "INSERT INTO document_chunks
+                (id, document_id, page_no, block_ids_json, text, bbox_refs_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                chunk_id,
+                document_id,
+                page_no,
+                serde_json::json!([block_id]).to_string(),
+                text,
+                empty_bbox
+            ],
+        )
+        .map_err(|err| format!("Failed to insert note chunk: {err}"))?;
+        tx.execute(
+            "INSERT INTO document_chunks_fts (chunk_id, document_id, text)
+             VALUES (?1, ?2, ?3)",
+            params![chunk_id, document_id, text],
+        )
+        .map_err(|err| format!("Failed to insert note FTS row: {err}"))?;
+
+        structure_blocks.push(runtime::rag::StructureBlockSeed {
+            page_no,
+            block_index,
+            text: text.clone(),
+            bbox_list: serde_json::json!([]),
+            role: role.clone(),
+            region_index: 0,
+            region_id: String::new(),
+        });
+    }
+
+    let page_count: u32 = 1;
+    let updated = tx
+        .execute(
+            "UPDATE documents
+             SET page_count = ?2, index_status = 'indexed', index_version = ?3,
+                 updated_at = unixepoch()
+             WHERE id = ?1",
+            params![document_id, page_count, CURRENT_INDEX_VERSION],
+        )
+        .map_err(|err| format!("Failed to update note index status: {err}"))?;
+    if updated == 0 {
+        return Err("Document is no longer available for index upsert".to_string());
+    }
+
+    runtime::rag::rebuild_structure_tree(&tx, document_id, &structure_blocks, &[])?;
+    runtime::precipitation::queue_precipitation_job(&tx, document_id)?;
+    // Text sources have no visual (TSR) layer — clear any stale visual job so
+    // the UI never shows a perpetually-pending diagram badge for a note.
+    tx.execute(
+        "DELETE FROM document_index_jobs WHERE document_id = ?1 AND job_type = 'visual_tsr'",
+        params![document_id],
+    )
+    .map_err(|err| format!("Failed to clear visual job for text source: {err}"))?;
+
+    let tree_ready = visual_index::document_tree_ready(&tx, document_id)?;
+    tx.commit()
+        .map_err(|err| format!("Failed to commit note index: {err}"))?;
+
+    Ok(DocumentIndexResult {
+        page_count,
+        index_version: CURRENT_INDEX_VERSION,
+        tree_ready,
+        visual_index_status: "skipped".to_string(),
+        visual_index_version: 0,
+        visual_index_error: String::new(),
+    })
 }
 
 fn document_pdf_path_from_db(document_id: &str, database: &AppDatabase) -> Result<PathBuf, String> {
@@ -1664,5 +1934,114 @@ mod tests {
         };
 
         assert!(err.contains("Document is no longer available"));
+    }
+
+    #[test]
+    fn split_markdown_blocks_separates_headings_paragraphs_and_fences() {
+        let body = "# Title\n\nFirst paragraph line one\nline two\n\n## Section\n\n```rust\nlet a = 1;\n\nlet b = 2;\n```\n\nClosing paragraph.";
+        let blocks = split_markdown_blocks(body);
+        assert_eq!(
+            blocks,
+            vec![
+                ("Title".to_string(), "heading".to_string()),
+                (
+                    "First paragraph line one\nline two".to_string(),
+                    "body".to_string()
+                ),
+                ("Section".to_string(), "heading".to_string()),
+                // The blank line INSIDE the fence must not split the code block.
+                (
+                    "```rust\nlet a = 1;\n\nlet b = 2;\n```".to_string(),
+                    "body".to_string()
+                ),
+                ("Closing paragraph.".to_string(), "body".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_document_index_chunks_body_into_searchable_blocks() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let db_path = std::env::temp_dir().join(format!(
+            "lumenfolio-note-index-{}-{suffix}.sqlite",
+            std::process::id()
+        ));
+        let conn = storage::open_database(&db_path).expect("schema");
+        conn.execute(
+            "INSERT INTO workspace_roots
+               (id, path, name, created_at, updated_at, last_opened_at)
+             VALUES ('root-knowledge-base', 'lumenfolio://knowledge', 'Knowledge Base', 1, 1, 1)",
+            [],
+        )
+        .expect("root");
+        conn.execute(
+            "INSERT INTO documents
+               (id, workspace_root_id, path, title, short_title, file_size, modified,
+                page_count, last_page, content_type, body_md, index_status, index_version,
+                created_at, updated_at, last_opened_at)
+             VALUES ('note-1', 'root-knowledge-base', 'note:note-1', 'My Note', 'My Note',
+                     0, 1, 0, 1, 'note', '# Heading\n\nAlpha beta gamma.\n\nSecond paragraph.',
+                     'pending', 0, 1, 1, 1)",
+            [],
+        )
+        .expect("note document");
+        let database = AppDatabase {
+            conn: Mutex::new(conn),
+        };
+
+        let body = document_body_md("note-1", &database).expect("body");
+        let result = upsert_text_document_index("note-1", &body, &database).expect("index");
+        assert_eq!(result.page_count, 1);
+        assert_eq!(result.visual_index_status, "skipped");
+
+        let conn = database.conn.lock().expect("lock");
+        // Heading + 2 paragraphs → 3 chunks, all at the non-paged anchor (page 0).
+        let chunk_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM document_chunks WHERE document_id = 'note-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("chunk count");
+        assert_eq!(chunk_count, 3);
+        let non_zero_pages: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM document_chunks WHERE document_id = 'note-1' AND page_no != 0",
+                [],
+                |row| row.get(0),
+            )
+            .expect("page check");
+        assert_eq!(non_zero_pages, 0);
+        // FTS makes the body searchable.
+        let fts_hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM document_chunks_fts WHERE document_id = 'note-1' AND text MATCH 'gamma'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fts");
+        assert_eq!(fts_hits, 1);
+        // Structure tree + precipitation job were seeded.
+        let tree_nodes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM structure_tree_nodes WHERE document_id = 'note-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("tree");
+        assert!(tree_nodes >= 1);
+        let status: String = conn
+            .query_row(
+                "SELECT index_status FROM documents WHERE id = 'note-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("status");
+        assert_eq!(status, "indexed");
+        drop(conn);
+        let _ = fs::remove_file(&db_path);
     }
 }

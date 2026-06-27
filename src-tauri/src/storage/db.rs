@@ -120,6 +120,12 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           -- 'docx'|'xlsx'|'pptx'|'web'|'markdown'|'text'|'note'. Default keeps every
           -- existing row a PDF (backward-compatible).
           content_type TEXT NOT NULL DEFAULT 'pdf',
+          -- Knowledge-base pivot (P2): editable text sources
+          -- (note/markdown/text/web) keep their authored body here so saving
+          -- re-chunks straight from the DB. NULL for PDFs (they index from path).
+          body_md TEXT,
+          -- Origin URL for web clips (content_type='web'); NULL otherwise.
+          source_url TEXT,
           index_status TEXT NOT NULL DEFAULT 'pending',
           index_version INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
@@ -624,6 +630,20 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         "documents",
         "content_type",
         "ALTER TABLE documents ADD COLUMN content_type TEXT NOT NULL DEFAULT 'pdf'",
+    )?;
+    // Knowledge-base pivot (P2): editable body for text sources + web-clip origin.
+    // Both nullable (PDFs leave them NULL and keep indexing from `path`).
+    ensure_column(
+        conn,
+        "documents",
+        "body_md",
+        "ALTER TABLE documents ADD COLUMN body_md TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "documents",
+        "source_url",
+        "ALTER TABLE documents ADD COLUMN source_url TEXT",
     )?;
     // Recognized text inside figure/chart/image crops (OCR). The crop image
     // itself (image_path) is always preserved as the primary evidence; this
