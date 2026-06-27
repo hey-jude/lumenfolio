@@ -669,6 +669,17 @@ fn run_document_reindex_job(
     if is_text_source(&content_type) {
         return run_text_document_reindex_job(document_id, database, agent_sessions, app);
     }
+    // Knowledge-base pivot (P3): Office files index from disk via the text
+    // extractor, then through the shared block-index path (no PDF geometry).
+    if crate::office::is_office_source(&content_type) {
+        return run_office_document_reindex_job(
+            document_id,
+            database,
+            agent_sessions,
+            app,
+            &content_type,
+        );
+    }
     if content_type != "pdf" {
         return Err(format!(
             "Indexing is not yet supported for content type '{content_type}'."
@@ -1112,15 +1123,81 @@ fn run_text_document_reindex_job(
     }
 }
 
-/// Write the chunk/block/structure rows for an authored text source. Geometry
-/// is empty (`[]`) and the single logical page is `page_no = 0` so citations
-/// resolve to the Reference anchor rather than a non-existent PDF page.
+/// Reindex an Office source (docx/xlsx/pptx): extract readable text from the
+/// file on disk, then feed it through the shared block-index path. No PDF
+/// geometry and no visual (TSR) layer; fidelity is the frontend preview's job.
+fn run_office_document_reindex_job(
+    document_id: &str,
+    database: &AppDatabase,
+    agent_sessions: &AgentSessionState,
+    app: &tauri::AppHandle,
+    content_type: &str,
+) -> Result<DocumentIndexResult, String> {
+    emit_reindex_progress(
+        app,
+        database,
+        document_id,
+        5,
+        "mark_running",
+        "Preparing index job",
+    );
+    mark_text_index_job_running(document_id, database)?;
+    let path = document_pdf_path_from_db(document_id, database)?;
+    emit_reindex_progress(
+        app,
+        database,
+        document_id,
+        30,
+        "extract",
+        "Extracting document text",
+    );
+    let result = crate::office::extract_office_blocks(&path, content_type)
+        .and_then(|blocks| upsert_block_document_index(document_id, &blocks, None, database));
+    if result.is_ok() {
+        agent_sessions.clear_session(&crate::migrated_session_id(document_id));
+    }
+    match result {
+        Ok(result) => {
+            emit_reindex_progress(
+                app,
+                database,
+                document_id,
+                97,
+                "finalizing",
+                "Finalizing index",
+            );
+            mark_text_index_job_succeeded(document_id, database)?;
+            Ok(result)
+        }
+        Err(err) => {
+            mark_text_index_job_failed(document_id, database, &err)?;
+            Err(err)
+        }
+    }
+}
+
+/// Reindex an authored markdown source from its body text.
 fn upsert_text_document_index(
     document_id: &str,
     body_md: &str,
     database: &AppDatabase,
 ) -> Result<DocumentIndexResult, String> {
     let blocks = split_markdown_blocks(body_md);
+    upsert_block_document_index(document_id, &blocks, Some(body_md), database)
+}
+
+/// Write the chunk/block/structure rows for a non-paged source from pre-built
+/// `(text, role)` blocks — shared by authored markdown (P2) and Office text
+/// extraction (P3). Geometry is empty (`[]`) and the single logical page is
+/// `page_no = 0` so citations resolve to the Reference anchor rather than a
+/// non-existent PDF page. `wikilink_source` (the raw markdown) rebuilds
+/// `[[links]]`; pass None for sources without wikilink syntax (Office).
+fn upsert_block_document_index(
+    document_id: &str,
+    blocks: &[(String, String)],
+    wikilink_source: Option<&str>,
+    database: &AppDatabase,
+) -> Result<DocumentIndexResult, String> {
     let mut conn = database
         .conn
         .lock()
@@ -1221,7 +1298,15 @@ fn upsert_text_document_index(
     }
 
     runtime::rag::rebuild_structure_tree(&tx, document_id, &structure_blocks, &[])?;
-    rebuild_note_links(&tx, document_id, body_md)?;
+    if let Some(body_md) = wikilink_source {
+        rebuild_note_links(&tx, document_id, body_md)?;
+    } else {
+        tx.execute(
+            "DELETE FROM note_links WHERE source_document_id = ?1",
+            params![document_id],
+        )
+        .map_err(|err| format!("Failed to clear note links: {err}"))?;
+    }
     runtime::precipitation::queue_precipitation_job(&tx, document_id)?;
     // Text sources have no visual (TSR) layer — clear any stale visual job so
     // the UI never shows a perpetually-pending diagram badge for a note.

@@ -20,6 +20,7 @@ mod indexing;
 mod llm;
 mod local_agent;
 mod model_catalog;
+mod office;
 mod pdf2zh_sidecar;
 mod pdf_index;
 mod pdf_layout_dump;
@@ -843,10 +844,16 @@ fn choose_workspace() -> Result<Option<String>, String> {
 fn choose_pdf_files() -> Result<Vec<String>, String> {
     Ok(rfd::FileDialog::new()
         .set_title("Add documents")
-        // Knowledge-base pivot (P2): also accept editable text sources alongside
-        // PDFs; ingestion dispatches by extension in import_workspace_paths.
-        .add_filter("Documents", &["pdf", "md", "markdown", "txt", "text"])
+        // Knowledge-base pivot (P2/P3): accept editable text + Office sources
+        // alongside PDFs; ingestion dispatches by extension in import_workspace_paths.
+        .add_filter(
+            "Documents",
+            &[
+                "pdf", "docx", "xlsx", "pptx", "md", "markdown", "txt", "text",
+            ],
+        )
         .add_filter("PDF", &["pdf"])
+        .add_filter("Office", &["docx", "xlsx", "pptx"])
         .add_filter("Markdown / Text", &["md", "markdown", "txt", "text"])
         .pick_files()
         .map(|paths| {
@@ -1165,7 +1172,9 @@ fn import_workspace_paths(
                 .unwrap_or("")
                 .to_ascii_lowercase();
             match ext.as_str() {
-                "pdf" => pdf_files.push(canonical),
+                // File-backed sources (indexed from disk, build_document_for_path
+                // sets content_type by extension): PDFs + Office formats.
+                "pdf" | "docx" | "xlsx" | "pptx" => pdf_files.push(canonical),
                 "md" | "markdown" => text_files.push((canonical, "markdown")),
                 "txt" | "text" => text_files.push((canonical, "text")),
                 _ => {}

@@ -338,25 +338,32 @@ pub(crate) fn build_document_for_path(
     if !metadata.is_file() {
         return Ok(None);
     }
-    if !canonical_path
+    // Knowledge-base pivot (P3): file-backed sources are PDFs and Office formats.
+    // Office files index from disk (not body_md) and are previewed client-side.
+    let ext = canonical_path
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-    {
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let content_type = if ext == "pdf" {
+        "pdf"
+    } else if let Some(office) = crate::office::office_content_type_for_ext(&ext) {
+        office
+    } else {
         return Ok(None);
-    }
+    };
     let title = canonical_path
         .file_name()
         .and_then(|file_name| file_name.to_str())
-        .unwrap_or("Untitled.pdf")
+        .unwrap_or("Untitled")
         .to_string();
 
     Ok(Some(PdfDocument {
-        id: stable_path_id("pdf", &canonical_path),
+        id: stable_path_id(content_type, &canonical_path),
         workspace_root_id: workspace_root_id.to_string(),
         short_title: title.clone(),
         title,
-        content_type: "pdf".to_string(),
+        content_type: content_type.to_string(),
         path: canonical_path.to_string_lossy().to_string(),
         size: metadata.len(),
         modified: metadata
