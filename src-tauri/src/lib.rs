@@ -4666,6 +4666,28 @@ fn read_pdf_bytes(
     Ok(tauri::ipc::Response::new(bytes))
 }
 
+/// Knowledge-base pivot (P3): serve a file-backed document's raw bytes to the
+/// webview (ArrayBuffer) for client-side Office preview (docx/xlsx). Same
+/// registry-backed path resolution as PDFs.
+#[tauri::command]
+fn read_document_bytes(
+    doc_id: String,
+    registry: State<'_, PdfRegistry>,
+) -> Result<tauri::ipc::Response, String> {
+    let path = {
+        let paths = registry
+            .paths
+            .lock()
+            .map_err(|_| "PDF registry lock was poisoned".to_string())?;
+        paths
+            .get(&doc_id)
+            .cloned()
+            .ok_or_else(|| "Unknown document id".to_string())?
+    };
+    let bytes = fs::read(path).map_err(|err| format!("Failed to read document: {err}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 pub(crate) fn stable_text_hash(text: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in text.as_bytes() {
@@ -5636,6 +5658,7 @@ pub fn run() {
             export_markdown_file,
             load_last_workspace,
             read_pdf_bytes,
+            read_document_bytes,
             pdf2zh_sidecar::read_pdf_artifact_bytes,
             pdf2zh_sidecar::probe_pdf_translation_runtime,
             pdf2zh_sidecar::start_pdf_translation,

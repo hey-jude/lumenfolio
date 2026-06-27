@@ -73,6 +73,12 @@ const NoteEditor = defineAsyncComponent({
   delay: 80,
   timeout: ASYNC_COMPONENT_TIMEOUT_MS,
 })
+const OfficeViewer = defineAsyncComponent({
+  loader: () => import('./components/OfficeViewer.vue'),
+  loadingComponent: AsyncPanelLoading,
+  delay: 80,
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
 const KnowledgeGraphView = defineAsyncComponent({
   loader: () => import('./components/KnowledgeGraphView.vue'),
   loadingComponent: AsyncPanelLoading,
@@ -797,6 +803,13 @@ function isEditableSourceDoc(doc) {
   return Boolean(doc) && doc.id !== 'empty' && EDITABLE_CONTENT_TYPES.includes(doc.contentType)
 }
 const editableSelected = computed(() => isEditableSourceDoc(selectedDocument.value))
+// Knowledge-base pivot (P3): Office sources render in the client-side previewer.
+const OFFICE_CONTENT_TYPES = ['docx', 'xlsx', 'pptx']
+const officeSelected = computed(() => (
+  selectedDocument.value
+  && selectedDocument.value.id !== 'empty'
+  && OFFICE_CONTENT_TYPES.includes(selectedDocument.value.contentType)
+))
 // True while a web clip is being fetched (gates the home clip form).
 const clipBusy = ref(false)
 // Starter questions shown in the chat empty state. Two layers, no extra LLM call:
@@ -3724,8 +3737,8 @@ function handleDocumentIndexFailed(payload) {
 
 function scheduleDocumentVisualIndex(doc) {
   if (!doc || doc.id === 'empty') return
-  // Authored text sources (notes / clips / md) have no visual (TSR) layer.
-  if (isEditableSourceDoc(doc)) return
+  // Only PDFs have a visual (TSR) layer — notes/clips/md and Office sources don't.
+  if (doc.contentType && doc.contentType !== 'pdf') return
   if (doc.source !== 'local' || doc.indexStatus !== 'indexed' || !doc.treeReady) return
   if (Number(doc.indexVersion || 0) !== Number(doc.currentIndexVersion || 0)) return
   if (doc.visualIndexStatus === 'succeeded'
@@ -5049,6 +5062,16 @@ onMounted(() => {
         @open-doc="selectDoc"
         @new-note="handleCreateNote"
         @clip-web="handleClipWebPage"
+      />
+    </div>
+
+    <div v-else-if="!showTrending && !showGraph && officeSelected" class="reader-column">
+      <OfficeViewer
+        :key="selectedDocument.id"
+        :document-id="selectedDocument.id"
+        :content-type="selectedDocument.contentType"
+        :title="selectedDocument.shortTitle || selectedDocument.title || ''"
+        :ui="ui"
       />
     </div>
 
