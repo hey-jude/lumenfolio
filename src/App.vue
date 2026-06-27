@@ -1995,10 +1995,13 @@ function handleKnowledgeHomeAsk(text) {
 // Knowledge-base pivot (P2): create a blank standalone note, merge it into the
 // workspace tree (virtual Knowledge Base root) and open it in the Markdown
 // editor. The backend already enqueues its first index pass.
-async function handleCreateNote() {
+async function handleCreateNote(title = '') {
+  // `title` is a plain string when invoked from a [[wikilink]] that doesn't
+  // resolve yet (create-on-click); the new-note buttons pass no argument.
+  const noteTitle = typeof title === 'string' ? title.trim() : ''
   try {
     const result = await invoke('create_note_source', {
-      input: { title: '', bodyMd: '' },
+      input: { title: noteTitle, bodyMd: '' },
     })
     if (result?.snapshot) {
       const { root } = upsertWorkspaceRootSnapshot(result.snapshot)
@@ -5056,6 +5059,8 @@ onMounted(() => {
         :index-status="selectedDocument.indexStatus"
         :ui="ui"
         @saved="handleNoteSaved"
+        @open-doc="selectDoc"
+        @create-from-link="handleCreateNote"
       />
     </div>
 

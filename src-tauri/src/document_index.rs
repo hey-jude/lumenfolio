@@ -1221,6 +1221,7 @@ fn upsert_text_document_index(
     }
 
     runtime::rag::rebuild_structure_tree(&tx, document_id, &structure_blocks, &[])?;
+    rebuild_note_links(&tx, document_id, body_md)?;
     runtime::precipitation::queue_precipitation_job(&tx, document_id)?;
     // Text sources have no visual (TSR) layer — clear any stale visual job so
     // the UI never shows a perpetually-pending diagram badge for a note.
@@ -1242,6 +1243,65 @@ fn upsert_text_document_index(
         visual_index_version: 0,
         visual_index_error: String::new(),
     })
+}
+
+/// Extract `[[wikilink]]` titles from a note body, in order, de-duplicated
+/// case-insensitively. Supports `[[Title|alias]]` (the Title before `|` wins).
+/// Links never span newlines or nest brackets.
+fn extract_wikilinks(body: &str) -> Vec<String> {
+    let mut titles = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("[[") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else {
+            break;
+        };
+        let inner = &after[..end];
+        if !inner.contains('\n') && !inner.contains('[') {
+            let title = inner.split('|').next().unwrap_or(inner).trim();
+            if !title.is_empty() && seen.insert(title.to_lowercase()) {
+                titles.push(title.to_string());
+            }
+        }
+        rest = &after[end + 2..];
+    }
+    titles
+}
+
+/// Rebuild the outbound wikilinks for a note. Each `[[Title]]` is resolved to a
+/// document by case-insensitive title match (cached in target_document_id);
+/// unresolved titles are stored with a NULL target so the UI can offer to create
+/// them. Backlink queries re-resolve by title, so creation order doesn't matter.
+fn rebuild_note_links(
+    tx: &rusqlite::Transaction<'_>,
+    document_id: &str,
+    body_md: &str,
+) -> Result<(), String> {
+    tx.execute(
+        "DELETE FROM note_links WHERE source_document_id = ?1",
+        params![document_id],
+    )
+    .map_err(|err| format!("Failed to clear note links: {err}"))?;
+    for (index, title) in extract_wikilinks(body_md).into_iter().enumerate() {
+        let target_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM documents WHERE lower(title) = lower(?1) AND id != ?2 LIMIT 1",
+                params![title, document_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|err| format!("Failed to resolve wikilink target: {err}"))?;
+        let link_id = format!("{document_id}-link-{}", index + 1);
+        tx.execute(
+            "INSERT INTO note_links
+                (id, source_document_id, target_document_id, target_title, created_at)
+             VALUES (?1, ?2, ?3, ?4, unixepoch())",
+            params![link_id, document_id, target_id, title],
+        )
+        .map_err(|err| format!("Failed to insert note link: {err}"))?;
+    }
+    Ok(())
 }
 
 fn document_pdf_path_from_db(document_id: &str, database: &AppDatabase) -> Result<PathBuf, String> {
@@ -1955,6 +2015,22 @@ mod tests {
                     "body".to_string()
                 ),
                 ("Closing paragraph.".to_string(), "body".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_wikilinks_parses_titles_aliases_and_dedupes() {
+        let body = "See [[Alpha]] and [[Beta|the beta note]].\nAlso [[alpha]] again.\nNot [[a\nbroken]] one. Code `[[skip]]` stays.";
+        // `[[skip]]` inside inline code is still matched (we don't parse code spans
+        // here) — acceptable; the multi-line one is correctly skipped, alias keeps
+        // the title, and the duplicate (case-insensitive) is dropped.
+        assert_eq!(
+            extract_wikilinks(body),
+            vec![
+                "Alpha".to_string(),
+                "Beta".to_string(),
+                "skip".to_string(),
             ]
         );
     }

@@ -387,6 +387,24 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_document_links_a ON document_links(doc_a);
         CREATE INDEX IF NOT EXISTS idx_document_links_b ON document_links(doc_b);
 
+        -- Knowledge-base pivot (P2.5): explicit [[wikilinks]] authored inside note
+        -- bodies. Rebuilt from body_md on every text reindex. target_document_id
+        -- is NULL when the [[Title]] doesn't resolve to a document yet (an
+        -- unresolved link the user can click to create). Drives the backlinks
+        -- panel (who links TO this document).
+        CREATE TABLE IF NOT EXISTS note_links (
+          id TEXT PRIMARY KEY,
+          source_document_id TEXT NOT NULL,
+          target_document_id TEXT,            -- NULL when unresolved
+          target_title TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          FOREIGN KEY(source_document_id) REFERENCES documents(id) ON DELETE CASCADE,
+          FOREIGN KEY(target_document_id) REFERENCES documents(id) ON DELETE SET NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_note_links_source ON note_links(source_document_id);
+        CREATE INDEX IF NOT EXISTS idx_note_links_target ON note_links(target_document_id);
+
         -- Cached HF trending-papers list per period, so the agent's
         -- list_trending_papers tool can read it synchronously (the live fetch is
         -- async network I/O that doesn't fit the sync tool dispatch). Refreshed

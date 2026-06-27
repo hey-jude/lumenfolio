@@ -18,7 +18,7 @@ const props = defineProps({
   indexStatus: { type: String, default: '' },
 })
 
-const emit = defineEmits(['saved', 'dirty-change'])
+const emit = defineEmits(['saved', 'dirty-change', 'open-doc', 'create-from-link'])
 
 const title = ref('')
 const body = ref('')
@@ -28,6 +28,8 @@ const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
 const savedFlash = ref(false)
+// Wikilink graph: { outbound: [{title, documentId|null}], backlinks: [{documentId, title}] }
+const links = ref({ outbound: [], backlinks: [] })
 
 const lastSavedTitle = ref('')
 const lastSavedBody = ref('')
@@ -43,6 +45,21 @@ const dirty = computed(
 const sourceLabel = computed(() => {
   const map = props.ui.contentTypeLabels || {}
   return map[contentType.value] || contentType.value.toUpperCase()
+})
+
+// Render [[Title]] / [[Title|alias]] as fragment links the preview click handler
+// intercepts. Fragment hrefs (#…) pass markdown-it's link validator (custom
+// schemes would be stripped).
+const previewBody = computed(() => {
+  const raw = body.value || ''
+  if (!raw) return props.ui.notePreviewEmpty || ''
+  return raw.replace(/\[\[([^\]\n]+)\]\]/g, (match, inner) => {
+    const parts = String(inner).split('|')
+    const target = parts[0].trim()
+    const label = (parts.length > 1 ? parts.slice(1).join('|') : parts[0]).trim() || target
+    if (!target) return match
+    return `[${label}](#wiki:${encodeURIComponent(target)})`
+  })
 })
 
 watch(dirty, (value) => emit('dirty-change', value))
@@ -90,11 +107,48 @@ async function load() {
     lastSavedBody.value = body.value
     await nextTick()
     setEditorDoc(body.value)
+    loadLinks()
   } catch (err) {
     error.value = err?.message || String(err)
   } finally {
     loading.value = false
   }
+}
+
+async function loadLinks() {
+  try {
+    const result = await invoke('load_note_links', { documentId: props.documentId })
+    links.value = {
+      outbound: Array.isArray(result?.outbound) ? result.outbound : [],
+      backlinks: Array.isArray(result?.backlinks) ? result.backlinks : [],
+    }
+  } catch {
+    links.value = { outbound: [], backlinks: [] }
+  }
+}
+
+// Resolve a [[wikilink]] click: navigate to the matching document, or ask the
+// parent to create a new note with that title when it doesn't exist yet.
+function navigateWiki(rawTitle) {
+  const title = String(rawTitle || '').trim()
+  if (!title) return
+  const hit = (links.value.outbound || []).find(
+    (link) => link.title.toLowerCase() === title.toLowerCase(),
+  )
+  if (hit && hit.documentId) {
+    emit('open-doc', hit.documentId)
+  } else {
+    emit('create-from-link', title)
+  }
+}
+
+function onPreviewClick(event) {
+  const anchor = event.target.closest('a')
+  if (!anchor) return
+  const href = anchor.getAttribute('href') || ''
+  if (!href.startsWith('#wiki:')) return
+  event.preventDefault()
+  navigateWiki(decodeURIComponent(href.slice('#wiki:'.length)))
 }
 
 async function save() {
@@ -113,6 +167,7 @@ async function save() {
     lastSavedBody.value = body.value
     emit('saved', { documentId: props.documentId, title: title.value })
     flashSaved()
+    loadLinks()
   } catch (err) {
     error.value = err?.message || String(err)
   } finally {
@@ -224,11 +279,39 @@ const editorTheme = EditorView.theme(
         <div ref="editorHost" class="note-cm-host"></div>
       </div>
       <div class="note-pane note-preview-pane">
-        <div class="note-preview-inner">
-          <MarkdownText :text="body || ui.notePreviewEmpty || ''" />
+        <div class="note-preview-inner" @click="onPreviewClick">
+          <MarkdownText :text="previewBody" />
         </div>
       </div>
     </div>
+
+    <footer
+      v-if="links.backlinks.length || links.outbound.length"
+      class="note-links-bar"
+    >
+      <div v-if="links.backlinks.length" class="note-links-group">
+        <span class="note-links-title">{{ ui.backlinks }}</span>
+        <button
+          v-for="back in links.backlinks"
+          :key="`b-${back.documentId}`"
+          type="button"
+          class="note-link-chip"
+          @click="emit('open-doc', back.documentId)"
+        >{{ back.title }}</button>
+      </div>
+      <div v-if="links.outbound.length" class="note-links-group">
+        <span class="note-links-title">{{ ui.outboundLinks }}</span>
+        <button
+          v-for="(link, index) in links.outbound"
+          :key="`o-${index}`"
+          type="button"
+          class="note-link-chip"
+          :class="{ unresolved: !link.documentId }"
+          :title="link.documentId ? '' : (ui.unresolvedLink || '')"
+          @click="navigateWiki(link.title)"
+        >{{ link.title }}</button>
+      </div>
+    </footer>
   </div>
 </template>
 
@@ -339,5 +422,45 @@ const editorTheme = EditorView.theme(
 
 .note-preview-inner {
   padding: 18px 24px;
+}
+
+.note-links-bar {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--line-soft);
+  padding: 10px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 22%;
+  overflow-y: auto;
+}
+
+.note-links-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.note-links-title {
+  font-size: 11px;
+  color: var(--text-muted, var(--text-secondary));
+  margin-right: 4px;
+}
+
+.note-link-chip {
+  border: 1px solid var(--line-soft);
+  background: var(--accent-soft, rgba(106, 169, 255, 0.12));
+  color: var(--accent, #6aa9ff);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.note-link-chip.unresolved {
+  background: transparent;
+  color: var(--text-muted, var(--text-secondary));
+  border-style: dashed;
 }
 </style>

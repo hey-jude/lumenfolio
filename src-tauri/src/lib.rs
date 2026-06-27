@@ -1476,6 +1476,93 @@ fn clip_web_page(
     })
 }
 
+// Knowledge-base pivot (P2.5): wikilink graph for the editor — outbound
+// [[links]] (resolved by current title, so newly-created targets light up) and
+// backlinks (notes whose [[Title]] points at this document).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteLinkOut {
+    title: String,
+    document_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteBacklink {
+    document_id: String,
+    title: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteLinksOutput {
+    outbound: Vec<NoteLinkOut>,
+    backlinks: Vec<NoteBacklink>,
+}
+
+#[tauri::command]
+fn load_note_links(
+    document_id: String,
+    database: State<'_, AppDatabase>,
+) -> Result<NoteLinksOutput, String> {
+    let document_id = document_id.trim();
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+
+    let mut outbound_stmt = conn
+        .prepare(
+            "SELECT l.target_title,
+                    (SELECT t.id FROM documents t
+                       WHERE lower(t.title) = lower(l.target_title)
+                         AND t.id != l.source_document_id
+                       LIMIT 1)
+             FROM note_links l
+             WHERE l.source_document_id = ?1
+             ORDER BY l.id",
+        )
+        .map_err(|err| format!("Failed to prepare outbound links: {err}"))?;
+    let outbound = outbound_stmt
+        .query_map(params![document_id], |row| {
+            Ok(NoteLinkOut {
+                title: row.get(0)?,
+                document_id: row.get(1)?,
+            })
+        })
+        .map_err(|err| format!("Failed to load outbound links: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to load outbound links: {err}"))?;
+    drop(outbound_stmt);
+
+    let mut backlink_stmt = conn
+        .prepare(
+            "SELECT DISTINCT s.id, s.title
+             FROM note_links l
+             JOIN documents s ON s.id = l.source_document_id
+             JOIN documents d ON d.id = ?1
+             WHERE lower(l.target_title) = lower(d.title)
+               AND s.id != d.id
+             ORDER BY lower(s.title)",
+        )
+        .map_err(|err| format!("Failed to prepare backlinks: {err}"))?;
+    let backlinks = backlink_stmt
+        .query_map(params![document_id], |row| {
+            Ok(NoteBacklink {
+                document_id: row.get(0)?,
+                title: row.get(1)?,
+            })
+        })
+        .map_err(|err| format!("Failed to load backlinks: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to load backlinks: {err}"))?;
+
+    Ok(NoteLinksOutput {
+        outbound,
+        backlinks,
+    })
+}
+
 #[tauri::command]
 fn remove_workspace_root(
     root_id: String,
@@ -5522,6 +5609,7 @@ pub fn run() {
             create_note_source,
             update_note_source,
             load_note_source,
+            load_note_links,
             clip_web_page,
             trending::fetch_trending_papers,
             trending::add_trending_paper,
