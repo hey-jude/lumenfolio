@@ -1,8 +1,8 @@
 # Lumenfolio → 个人知识库（"第二大脑"）转型 — 方案与计划
 
-**状态：** 规划中（尚未写代码）
+**状态：** P0 / P1 / P2 / P2.5 / P3 已闭环（已测/已构建/已提交，待 live 验证）；剩 P4（信息架构收尾）
 **分支：** `feat/knowledge-base-pivot`
-**日期：** 2026-06-26
+**日期：** 2026-06-26（更新：2026-06-27）
 **作者：** （规划讨论）
 
 ---
@@ -120,11 +120,14 @@
 - **P2.5 `[[ ]]` 双向链接 + 反链**：`note_links` 表（索引时重建出链）；`extract_wikilinks` 解析 `[[Title]]`/`[[Title|alias]]`；`load_note_links`（出链按当前标题动态解析 + 反链）；编辑器预览内 `[[ ]]` 可点击——已解析→跳转，未解析→新建同名笔记；编辑器底部反链/出链栏。
 - **风险：** 中（已落地）。`ContentIngestor` trait 仍未抽——文本路径就是"第二个 ingestor"，但它与 PDF 路径差异足够大（无几何/无视觉），共享的是下游（`upsert` 的结构树/沉淀/FTS 接缝）而非上游接口；待第三个 ingestor（Office, P3）出现再决定是否抽象。
 
-### P3 — Office 格式 + 预览
+### P3 — Office 格式 + 预览 ✅ 已闭环（已测/已构建/已提交，待你 live 验证）
 
-- 摄入 `docx` / `xlsx` / `pptx`（文本 → chunk）并各自预览。
-- Office 策略见 §5（客户端开源预览 + Rust 解析）。
-- **风险：** 中–高。PPTX 保真 + 许可证是待决项（见 §5）。
+- **P3-a 摄入(file-backed)**：`build_document_for_path` 泛化——按扩展名设 `content_type`(pdf/docx/xlsx/pptx);Office 文件留磁盘(随 PDF 进父目录根)、注册到 registry 以供预览。文件选择器 + 拖拽 + import 接受三种格式。
+- **P3-b 文本抽取 + 索引**：`office.rs` —— docx(`word/document.xml` → `w:p`/`w:t`,Heading 样式)、pptx(`ppt/slides/*` → `a:p`/`a:t`,每页一个标题块)、xlsx(`calamine` → 每表标题 + 逐行块);ZIP+XML 用 `zip`(仅 deflate)+`quick-xml`,预定义实体/字符引用已解析。`run_document_reindex_job` 分发 office → `run_office_document_reindex_job`;原 `upsert_text_document_index` 重构为共享 `upsert_block_document_index`(markdown 传 wikilink 源,office 传 None)。三格式可问、page=0(Reference 锚点)、无视觉层。
+- **P3-c docx 预览**：`read_document_bytes` 命令(registry→ArrayBuffer);`OfficeViewer.vue`(懒加载)用 **docx-preview**(Apache-2.0)高保真渲染。
+- **P3-d xlsx 预览 + pptx 延后**：xlsx 用 **exceljs** 解析为逐表 HTML 表格;**pptx 仅文本索引**,预览显示"已索引、预览暂不可用"提示(无干净开源渲染器,许可待决——§5/§9)。`App.vue` 按 `content_type` 路由 docx/xlsx/pptx 到 `OfficeViewer`;视觉(TSR)索引收紧为仅 `pdf`。
+- **风险：** 中(已落地)。**pptx 保真预览仍是唯一待决项**(许可)——文本照常可问,渲染器待清晰方案。
+- **后续(非阻塞)**：docx/pptx 标题 → 大纲/结构树细化;xlsx 大表分页/虚拟滚动;office 文件目录扫描自动纳入(当前仅单文件导入)。
 
 ### P4 — 信息架构收尾
 
