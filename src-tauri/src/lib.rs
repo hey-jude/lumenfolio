@@ -842,8 +842,12 @@ fn choose_workspace() -> Result<Option<String>, String> {
 #[tauri::command]
 fn choose_pdf_files() -> Result<Vec<String>, String> {
     Ok(rfd::FileDialog::new()
-        .set_title("Add PDFs")
+        .set_title("Add documents")
+        // Knowledge-base pivot (P2): also accept editable text sources alongside
+        // PDFs; ingestion dispatches by extension in import_workspace_paths.
+        .add_filter("Documents", &["pdf", "md", "markdown", "txt", "text"])
         .add_filter("PDF", &["pdf"])
+        .add_filter("Markdown / Text", &["md", "markdown", "txt", "text"])
         .pick_files()
         .map(|paths| {
             paths
@@ -1116,6 +1120,7 @@ fn import_workspace_paths(
     args: ImportWorkspacePathsArgs,
     registry: State<'_, PdfRegistry>,
     database: State<'_, AppDatabase>,
+    app: tauri::AppHandle,
 ) -> Result<Vec<WorkspaceRootSnapshot>, String> {
     let ImportWorkspacePathsArgs {
         target_root_id,
@@ -1127,6 +1132,8 @@ fn import_workspace_paths(
         .filter(|value| !value.is_empty());
 
     let mut pdf_files: Vec<PathBuf> = Vec::new();
+    // Knowledge-base pivot (P2): editable text imports (path, content_type).
+    let mut text_files: Vec<(PathBuf, &'static str)> = Vec::new();
     let mut directories: Vec<PathBuf> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
@@ -1152,12 +1159,16 @@ fn import_workspace_paths(
         if metadata.is_dir() {
             directories.push(canonical);
         } else if metadata.is_file() {
-            let is_pdf = canonical
+            let ext = canonical
                 .extension()
                 .and_then(|ext| ext.to_str())
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"));
-            if is_pdf {
-                pdf_files.push(canonical);
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            match ext.as_str() {
+                "pdf" => pdf_files.push(canonical),
+                "md" | "markdown" => text_files.push((canonical, "markdown")),
+                "txt" | "text" => text_files.push((canonical, "text")),
+                _ => {}
             }
         }
     }
@@ -1264,6 +1275,40 @@ fn import_workspace_paths(
             },
             documents: snapshot_docs,
         };
+        if !snapshots.contains_key(&root_id) {
+            snapshot_order.push(root_id.clone());
+        }
+        snapshots.insert(root_id, snapshot);
+    }
+
+    // Knowledge-base pivot (P2): editable text imports (.md / .txt) are snapshot
+    // into the virtual Knowledge Base root as editable sources — their content is
+    // copied into body_md so they re-chunk on edit, decoupled from the disk file.
+    let mut imported_text = 0usize;
+    for (path, content_type) in &text_files {
+        let body_md = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(err) => {
+                errors.push(format!("Cannot read {}: {err}", path.display()));
+                continue;
+            }
+        };
+        let title = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Untitled")
+            .to_string();
+        match documents::create_text_document(&database, content_type, &title, &body_md, None) {
+            Ok(document_id) => {
+                let _ = document_index::enqueue_document_reindex(document_id, app.clone());
+                imported_text += 1;
+            }
+            Err(err) => errors.push(format!("Cannot import {}: {err}", path.display())),
+        }
+    }
+    if imported_text > 0 {
+        let snapshot = knowledge_root_snapshot(&database)?;
+        let root_id = documents::KNOWLEDGE_ROOT_ID.to_string();
         if !snapshots.contains_key(&root_id) {
             snapshot_order.push(root_id.clone());
         }
