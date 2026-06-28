@@ -285,6 +285,10 @@ const removeWorkspaceRootTarget = ref({
   path: '',
   docCount: 0,
 })
+const documentDeleteConfirmOpen = ref(false)
+const documentDeleteStatus = ref('idle')
+const documentDeleteError = ref('')
+const documentDeleteTarget = ref({ id: '', title: '', isNote: false })
 const workspaceDropActive = ref(false)
 const workspaceDropTargetRootId = ref('')
 const lastWorkspaceDropAt = ref(0)
@@ -2905,6 +2909,72 @@ function confirmRemoveWorkspaceRoot() {
   })()
 }
 
+function openDeleteDocumentConfirm(doc = null) {
+  if (!doc?.id || doc.id === 'empty') return
+  documentDeleteError.value = ''
+  documentDeleteStatus.value = 'idle'
+  documentDeleteTarget.value = {
+    id: doc.id,
+    title: String(doc.shortTitle || doc.title || ''),
+    isNote: doc.source === 'note' || String(doc.id).startsWith('note-'),
+  }
+  documentDeleteConfirmOpen.value = true
+}
+
+function closeDeleteDocumentConfirm() {
+  if (documentDeleteStatus.value === 'deleting') return
+  documentDeleteConfirmOpen.value = false
+  documentDeleteStatus.value = 'idle'
+  documentDeleteError.value = ''
+  documentDeleteTarget.value = { id: '', title: '', isNote: false }
+}
+
+// Remove a document from the in-memory workspace tree after the backend deletes
+// it. Returns true when found and spliced.
+function removeDocFromWorkspaceState(documentId) {
+  for (const root of workspace.roots) {
+    for (const folder of root.folders || []) {
+      const index = (folder.docs || []).findIndex((item) => item.id === documentId)
+      if (index >= 0) {
+        folder.docs.splice(index, 1)
+        return true
+      }
+    }
+  }
+  return false
+}
+
+function confirmDeleteDocument() {
+  const target = documentDeleteTarget.value
+  if (!target?.id || documentDeleteStatus.value === 'deleting') return
+  documentDeleteStatus.value = 'deleting'
+  documentDeleteError.value = ''
+
+  void (async () => {
+    try {
+      await invoke('delete_document', { documentId: target.id })
+      removeDocFromWorkspaceState(target.id)
+      openTabs.value = openTabs.value.filter((id) => id !== target.id)
+      // Drop per-document caches so a future doc reusing nothing lingers.
+      precipitationQueued.delete(target.id)
+      visualIndexRuns.delete(target.id)
+      // If the deleted document was active, fall back to the first remaining one.
+      if (selectedDocId.value === target.id) {
+        selectedDocId.value = allDocs.value[0]?.id || ''
+        if (selectedDocId.value) {
+          loadChatHistoryForDocument(selectedDocId.value)
+        }
+      }
+      documentDeleteConfirmOpen.value = false
+      documentDeleteStatus.value = 'idle'
+      documentDeleteTarget.value = { id: '', title: '', isNote: false }
+    } catch (err) {
+      documentDeleteStatus.value = 'failed'
+      documentDeleteError.value = err?.message || String(err)
+    }
+  })()
+}
+
 function clearChatTurnsWithTimeout(sessionId, turnIds) {
   const clearPromise = invoke('clear_chat_turns', {
     input: {
@@ -4188,6 +4258,25 @@ async function handleWorkspaceDrop(rawPaths = []) {
 // "+" on a folder header: a discoverable alternative to drag-and-drop. Opens a
 // native PDF file picker and adds the chosen files to that folder via the same
 // import flow as a drop onto the folder.
+// "Import files…" from the library "+" menu: a type-agnostic multi-select picker
+// (PDF / Office / Markdown / Text) that funnels through the same import flow as
+// drag-and-drop, with no target root (each source lands in a root by its folder).
+async function importFilesToLibrary() {
+  if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return
+  workspaceStatus.value = 'choosing'
+  let paths = []
+  try {
+    paths = await invoke('choose_pdf_files')
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  } finally {
+    workspaceStatus.value = 'idle'
+  }
+  if (Array.isArray(paths) && paths.length) {
+    await addWorkspaceRootsFromDrop(paths)
+  }
+}
+
 async function addPdfsToRoot(rootId) {
   if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return
   workspaceStatus.value = 'choosing'
@@ -4293,6 +4382,18 @@ async function reindexSelectedDocument() {
   const doc = selectedDocument.value
   if (!doc || doc.id === 'empty' || workspaceStatus.value === 'scanning') return
   await enqueueBackendDocumentIndex(doc, { force: true })
+}
+
+// Reindex a specific document (per-row hover action) without changing the current
+// selection. Collapsed-rail reindex still passes no doc and falls back to the
+// selected one.
+function handleReindexDoc(doc) {
+  if (doc && doc.id && doc.id !== 'empty') {
+    if (workspaceStatus.value === 'scanning') return
+    void enqueueBackendDocumentIndex(doc, { force: true })
+    return
+  }
+  void reindexSelectedDocument()
 }
 
 function shouldQueueBackendIndex(doc) {
@@ -4551,6 +4652,10 @@ async function scanWorkspaces(folders) {
   workspaceError.value = ''
   const snapshots = []
   for (const folder of folders) {
+    // Virtual roots (e.g. the knowledge base at lumenfolio://knowledge) are not
+    // filesystem directories — scanning them as folders fails with os error 2.
+    // They are managed separately (notes live in the DB), so skip them here.
+    if (!folder || String(folder).startsWith('lumenfolio://')) continue
     snapshots.push(await invoke('scan_workspace_pdfs', { root: folder }))
   }
   snapshots.forEach(upsertWorkspaceRootSnapshot)
@@ -4999,9 +5104,11 @@ onMounted(() => {
       @new-note="handleCreateNote"
       @select-doc="selectDoc"
       @add-folder="chooseWorkspace"
+      @import-files="importFilesToLibrary"
       @add-pdfs="addPdfsToRoot"
       @rescan="rescanWorkspace"
-      @reindex-doc="reindexSelectedDocument"
+      @reindex-doc="handleReindexDoc"
+      @delete-doc="openDeleteDocumentConfirm"
       @open-workspace="openWorkspaceInFileManager"
       @delete-root="openRemoveWorkspaceRootConfirm"
       @set-drop-active="setWorkspaceDropActive"
@@ -5265,6 +5372,48 @@ onMounted(() => {
             @click="confirmDeleteNote"
           >
             {{ noteDeleteStatus === 'deleting' ? `${ui.delete}...` : ui.delete }}
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="documentDeleteConfirmOpen" class="confirm-backdrop" @click.self="closeDeleteDocumentConfirm">
+      <section class="confirm-modal" role="dialog" aria-modal="true" :aria-label="ui.deleteDocumentTitle">
+        <div class="confirm-head">
+          <div class="confirm-title">{{ ui.deleteDocumentTitle }}</div>
+          <button
+            class="confirm-close"
+            type="button"
+            :aria-label="ui.close"
+            :disabled="documentDeleteStatus === 'deleting'"
+            @click="closeDeleteDocumentConfirm"
+          >
+            ×
+          </button>
+        </div>
+        <div class="confirm-body">
+          <p>{{ documentDeleteTarget.isNote ? ui.deleteNoteConfirm : ui.deleteDocumentConfirm }}</p>
+          <div v-if="documentDeleteTarget.title" class="confirm-target">{{ documentDeleteTarget.title }}</div>
+          <div v-if="documentDeleteStatus === 'failed'" class="confirm-error">
+            {{ ui.deleteDocumentFailed }}: {{ documentDeleteError }}
+          </div>
+        </div>
+        <div class="confirm-actions">
+          <button
+            type="button"
+            class="confirm-btn"
+            :disabled="documentDeleteStatus === 'deleting'"
+            @click="closeDeleteDocumentConfirm"
+          >
+            {{ ui.cancel }}
+          </button>
+          <button
+            type="button"
+            class="confirm-btn danger"
+            :disabled="documentDeleteStatus === 'deleting'"
+            @click="confirmDeleteDocument"
+          >
+            {{ documentDeleteStatus === 'deleting' ? `${ui.delete}...` : ui.delete }}
           </button>
         </div>
       </section>

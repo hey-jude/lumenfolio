@@ -1464,6 +1464,15 @@ fn clip_web_page(
     if url.is_empty() {
         return Err("No URL provided".to_string());
     }
+    // Accept bare URLs (e.g. "arxiv.org/abs/1234") by defaulting to https — web_fetch
+    // hard-requires an http(s) scheme and would otherwise reject them with a cryptic
+    // low-level error.
+    let normalized_url = if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("https://{url}")
+    };
+    let url = normalized_url.as_str();
     // Reuse the chat web_fetch extractor (HTML stripped → readable text). A clip
     // is just a captured snapshot stored as an editable 'web' source so it flows
     // through the same chunk → graph → claims pipeline as notes.
@@ -1606,6 +1615,74 @@ fn remove_workspace_root(
     tx.commit()
         .map_err(|err| format!("Failed to commit workspace removal: {err}"))?;
     documents::remove_registry_paths(&registry, &root_documents)?;
+    Ok(())
+}
+
+/// Permanently delete one document from the knowledge base: its index, chunks,
+/// notes, claims, graph edges, chat turns and translations. For a note (synthetic
+/// `note:` path) this is a complete removal; for a file-backed source (PDF/Office)
+/// it removes the library entry only — the original file on disk is left untouched
+/// (and a later rescan of that folder would re-add it).
+#[tauri::command]
+fn delete_document(
+    document_id: String,
+    registry: State<'_, PdfRegistry>,
+    database: State<'_, AppDatabase>,
+    agent_sessions: State<'_, AgentSessionState>,
+) -> Result<(), String> {
+    let document_id = document_id.trim().to_string();
+    if document_id.is_empty() {
+        return Err("No document selected".to_string());
+    }
+    let mut conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM documents WHERE id = ?1",
+            params![document_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|err| format!("Failed to look up document: {err}"))?
+        .is_some();
+    if !exists {
+        return Err("Document no longer exists".to_string());
+    }
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("Failed to start delete-document transaction: {err}"))?;
+    // FTS5 virtual tables carry no foreign key, so the cascade below cannot reach
+    // them — delete their rows explicitly first.
+    tx.execute(
+        "DELETE FROM document_chunks_fts WHERE document_id = ?1",
+        params![document_id],
+    )
+    .map_err(|err| format!("Failed to clear chunk FTS rows: {err}"))?;
+    tx.execute(
+        "DELETE FROM document_table_facts_fts WHERE document_id = ?1",
+        params![document_id],
+    )
+    .map_err(|err| format!("Failed to clear table-fact FTS rows: {err}"))?;
+    // Every other document-scoped table has ON DELETE CASCADE to documents(id), so
+    // removing the row cleans pages/blocks/lines/chunks/tables/artifacts/claims/
+    // links/notes/chat_turns/translations in one shot (connection runs foreign_keys=ON).
+    let deleted = tx
+        .execute("DELETE FROM documents WHERE id = ?1", params![document_id])
+        .map_err(|err| format!("Failed to delete document: {err}"))?;
+    if deleted == 0 {
+        return Err("Document no longer exists".to_string());
+    }
+    tx.commit()
+        .map_err(|err| format!("Failed to commit document deletion: {err}"))?;
+    drop(conn);
+    // Drop the registry path mapping (a no-op for synthetic note: paths).
+    if let Ok(mut paths) = registry.paths.lock() {
+        paths.remove(&document_id);
+    }
+    // Invalidate any cached working memory for this document's default session.
+    agent_sessions.clear_session(&migrated_session_id(&document_id));
     Ok(())
 }
 
@@ -5696,6 +5773,7 @@ pub fn run() {
             load_web_search_settings,
             save_web_search_settings,
             remove_workspace_root,
+            delete_document,
             list_model_providers,
             save_model_provider,
             delete_model_provider,

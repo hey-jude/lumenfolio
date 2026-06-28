@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import MarkdownIt from 'markdown-it'
 import linkAttributes from 'markdown-it-link-attributes'
 import mdKatexImport from '@vscode/markdown-it-katex'
+import DOMPurify from 'dompurify'
 import 'katex/dist/katex.min.css'
 
 // The plugin ships as CommonJS ({ default: fn }); take the callable.
@@ -40,7 +41,16 @@ md.use(linkAttributes, {
 // throwOnError:false renders a red error span instead of breaking the whole message.
 md.use(markdownItKatex, { throwOnError: false })
 
-const renderedMarkdown = computed(() => md.render(normalizeMathDelimiters(props.text || '')))
+// Defense-in-depth: `html: false` already escapes raw HTML, but sanitize the
+// rendered output too — markdown-it/KaTeX emit markup and web-clip bodies are
+// external content. DOMPurify allows MathML/SVG by default so KaTeX survives;
+// keep `target` so external links still open in a new tab.
+function renderSafe(text) {
+  const html = md.render(normalizeMathDelimiters(text || ''))
+  return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] })
+}
+
+const renderedMarkdown = computed(() => renderSafe(props.text))
 const renderedWithStreamBubble = computed(() => (
   `${renderedMarkdown.value}<span class="stream-bubble" aria-hidden="true"></span>`
 ))
@@ -50,6 +60,13 @@ const renderedWithStreamBubble = computed(() => (
 // \(), then convert \[...\] to block $$ and \(...\) to inline $.
 function normalizeMathDelimiters(value) {
   return String(value || '')
+    // Treat a "$" immediately before a digit as currency, not inline math, so
+    // "it cost $5 and $10" doesn't render as one KaTeX formula. Escaping it makes
+    // markdown-it emit a literal $. Runs first, before the \(…\)->$ conversions
+    // below, so it never touches generated math. (Rare digit-leading inline math
+    // like 3x should be written $$…$$ or \(3x\).) No look-behind — some WKWebView
+    // builds lack it — so capture and re-emit the preceding char instead.
+    .replace(/(^|[^$\\])\$(?=\d)/g, '$1\\$')
     .replace(/\\\\\(/g, '\\(')
     .replace(/\\\\\)/g, '\\)')
     .replace(/\\\\\[/g, '\\[')

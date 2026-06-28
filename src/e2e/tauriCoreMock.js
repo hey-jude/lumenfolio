@@ -22,5 +22,6 @@ export async function invoke(command) {
   if (command === 'get_turn_recommendations') {
     return { related: [], claims: [], confident: false }
   }
+  if (command === 'delete_document') return null
   throw new Error(`Unhandled e2e Tauri invoke: ${command}`)
 }

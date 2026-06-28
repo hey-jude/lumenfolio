@@ -1279,7 +1279,12 @@ fn execute_search_library_knowledge_tool(
                 format!(" — matches: {}", item.matched_concepts.join(", "))
             };
             Citation {
-                id: format!("lib-{index}"),
+                // Key by document, not position: a turn may call this tool twice
+                // (refined query), and a positional `lib-{index}` would collide
+                // (both start at lib-0), making evidence chips drop/overwrite each
+                // other. search_library returns one hit per document, so this is
+                // unique within a call and dedups the same source across calls.
+                id: format!("lib-{}", item.document_id),
                 label: format!("[{}]", index + 1),
                 page: 0,
                 block_id: String::new(),

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, onBeforeUnmount } from 'vue'
 import lumenfolioLogo from '../assets/lumenfolio-logo-transparent.png'
 import { startWindowDrag } from '../windowDrag'
 
@@ -73,9 +73,11 @@ const emit = defineEmits([
   'new-note',
   'select-doc',
   'add-folder',
+  'import-files',
   'add-pdfs',
   'rescan',
   'reindex-doc',
+  'delete-doc',
   'open-settings',
   'open-workspace',
   'delete-root',
@@ -288,6 +290,53 @@ function triggerDeleteRoot(root, event = null) {
   emit('delete-root', root)
 }
 
+function triggerDeleteDoc(doc, event = null) {
+  if (event) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+  emit('delete-doc', doc)
+}
+
+function triggerReindexDoc(doc, event = null) {
+  if (event) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+  emit('reindex-doc', doc)
+}
+
+// "Add to library" menu: type-agnostic entry (new note / import files / add
+// folder) replacing the old PDF-folder-only "+".
+const addMenuOpen = ref(false)
+
+function onAddMenuOutsideClick() {
+  closeAddMenu()
+}
+
+function toggleAddMenu() {
+  if (addMenuOpen.value) {
+    closeAddMenu()
+    return
+  }
+  addMenuOpen.value = true
+  window.addEventListener('click', onAddMenuOutsideClick)
+}
+
+function closeAddMenu() {
+  addMenuOpen.value = false
+  window.removeEventListener('click', onAddMenuOutsideClick)
+}
+
+function chooseAdd(kind) {
+  closeAddMenu()
+  if (kind === 'note') emit('new-note')
+  else if (kind === 'files') emit('import-files')
+  else emit('add-folder')
+}
+
+onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick))
+
 </script>
 
 <template>
@@ -307,7 +356,7 @@ function triggerDeleteRoot(root, event = null) {
         <img :src="lumenfolioLogo" alt="" />
       </div>
 
-      <div class="rail-docs" aria-label="PDF documents">
+      <div class="rail-docs" :aria-label="ui.sources">
         <button
           v-for="doc in visibleRailDocs"
           :key="doc.id"
@@ -327,7 +376,7 @@ function triggerDeleteRoot(root, event = null) {
             <span :style="{ height: `${progressPercent(doc)}%` }"></span>
           </span>
         </button>
-        <div v-if="!allDocs.length" class="rail-empty" :title="ui.noPdfsFound">PDF</div>
+        <div v-if="!allDocs.length" class="rail-empty" :title="ui.noSourcesFound">—</div>
       </div>
 
       <nav class="rail-actions" aria-label="Lumenfolio actions">
@@ -410,13 +459,41 @@ function triggerDeleteRoot(root, event = null) {
 
       <div class="sidebar-main">
     <div class="sidebar-header" data-tauri-drag-region @mousedown="startWindowDrag">
-      <div class="brand-block">
-        <div class="brand-mark" aria-hidden="true">
-          <img :src="lumenfolioLogo" alt="" />
+      <span class="panel-label">{{ ui.libraryTitle || 'Library' }}</span>
+      <div class="panel-actions">
+        <div class="add-menu-wrap">
+          <button
+            type="button"
+            class="panel-action-btn"
+            :title="ui.addToLibrary || 'Add'"
+            :aria-label="ui.addToLibrary || 'Add'"
+            :aria-haspopup="true"
+            :aria-expanded="addMenuOpen"
+            :disabled="isScanning"
+            @mousedown.stop
+            @click.stop="toggleAddMenu"
+          ><span aria-hidden="true">+</span></button>
+          <div v-if="addMenuOpen" class="add-menu" @mousedown.stop>
+            <button type="button" class="add-menu-item" @click="chooseAdd('note')">
+              <span class="add-menu-ic" aria-hidden="true">📝</span>{{ ui.newNote }}
+            </button>
+            <button type="button" class="add-menu-item" @click="chooseAdd('files')">
+              <span class="add-menu-ic" aria-hidden="true">📄</span>{{ ui.importFiles || 'Import files…' }}
+            </button>
+            <button type="button" class="add-menu-item" @click="chooseAdd('folder')">
+              <span class="add-menu-ic" aria-hidden="true">📁</span>{{ ui.addFolder }}
+            </button>
+          </div>
         </div>
-        <div class="brand-copy">
-          <div class="sidebar-title">Lumenfolio</div>
-        </div>
+        <button
+          type="button"
+          class="panel-action-btn"
+          :title="ui.rescanWorkspace"
+          :aria-label="ui.rescanWorkspace"
+          :disabled="isScanning || !hasWorkspace"
+          @mousedown.stop
+          @click="emit('rescan')"
+        ><span aria-hidden="true">↻</span></button>
       </div>
     </div>
 
@@ -431,30 +508,6 @@ function triggerDeleteRoot(root, event = null) {
     </label>
 
     <div class="tree-area">
-      <button
-        v-if="trendingEnabled"
-        type="button"
-        class="trending-entry"
-        :class="{ active: trendingActive }"
-        :title="ui.trendingPapersHint"
-        @click="emit('open-trending')"
-      >
-        <span class="trending-entry-icon" aria-hidden="true">🔥</span>
-        <span class="trending-entry-label">{{ ui.trendingPapers }}</span>
-      </button>
-
-      <button
-        v-if="graphEnabled"
-        type="button"
-        class="trending-entry"
-        :class="{ active: graphActive }"
-        :title="ui.knowledgeGraph"
-        @click="emit('open-graph')"
-      >
-        <span class="trending-entry-icon" aria-hidden="true">🕸</span>
-        <span class="trending-entry-label">{{ ui.knowledgeGraph }}</span>
-      </button>
-
       <section
         v-for="workspaceRoot in roots"
         :key="workspaceRoot.id || workspaceRoot.path"
@@ -528,29 +581,41 @@ function triggerDeleteRoot(root, event = null) {
               <div v-if="doc.indexStatus === 'indexing'" class="doc-progress" aria-hidden="true">
                 <span :style="{ width: `${progressPercent(doc)}%` }"></span>
               </div>
+              <span class="doc-row-actions">
+                <span
+                  class="doc-action-btn"
+                  role="button"
+                  tabindex="0"
+                  :title="ui.reindexDocument"
+                  :aria-label="ui.reindexDocument"
+                  @click.stop="triggerReindexDoc(doc, $event)"
+                  @keydown.enter.stop.prevent="triggerReindexDoc(doc, $event)"
+                >⟳</span>
+                <span
+                  class="doc-action-btn doc-delete-btn"
+                  role="button"
+                  tabindex="0"
+                  :title="ui.deleteDocument"
+                  :aria-label="ui.deleteDocument"
+                  @click.stop="triggerDeleteDoc(doc, $event)"
+                  @keydown.enter.stop.prevent="triggerDeleteDoc(doc, $event)"
+                >×</span>
+              </span>
             </button>
           </template>
         </div>
       </section>
 
       <div v-if="!allDocs.length" class="empty-tree">
-        {{ ui.noPdfsFound }}
+        {{ ui.noSourcesFound }}
       </div>
     </div>
 
     <div v-if="scanError" class="scan-error">{{ scanError }}</div>
 
-    <div class="sidebar-footer">
-      <button class="footer-btn" :disabled="isScanning" @click="emit('add-folder')">
-        {{ scanStatus === 'scanning' ? ui.scanningWorkspace : ui.addFolder }}
-      </button>
-      <button class="footer-btn muted" :disabled="isScanning || !hasWorkspace" @click="emit('rescan')">
-        {{ scanStatus === 'scanning' ? ui.rescanningWorkspace : ui.rescanWorkspace }}
-      </button>
-      <button class="footer-btn muted" :disabled="isScanning || !selectedDoc || selectedDoc.id === 'empty'" @click="emit('reindex-doc')">
-        {{ ui.reindexDocument }}
-      </button>
-      <button class="footer-btn muted" @click="emit('open-settings')">{{ ui.settings }}</button>
+    <div class="sidebar-status">
+      <span v-if="scanStatus === 'scanning'">{{ ui.scanningWorkspace }}</span>
+      <span v-else-if="allDocs.length">{{ allDocs.length }} {{ ui.sourcesCountLabel || 'sources' }}</span>
     </div>
       </div>
     </div>
@@ -870,53 +935,97 @@ function triggerDeleteRoot(root, event = null) {
 
 .sidebar-header {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  min-width: 0;
-}
-
-.brand-block {
-  display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
-  flex: 1;
 }
 
-.brand-block {
-  position: relative;
-  z-index: 1;
+.panel-label {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted, var(--text-secondary));
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.brand-mark {
-  width: 38px;
-  height: 38px;
-  min-width: 38px;
-  flex: 0 0 38px;
-  border-radius: 0;
-  background: transparent;
+.panel-actions {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.panel-action-btn {
+  width: 24px;
+  height: 24px;
   display: grid;
   place-items: center;
-  overflow: visible;
-  box-shadow: none;
-}
-
-.brand-mark img {
-  width: 44px;
-  height: 44px;
-  object-fit: contain;
-  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.24));
-}
-
-.brand-copy {
-  min-width: 0;
-}
-
-.sidebar-title {
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
   font-size: 15px;
-  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.panel-action-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text-primary);
+}
+
+.panel-action-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.add-menu-wrap {
+  position: relative;
+}
+
+.add-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 168px;
+  padding: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--bg-panel, #1f1f24);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.add-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.add-menu-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.add-menu-ic {
+  font-size: 14px;
+  line-height: 1;
 }
 
 .path-reveal-btn {
@@ -985,44 +1094,6 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 /* "Trending Papers" discovery entry, pinned above the local folders. */
-.trending-entry {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
-  margin-bottom: 10px;
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  text-align: left;
-}
-
-.trending-entry:hover {
-  border-color: rgba(106, 169, 255, 0.4);
-  color: var(--text-primary);
-}
-
-.trending-entry.active {
-  border-color: rgba(106, 169, 255, 0.45);
-  background: rgba(106, 169, 255, 0.12);
-  color: var(--text-primary);
-}
-
-.trending-entry-icon {
-  font-size: 14px;
-}
-
-.trending-entry-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* Scrollbar look comes from the global style in styles/main.css. */
 
 .folder-group + .folder-group {
@@ -1138,8 +1209,7 @@ function triggerDeleteRoot(root, event = null) {
   background: rgba(255, 107, 107, 0.12);
 }
 
-.doc-row,
-.footer-btn {
+.doc-row {
   width: 100%;
   background: transparent;
   border: none;
@@ -1149,6 +1219,7 @@ function triggerDeleteRoot(root, event = null) {
 }
 
 .doc-row {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1161,6 +1232,50 @@ function triggerDeleteRoot(root, event = null) {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
+}
+
+/* Per-document actions (reindex + delete), revealed on row hover. */
+.doc-row-actions {
+  position: absolute;
+  top: 7px;
+  right: 8px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.doc-row:hover .doc-row-actions,
+.doc-row-actions:focus-within {
+  opacity: 1;
+}
+
+.doc-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.doc-action-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+
+.doc-delete-btn {
+  color: rgba(255, 102, 102, 0.9);
+}
+
+.doc-delete-btn:hover {
+  background: rgba(255, 102, 102, 0.14);
+  color: rgba(255, 102, 102, 1);
 }
 
 .doc-row:hover {
@@ -1272,32 +1387,11 @@ function triggerDeleteRoot(root, event = null) {
   background: rgba(198, 73, 73, 0.1);
 }
 
-.sidebar-footer {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.footer-btn {
-  width: 100%;
-  min-height: 38px;
-  border-radius: 12px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1.2;
-  padding: 8px 12px;
-  white-space: normal;
-  text-align: center;
-}
-
-.footer-btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-.footer-btn.muted {
-  color: var(--text-secondary);
+.sidebar-status {
+  flex: 0 0 auto;
+  padding: 6px 10px 2px;
+  font-size: 11px;
+  color: var(--text-muted, var(--text-secondary));
+  min-height: 16px;
 }
 </style>

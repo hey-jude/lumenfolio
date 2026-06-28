@@ -298,11 +298,18 @@ pub(crate) fn collect_pdfs(
             continue;
         }
 
-        if !path
+        // Knowledge-base pivot: a scanned folder is no longer PDF-only. Collect any
+        // file-backed source build_document_for_path understands (PDF + Office); it
+        // returns None for everything else, so the filter and the builder share one
+        // source of truth for "supported extension".
+        let supported = path
             .extension()
             .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
-        {
+            .map(|extension| extension.to_ascii_lowercase())
+            .is_some_and(|extension| {
+                extension == "pdf" || crate::office::office_content_type_for_ext(&extension).is_some()
+            });
+        if !supported {
             continue;
         }
 

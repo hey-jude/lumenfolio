@@ -39,6 +39,7 @@
     "@vscode/markdown-it-katex": "^1.1.2",
     "codemirror": "^6.0.2",
     "docx-preview": "^0.3.7",
+    "dompurify": "^3.4.11",
     "exceljs": "^4.4.0",
     "graphology": "^0.26.0",
     "graphology-communities-louvain": "^2.0.2",

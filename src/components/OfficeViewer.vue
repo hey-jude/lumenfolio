@@ -38,7 +38,8 @@ async function renderDocx(buffer) {
 }
 
 async function renderXlsx(buffer) {
-  const ExcelJS = (await import('exceljs')).default || (await import('exceljs'))
+  const mod = await import('exceljs')
+  const ExcelJS = mod.default ?? mod
   const workbook = new ExcelJS.Workbook()
   await workbook.xlsx.load(buffer)
   const parsed = []
@@ -80,6 +81,10 @@ async function load() {
     }
     const buffer = await fetchBytes()
     if (props.contentType === 'docx') {
+      // The docx host sits behind the `v-if="loading"` chain, so it is NOT in the
+      // DOM while loading. Drop the flag first so the host mounts, then render into
+      // it (renderDocx awaits nextTick before touching docxHost).
+      loading.value = false
       await renderDocx(buffer)
     } else if (props.contentType === 'xlsx') {
       await renderXlsx(buffer)

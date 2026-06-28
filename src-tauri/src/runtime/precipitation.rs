@@ -520,8 +520,24 @@ pub fn precipitate_turn(
     citations_json: &str,
 ) -> Result<(), String> {
     let turn_id = turn_id.trim();
+    if turn_id.is_empty() {
+        return Ok(());
+    }
     let focus_document_id = focus_document_id.trim();
-    if turn_id.is_empty() || focus_document_id.is_empty() {
+    // Library-wide (no-focus) turns have no focus document. Anchor the claims on the
+    // first cited document so cross-library answers still enrich the graph instead of
+    // being silently dropped. (knowledge_claims.document_id is NOT NULL + FK, so it
+    // must reference a real document — an empty id would violate the FK.)
+    let anchor_document_id = if focus_document_id.is_empty() {
+        cited_document_ids
+            .iter()
+            .map(|id| id.trim())
+            .find(|id| !id.is_empty())
+            .unwrap_or("")
+    } else {
+        focus_document_id
+    };
+    if anchor_document_id.is_empty() {
         return Ok(());
     }
     // Idempotent: a turn already precipitated is not re-counted (would inflate edges).
@@ -545,7 +561,7 @@ pub fn precipitate_turn(
             docs.push(id.to_string());
         }
     };
-    push(focus_document_id);
+    push(anchor_document_id);
     for id in cited_document_ids {
         push(id);
     }
@@ -563,7 +579,7 @@ pub fn precipitate_turn(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch())",
             params![
                 format!("kc-{turn_id}-{index}"),
-                focus_document_id,
+                anchor_document_id,
                 turn_id,
                 session_id,
                 text,

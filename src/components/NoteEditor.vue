@@ -7,6 +7,7 @@ import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirro
 import { markdown } from '@codemirror/lang-markdown'
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language'
 import MarkdownText from './MarkdownText.vue'
+import { usePersistedRef } from '../persistedState.js'
 
 // Knowledge-base pivot (P2): the Markdown editor for authored sources (notes,
 // web clips, imported markdown/text). Body is plain Markdown — saving re-chunks
@@ -37,6 +38,52 @@ const lastSavedBody = ref('')
 const editorHost = ref(null)
 let view = null
 let savedFlashTimer = null
+
+// View mode: 'split' (editor + preview), 'edit' (editor only), 'preview' (preview
+// only). Persisted so the user's choice sticks across notes/sessions. `splitRatio`
+// is the editor's fraction of the body width in split mode (debounced writes keep
+// dragging cheap).
+const viewMode = usePersistedRef('noteEditorViewMode', 'split')
+const splitRatio = usePersistedRef('noteEditorSplitRatio', 0.5, { debounceMs: 150 })
+const bodyHost = ref(null)
+let dividerDragging = false
+
+const editPaneStyle = computed(() => (
+  viewMode.value === 'split'
+    ? { flexBasis: `${(splitRatio.value * 100).toFixed(2)}%`, flexGrow: '0', flexShrink: '0' }
+    : {}
+))
+
+async function setViewMode(mode) {
+  viewMode.value = mode
+  if (mode !== 'preview') {
+    // The editor was display:none in preview mode; CodeMirror must re-measure
+    // once it's visible again or the cursor/scroll geometry is stale.
+    await nextTick()
+    view?.requestMeasure()
+  }
+}
+
+function startDividerDrag(event) {
+  if (!bodyHost.value) return
+  dividerDragging = true
+  event.preventDefault()
+  window.addEventListener('pointermove', onDividerDrag)
+  window.addEventListener('pointerup', stopDividerDrag, { once: true })
+}
+
+function onDividerDrag(event) {
+  if (!dividerDragging || !bodyHost.value) return
+  const rect = bodyHost.value.getBoundingClientRect()
+  if (rect.width <= 0) return
+  const ratio = (event.clientX - rect.left) / rect.width
+  splitRatio.value = Math.min(0.8, Math.max(0.2, ratio))
+}
+
+function stopDividerDrag() {
+  dividerDragging = false
+  window.removeEventListener('pointermove', onDividerDrag)
+}
 
 const dirty = computed(
   () => title.value !== lastSavedTitle.value || body.value !== lastSavedBody.value,
@@ -197,7 +244,14 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  // Autosave unsaved edits before teardown. The parent keys this component by
+  // document id, so switching sources destroys/recreates it; without this the
+  // CodeMirror buffer (and the user's edits) would be silently lost. Fire-and-
+  // forget — the IPC call completes even after the component is gone.
+  if (dirty.value && !saving.value) void save()
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('pointermove', onDividerDrag)
+  window.removeEventListener('pointerup', stopDividerDrag)
   if (savedFlashTimer) clearTimeout(savedFlashTimer)
   if (view) {
     view.destroy()
@@ -252,6 +306,26 @@ const editorTheme = EditorView.theme(
         :disabled="loading"
       />
       <div class="note-head-meta">
+        <div class="note-view-toggle" role="group" :aria-label="ui.viewMode || 'View'">
+          <button
+            type="button"
+            :class="{ active: viewMode === 'edit' }"
+            :title="ui.viewEdit || 'Editor'"
+            @click="setViewMode('edit')"
+          >{{ ui.viewEdit || 'Edit' }}</button>
+          <button
+            type="button"
+            :class="{ active: viewMode === 'split' }"
+            :title="ui.viewSplit || 'Split'"
+            @click="setViewMode('split')"
+          >{{ ui.viewSplit || 'Split' }}</button>
+          <button
+            type="button"
+            :class="{ active: viewMode === 'preview' }"
+            :title="ui.viewPreview || 'Preview'"
+            @click="setViewMode('preview')"
+          >{{ ui.viewPreview || 'Preview' }}</button>
+        </div>
         <span class="note-kind-badge">{{ sourceLabel }}</span>
         <a
           v-if="sourceUrl"
@@ -274,11 +348,26 @@ const editorTheme = EditorView.theme(
 
     <p v-if="error" class="note-error">{{ error }}</p>
 
-    <div class="note-editor-body">
-      <div class="note-pane note-edit-pane">
+    <div ref="bodyHost" class="note-editor-body" :class="`mode-${viewMode}`">
+      <div
+        v-show="viewMode !== 'preview'"
+        class="note-pane note-edit-pane"
+        :style="editPaneStyle"
+      >
         <div ref="editorHost" class="note-cm-host"></div>
       </div>
-      <div class="note-pane note-preview-pane">
+      <div
+        v-if="viewMode === 'split'"
+        class="note-divider"
+        role="separator"
+        aria-orientation="vertical"
+        :title="ui.dragToResize || ''"
+        @pointerdown="startDividerDrag"
+      ></div>
+      <div
+        v-show="viewMode !== 'edit'"
+        class="note-pane note-preview-pane"
+      >
         <div class="note-preview-inner" @click="onPreviewClick">
           <MarkdownText :text="previewBody" />
         </div>
@@ -350,6 +439,39 @@ const editorTheme = EditorView.theme(
   flex: 0 0 auto;
 }
 
+.note-view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.note-view-toggle button {
+  border: none;
+  background: transparent;
+  color: var(--text-muted, var(--text-secondary));
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.note-view-toggle button + button {
+  border-left: 1px solid var(--line-soft);
+}
+
+.note-view-toggle button:hover {
+  color: var(--text-primary);
+}
+
+.note-view-toggle button.active {
+  background: var(--accent-soft, rgba(106, 169, 255, 0.16));
+  color: var(--accent-text, var(--accent, #6aa9ff));
+}
+
 .note-kind-badge {
   font-size: 11px;
   color: var(--text-muted, var(--text-secondary));
@@ -407,8 +529,26 @@ const editorTheme = EditorView.theme(
   overflow-y: auto;
 }
 
-.note-edit-pane {
-  border-right: 1px solid var(--line-soft);
+/* Draggable separator between editor and preview (split mode only). The grab
+   area is wide; a thin line sits in its centre and highlights on hover. */
+.note-divider {
+  flex: 0 0 9px;
+  align-self: stretch;
+  position: relative;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.note-divider::after {
+  content: '';
+  position: absolute;
+  inset: 0 4px;
+  background: var(--line-soft);
+  transition: background 0.12s ease;
+}
+
+.note-divider:hover::after {
+  background: rgba(106, 169, 255, 0.55);
 }
 
 .note-cm-host {

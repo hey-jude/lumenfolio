@@ -1509,6 +1509,15 @@ fn mark_text_index_job_failed(
         params![document_id, TEXT_INDEX_JOB_TYPE, error],
     )
     .map_err(|err| format!("Failed to mark text index job failed: {err}"))?;
+    // Also flag the document itself so a failed text/office index surfaces as
+    // failed (stale → red dot) after a restart, instead of silently reverting to
+    // its pre-failure status with the error lost (the load query reads documents,
+    // not the job row).
+    conn.execute(
+        "UPDATE documents SET index_status = 'stale' WHERE id = ?1",
+        params![document_id],
+    )
+    .map_err(|err| format!("Failed to mark document index failed: {err}"))?;
     Ok(())
 }
 
