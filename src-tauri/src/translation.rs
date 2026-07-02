@@ -75,7 +75,7 @@ async fn translate_with_google_web(source_text: &str, target_lang: &str) -> Resu
         );
     }
 
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(30))
         .user_agent(
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
@@ -152,7 +152,7 @@ async fn translate_with_microsoft(
         );
     }
 
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|err| format!("Failed to create Microsoft Translator client: {err}"))?;
@@ -250,7 +250,7 @@ async fn translate_with_openai_compatible(
     target_lang: &str,
     provider: &OpenAiCompatibleProvider,
 ) -> Result<String, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(60))
         .build()
         .map_err(|err| format!("Failed to create translation client: {err}"))?;

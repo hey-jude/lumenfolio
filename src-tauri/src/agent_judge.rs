@@ -714,7 +714,7 @@ async fn execute_analyze_visual_with_provider(
          Return a concise evidence-focused description. Do not invent values that are not visible.",
         asset.asset_type, asset.caption, asset.nearby_text
     );
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(45))
         .build()
         .map_err(|err| format!("Failed to create visual analysis client: {err}"))?;
@@ -869,7 +869,7 @@ async fn execute_analyze_page_with_provider(
          Extracted page text:\n{page_text}\n\n\
          Use the screenshot for visual layout, charts, figures, and tables. Use the text only as supporting context. Return concise evidence-focused findings and do not invent values that are not visible.",
     );
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(45))
         .build()
         .map_err(|err| format!("Failed to create page analysis client: {err}"))?;

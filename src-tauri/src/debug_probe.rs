@@ -461,7 +461,7 @@ async fn generate_probe_answer(
     agent_run: &runtime::agent::AgentRunResult,
     provider: &OpenAiCompatibleProvider,
 ) -> Result<String, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(90))
         .build()
         .map_err(|err| format!("Failed to create chat client: {err}"))?;

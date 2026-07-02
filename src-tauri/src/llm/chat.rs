@@ -96,7 +96,7 @@ pub(crate) async fn run_simple_completion(
     temperature: f32,
     timeout_secs: u64,
 ) -> Result<String, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(timeout_secs))
         .build()
         .map_err(|err| format!("Failed to create completion client: {err}"))?;
@@ -168,7 +168,7 @@ pub(crate) async fn judge_answerability_with_openai_compatible(
     provider: &OpenAiCompatibleProvider,
     budget: &crate::model_catalog::ModelContextBudget,
 ) -> Result<LlmAnswerabilityDecision, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|err| format!("Failed to create answerability judge client: {err}"))?;
@@ -260,7 +260,7 @@ pub(crate) async fn judge_current_view_relevance_with_openai_compatible(
     metadata: &serde_json::Value,
     provider: &OpenAiCompatibleProvider,
 ) -> Result<LlmCurrentViewDecision, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|err| format!("Failed to create current-view judge client: {err}"))?;
@@ -328,7 +328,7 @@ pub(crate) async fn generate_session_title_with_openai_compatible(
     answer: &str,
     provider: &OpenAiCompatibleProvider,
 ) -> Result<String, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|err| format!("Failed to create session-title client: {err}"))?;
@@ -657,7 +657,7 @@ pub(crate) async fn ask_with_openai_compatible(
     app: &tauri::AppHandle,
     answer_event_id: Option<&str>,
 ) -> Result<AskAnswerResult, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(90))
         .build()
         .map_err(|err| format!("Failed to create chat client: {err}"))?;
@@ -797,7 +797,7 @@ pub(crate) async fn ask_with_openai_compatible(
 pub(crate) async fn test_openai_compatible_provider(
     provider: &OpenAiCompatibleProvider,
 ) -> Result<(), String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|err| format!("Failed to create provider test client: {err}"))?;

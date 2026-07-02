@@ -20,6 +20,7 @@ mod indexing;
 mod llm;
 mod local_agent;
 mod model_catalog;
+mod net;
 mod office;
 mod pdf2zh_sidecar;
 mod pdf_index;
@@ -4403,6 +4404,55 @@ fn save_web_search_settings(
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxySettingsOutput {
+    proxy_url: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveProxySettingsInput {
+    proxy_url: String,
+}
+
+#[tauri::command]
+fn load_proxy_settings(
+    database: State<'_, AppDatabase>,
+) -> Result<ProxySettingsOutput, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    Ok(ProxySettingsOutput {
+        proxy_url: load_app_setting(&conn, "proxy_url")?.unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
+fn save_proxy_settings(
+    input: SaveProxySettingsInput,
+    database: State<'_, AppDatabase>,
+) -> Result<ProxySettingsOutput, String> {
+    let trimmed = input.proxy_url.trim().to_string();
+    {
+        let conn = database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        save_app_setting(&conn, "proxy_url", &trimmed)?;
+    }
+    // Update the live global so new HTTP clients pick it up without a restart.
+    net::set_proxy(if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.clone())
+    });
+    Ok(ProxySettingsOutput {
+        proxy_url: trimmed,
+    })
+}
+
 #[tauri::command]
 fn save_model_provider(
     input: SaveModelProviderInput,
@@ -4647,7 +4697,7 @@ async fn fetch_provider_models(
             })
         });
 
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|err| format!("Failed to create model list client: {err}"))?;
@@ -5772,6 +5822,8 @@ pub fn run() {
             save_translation_settings,
             load_web_search_settings,
             save_web_search_settings,
+            load_proxy_settings,
+            save_proxy_settings,
             remove_workspace_root,
             delete_document,
             list_model_providers,
@@ -5805,6 +5857,11 @@ pub fn run() {
                 .map_err(|err| format!("Failed to create app data dir: {err}"))?;
             let db_path = app_data_dir.join("lumenfolio.sqlite");
             let conn = storage::open_database(&db_path)?;
+            // Seed the outbound proxy from settings before any HTTP client is
+            // built (GUI apps don't inherit the shell's HTTPS_PROXY).
+            if let Ok(Some(proxy)) = load_app_setting(&conn, "proxy_url") {
+                net::set_proxy(Some(proxy));
+            }
             app.manage(AppDatabase {
                 conn: Mutex::new(conn),
             });

@@ -50,7 +50,7 @@ fn parse_semver(raw: &str) -> Option<(u32, u32, u32)> {
 pub(crate) async fn check_for_update() -> Result<UpdateInfo, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
     let url = format!("https://api.github.com/repos/{REPO}/tags?per_page=100");
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(15))
         .build()
         .map_err(|err| format!("Failed to create update client: {err}"))?;

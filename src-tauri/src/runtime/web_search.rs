@@ -265,7 +265,7 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    crate::net::client_builder()
         .timeout(HTTP_TIMEOUT)
         .user_agent(USER_AGENT)
         .build()

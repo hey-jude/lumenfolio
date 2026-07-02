@@ -304,6 +304,8 @@ const microsoftForm = reactive(createEmptyMicrosoftForm())
 // Exa web-search key. `apiKey` is the editable field (blank = unchanged on save);
 // `hasApiKey` reflects whether a key is stored, `status` drives the save button.
 const webSearchForm = reactive({ apiKey: '', hasApiKey: false, status: 'idle' })
+// App-wide outbound proxy (e.g. to reach huggingface.co behind a firewall).
+const proxyForm = reactive({ proxyUrl: '', status: 'idle' })
 const pdfTranslationRuntime = ref({
   checked: false,
   ok: false,
@@ -1520,6 +1522,30 @@ async function saveWebSearchSettings() {
   }
 }
 
+async function loadProxySettings() {
+  try {
+    const settings = await invoke('load_proxy_settings')
+    proxyForm.proxyUrl = settings?.proxyUrl || ''
+    proxyForm.status = 'idle'
+  } catch (err) {
+    console.warn('Failed to load proxy settings', err)
+  }
+}
+
+async function saveProxySettings() {
+  proxyForm.status = 'saving'
+  try {
+    const settings = await invoke('save_proxy_settings', {
+      input: { proxyUrl: proxyForm.proxyUrl },
+    })
+    proxyForm.proxyUrl = settings?.proxyUrl || ''
+    proxyForm.status = 'saved'
+  } catch (err) {
+    console.warn('Failed to save proxy settings', err)
+    proxyForm.status = 'error'
+  }
+}
+
 async function openSettings() {
   settingsOpen.value = true
   settingsSection.value = 'chat'
@@ -1530,6 +1556,7 @@ async function openSettings() {
   modelFetchStatus.value = 'idle'
   modelFetchMessage.value = ''
   await loadWebSearchSettings()
+  await loadProxySettings()
   await loadTranslationSettings()
   initializeEditableProviders()
 }
@@ -5866,6 +5893,30 @@ onMounted(() => {
               >
                 {{ webSearchForm.status === 'saving' ? ui.saving : ui.saveWebSearchKey }}
               </button>
+            </div>
+
+            <div class="settings-section-title full">{{ ui.proxySection }}</div>
+            <div class="settings-note full">{{ ui.proxySectionNote }}</div>
+            <label class="settings-field full">
+              <span>{{ ui.proxyUrl }}</span>
+              <input
+                v-model="proxyForm.proxyUrl"
+                type="text"
+                autocomplete="off"
+                spellcheck="false"
+                :placeholder="ui.proxyUrlPlaceholder"
+              />
+            </label>
+            <div class="settings-inline-actions">
+              <button
+                type="button"
+                class="settings-btn"
+                :disabled="proxyForm.status === 'saving'"
+                @click="saveProxySettings"
+              >
+                {{ proxyForm.status === 'saving' ? ui.saving : ui.saveProxy }}
+              </button>
+              <span v-if="proxyForm.status === 'saved'" class="settings-note">{{ ui.proxySaved }}</span>
             </div>
           </div>
 

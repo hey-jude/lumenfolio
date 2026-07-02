@@ -180,7 +180,7 @@ pub(crate) async fn fetch_trending_papers(
     database: State<'_, AppDatabase>,
 ) -> Result<Vec<TrendingPaper>, String> {
     let limit = limit.unwrap_or(DEFAULT_TRENDING_LIMIT).clamp(1, 100);
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|err| format!("Failed to create trending client: {err}"))?;
@@ -357,7 +357,7 @@ fn sanitize_title(title: &str) -> String {
 }
 
 async fn download_pdf(url: &str, dest: &Path) -> Result<(), String> {
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(90))
         .build()
         .map_err(|err| format!("Failed to create download client: {err}"))?;

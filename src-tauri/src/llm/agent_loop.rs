@@ -120,7 +120,7 @@ pub(crate) async fn run_unified_agent_loop(
     let tools = build_openai_tools(vision_enabled, web_enabled, ctx.library_is_large);
     let mut messages = build_initial_messages(&ctx, agent_run);
 
-    let client = reqwest::Client::builder()
+    let client = crate::net::client_builder()
         .timeout(Duration::from_secs(UNIFIED_TOOL_ROUND_TIMEOUT_SECS))
         .build()
         .map_err(|err| format!("Failed to create agent loop client: {err}"))?;
