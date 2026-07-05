@@ -356,6 +356,47 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
         <img :src="lumenfolioLogo" alt="" />
       </div>
 
+      <!-- Knowledge-base pivot: the collapsed rail mirrors the expanded section
+           ribbon (one mental model). Sources expands the sidebar; the rest reuse
+           the existing navigation. -->
+      <nav class="sidebar-rail-strip collapsed-strip" aria-label="Knowledge base sections">
+        <button
+          type="button"
+          class="rail-mode"
+          :class="{ active: !trendingActive && !graphActive }"
+          :title="ui.sources || 'Sources'"
+          :aria-label="ui.sources || 'Sources'"
+          @click="emit('toggle-collapse')"
+        ><span aria-hidden="true">📚</span></button>
+        <button
+          type="button"
+          class="rail-mode"
+          :title="ui.newNote"
+          :aria-label="ui.newNote"
+          @click="emit('new-note')"
+        ><span aria-hidden="true">📝</span></button>
+        <button
+          v-if="graphEnabled"
+          type="button"
+          class="rail-mode"
+          :class="{ active: graphActive }"
+          :title="ui.knowledgeGraph"
+          :aria-label="ui.knowledgeGraph"
+          @click="emit('open-graph')"
+        ><span aria-hidden="true">🕸</span></button>
+        <button
+          v-if="trendingEnabled"
+          type="button"
+          class="rail-mode"
+          :class="{ active: trendingActive }"
+          :title="ui.trendingPapers"
+          :aria-label="ui.trendingPapers"
+          @click="emit('open-trending')"
+        ><span aria-hidden="true">🔥</span></button>
+      </nav>
+
+      <div class="rail-divider"></div>
+
       <div class="rail-docs" :aria-label="ui.sources">
         <button
           v-for="doc in visibleRailDocs"
@@ -376,41 +417,40 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
             <span :style="{ height: `${progressPercent(doc)}%` }"></span>
           </span>
         </button>
-        <div v-if="!allDocs.length" class="rail-empty" :title="ui.noSourcesFound">—</div>
       </div>
 
       <nav class="rail-actions" aria-label="Lumenfolio actions">
-        <button
-          type="button"
-          class="rail-btn"
-          :title="ui.addFolder"
-          :disabled="isScanning"
-          @click="emit('add-folder')"
-        >
-          +
-        </button>
-        <button
-          type="button"
-          class="rail-btn"
-          :title="ui.rescanWorkspace"
-          :disabled="isScanning || !hasWorkspace"
-          @click="emit('rescan')"
-        >
-          ↻
-        </button>
-        <button
-          type="button"
-          class="rail-btn"
-          :title="ui.reindexDocument"
-          :disabled="isScanning || !selectedDoc || selectedDoc.id === 'empty'"
-          @click="emit('reindex-doc')"
-        >
-          ⟳
-        </button>
+        <div class="add-menu-wrap">
+          <button
+            type="button"
+            class="rail-btn"
+            :title="ui.addToLibrary || 'Add'"
+            :aria-label="ui.addToLibrary || 'Add'"
+            :aria-haspopup="true"
+            :aria-expanded="addMenuOpen"
+            :disabled="isScanning"
+            @mousedown.stop
+            @click.stop="toggleAddMenu"
+          >
+            +
+          </button>
+          <div v-if="addMenuOpen" class="add-menu collapsed-add-menu" @mousedown.stop>
+            <button type="button" class="add-menu-item" @click="chooseAdd('note')">
+              <span class="add-menu-ic" aria-hidden="true">📝</span>{{ ui.newNote }}
+            </button>
+            <button type="button" class="add-menu-item" @click="chooseAdd('files')">
+              <span class="add-menu-ic" aria-hidden="true">📄</span>{{ ui.importFiles || 'Import files…' }}
+            </button>
+            <button type="button" class="add-menu-item" @click="chooseAdd('folder')">
+              <span class="add-menu-ic" aria-hidden="true">📁</span>{{ ui.addFolder }}
+            </button>
+          </div>
+        </div>
         <button
           type="button"
           class="rail-btn"
           :title="ui.settings"
+          :aria-label="ui.settings"
           @click="emit('open-settings')"
         >
           ⚙
@@ -679,6 +719,37 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
   background: var(--accent-soft, rgba(106, 169, 255, 0.14));
   border-color: rgba(106, 169, 255, 0.3);
   color: var(--accent, #6aa9ff);
+}
+
+/* Collapsed rail: the section ribbon fills the width and its icons read a bit
+   larger than in the thin expanded strip. */
+.collapsed-strip {
+  width: 100%;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.collapsed-strip .rail-mode {
+  width: 40px;
+  height: 40px;
+  font-size: 20px;
+  border-radius: 11px;
+}
+
+.rail-divider {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 8px 0 2px;
+}
+
+/* Add menu pops to the right of the narrow rail button (not below it). */
+.collapsed-add-menu {
+  top: auto;
+  bottom: 0;
+  right: auto;
+  left: calc(100% + 6px);
 }
 
 .rail-spacer {
