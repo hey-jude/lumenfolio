@@ -129,10 +129,20 @@
 - **风险：** 中(已落地)。**pptx 保真预览仍是唯一待决项**(许可)——文本照常可问,渲染器待清晰方案。
 - **后续(非阻塞)**：docx/pptx 标题 → 大纲/结构树细化;xlsx 大表分页/虚拟滚动;office 文件目录扫描自动纳入(当前仅单文件导入)。
 
+### C — 逻辑集合(Collections)：把"文件夹扫描=工作区"换成用户自建的知识库层级 🔄 进行中
+
+原模型"导入磁盘文件夹→扫描其中 PDF"不符合知识库形态。改为:用户在 app 内**自建集合(逻辑目录)**、命名、可嵌套建子集合;把想处理的文件**直接拖进来**(只记真实路径,不复制、不建盘上文件夹);集合是纯元数据层,和磁盘解耦。决策(已确认):**每个现有磁盘根→同名集合(一次性迁移)**、**单一归属(文件夹式)**、**保留一次性文件夹导入**。
+
+- **C-a 数据模型 + 迁移 + CRUD** ✅:`collections` 表(id/parent_id/name/position, 嵌套 ON DELETE CASCADE);`documents.collection_id`(可空=未归类);一次性迁移(app_settings 标志防复活);命令 load/create/rename/delete_collection、move_document_to_collection、move_collection(删=子树降级到未归类不删文件;移动防环)。
+- **C-b 导入改造** ✅:`import_workspace_paths` 收 `targetCollectionId`;文件夹递归一次性登记(不 reconcile/不实时绑定),文件直接登记;file-backed 存 KNOWLEDGE 存储根(保留真实 path 供读/预览),文本入 body_md;全部 `assign_collection` 归入目标集合。note/clip 也带 collectionId。
+- **C-c 侧栏改为集合树** ✅:`WorkspaceSidebar` 渲染扁平化嵌套集合树(替代磁盘根)+ 未归类节点;新建/重命名(内联)/删除(降级未归类)集合;导入/新建笔记/剪藏归入选中集合;`createLocalDocument` 带 collectionId;折叠态轨道保持不变。
+- **C-d 拖拽** ⬜:文档在集合间拖动;OS 文件拖入集合即导入;集合拖入集合嵌套/重排。
+- **风险:** 中。结构性重构;`workspace_roots` 降级为隐藏存储层,`scan_workspace_pdfs` 变遗留。
+
 ### P4 — 信息架构收尾
 
 - 阅读器 → 按类型自适应详情视图（PDF 查看 / 电子表格 / 幻灯片 / 网页阅读 / Markdown / 笔记编辑）。
-- 侧栏 → 统一知识导航器（来源 + 概念/主题，不只是文件夹）。
+- 侧栏 → 统一知识导航器（来源 + 概念/主题 + **集合**，见 C）。
 - 知识图谱前移接近"家"。
 
 ---

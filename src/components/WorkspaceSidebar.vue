@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, onBeforeUnmount } from 'vue'
+import { computed, reactive, ref, watch, onBeforeUnmount } from 'vue'
 import lumenfolioLogo from '../assets/lumenfolio-logo-transparent.png'
 import { startWindowDrag } from '../windowDrag'
 
@@ -7,6 +7,21 @@ const props = defineProps({
   roots: {
     type: Array,
     default: () => [],
+  },
+  // Knowledge-base pivot: logical collections (flat list of
+  // { id, parentId, name, position }) + the full document pool. When present,
+  // the expanded tree groups documents by collection instead of by disk root.
+  collections: {
+    type: Array,
+    default: () => [],
+  },
+  documents: {
+    type: Array,
+    default: () => [],
+  },
+  selectedCollectionId: {
+    type: [String, null],
+    default: null,
   },
   selectedDocId: {
     type: String,
@@ -85,17 +100,32 @@ const emit = defineEmits([
   'toggle-collapse',
   'workspace-drop',
   'set-drop-active',
+  'new-collection',
+  'rename-collection',
+  'delete-collection',
+  'select-collection',
+  'move-doc-to-collection',
 ])
 
 const normalizedFilter = computed(() => String(props.filter || '').trim().toLowerCase())
 const hasWorkspace = computed(() => props.roots.some((root) => Boolean(String(root.path || '').trim())))
 const isScanning = computed(() => props.scanStatus === 'choosing' || props.scanStatus === 'scanning')
-const allDocs = computed(() => props.roots.flatMap((root) => (
+// Knowledge-base pivot: prefer the flat document pool (props.documents). Fall
+// back to the legacy roots→folders→docs derivation so the rail keeps working if
+// documents haven't been wired up.
+const rootDocs = computed(() => props.roots.flatMap((root) => (
   (root.folders || []).flatMap((folder) => folder.docs || [])
 )))
-const visibleRailDocs = computed(() => props.roots.flatMap((root) => (
-  root.collapsed ? [] : (root.folders || []).flatMap((folder) => folder.docs || [])
-)))
+const allDocs = computed(() => (
+  props.documents.length ? props.documents : rootDocs.value
+))
+const visibleRailDocs = computed(() => (
+  props.documents.length
+    ? props.documents
+    : props.roots.flatMap((root) => (
+      root.collapsed ? [] : (root.folders || []).flatMap((folder) => folder.docs || [])
+    ))
+))
 const selectedRoot = computed(() => props.roots.find((root) => (
   (root.folders || []).some((folder) => (folder.docs || []).some((doc) => doc.id === props.selectedDocId))
 )) || props.roots[0] || null)
@@ -335,6 +365,167 @@ function chooseAdd(kind) {
   else emit('add-folder')
 }
 
+// ── Collection tree (knowledge-base pivot) ──────────────────────────────────
+// Documents are grouped by collectionId; collections nest by parentId. The tree
+// is rendered as a flattened, depth-indented list of rows honoring a local
+// expand/collapse Set (top-level collections default to expanded).
+
+const UNFILED_ID = '__unfiled__'
+const expandedCollections = reactive(new Set())
+// Track which collection ids we've already seeded so newly-created top-level
+// collections default to expanded without re-expanding ones the user collapsed.
+const seededCollectionIds = new Set()
+
+watch(
+  () => props.collections,
+  (list) => {
+    for (const collection of list || []) {
+      if (seededCollectionIds.has(collection.id)) continue
+      seededCollectionIds.add(collection.id)
+      if (collection.parentId == null) expandedCollections.add(collection.id)
+    }
+  },
+  { immediate: true, deep: true },
+)
+
+// Map parentId → children (in position order), for building the flattened tree.
+const collectionChildren = computed(() => {
+  const byParent = new Map()
+  for (const collection of props.collections || []) {
+    const key = collection.parentId ?? null
+    if (!byParent.has(key)) byParent.set(key, [])
+    byParent.get(key).push(collection)
+  }
+  for (const children of byParent.values()) {
+    children.sort((a, b) => {
+      const posA = Number(a.position ?? 0)
+      const posB = Number(b.position ?? 0)
+      if (posA !== posB) return posA - posB
+      return String(a.name || '').localeCompare(String(b.name || ''))
+    })
+  }
+  return byParent
+})
+
+// Documents keyed by collection id. Docs whose collectionId is null/undefined or
+// points at a non-existent collection fall into the Unfiled bucket.
+const docsByCollection = computed(() => {
+  const known = new Set((props.collections || []).map((c) => c.id))
+  const map = new Map()
+  for (const doc of allDocs.value) {
+    const raw = doc?.collectionId
+    const key = raw != null && known.has(raw) ? raw : UNFILED_ID
+    if (!map.has(key)) map.set(key, [])
+    map.get(key).push(doc)
+  }
+  return map
+})
+
+function collectionDocCount(id) {
+  return (docsByCollection.value.get(id) || []).length
+}
+
+function isCollectionExpanded(id) {
+  return expandedCollections.has(id)
+}
+
+function toggleCollectionExpanded(id) {
+  if (expandedCollections.has(id)) expandedCollections.delete(id)
+  else expandedCollections.add(id)
+}
+
+// Flatten the collection forest into an ordered array of rows. Each collection
+// row is followed (when expanded) by its child collections then its documents,
+// all depth-indented. The Unfiled bucket is always appended at the bottom.
+const treeRows = computed(() => {
+  const rows = []
+  const childrenOf = collectionChildren.value
+
+  const walk = (parentId, depth) => {
+    const children = childrenOf.get(parentId ?? null) || []
+    for (const collection of children) {
+      rows.push({ type: 'collection', depth, collection })
+      if (isCollectionExpanded(collection.id)) {
+        walk(collection.id, depth + 1)
+        for (const doc of visibleDocs(docsByCollection.value.get(collection.id) || [])) {
+          rows.push({ type: 'doc', depth: depth + 1, doc })
+        }
+      }
+    }
+  }
+  walk(null, 0)
+
+  // Unfiled node — always present, even with no collections yet.
+  rows.push({ type: 'collection', depth: 0, unfiled: true })
+  if (isCollectionExpanded(UNFILED_ID)) {
+    for (const doc of visibleDocs(docsByCollection.value.get(UNFILED_ID) || [])) {
+      rows.push({ type: 'doc', depth: 1, doc })
+    }
+  }
+  return rows
+})
+
+// Unfiled starts expanded.
+expandedCollections.add(UNFILED_ID)
+
+function rowIndentStyle(depth) {
+  return { paddingLeft: `${depth * 14}px` }
+}
+
+// Inline rename: which collection row is being edited + its draft text.
+const renamingCollectionId = ref('')
+const renameDraft = ref('')
+
+function startRenameCollection(collection, event = null) {
+  if (event) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+  renamingCollectionId.value = collection.id
+  renameDraft.value = collection.name || ''
+}
+
+function commitRenameCollection() {
+  const id = renamingCollectionId.value
+  const name = String(renameDraft.value || '').trim()
+  renamingCollectionId.value = ''
+  if (id && name) emit('rename-collection', { id, name })
+}
+
+function cancelRenameCollection() {
+  renamingCollectionId.value = ''
+  renameDraft.value = ''
+}
+
+// Autofocus + select the inline rename input when it mounts.
+const vFocus = {
+  mounted(el) {
+    el.focus()
+    el.select?.()
+  },
+}
+
+function triggerNewSubcollection(collection, event = null) {
+  if (event) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+  // Ensure the parent is expanded so the new child is visible.
+  expandedCollections.add(collection.id)
+  emit('new-collection', collection.id)
+}
+
+function triggerDeleteCollection(collection, event = null) {
+  if (event) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+  const message = props.ui?.deleteCollectionConfirm
+    || 'Delete this collection? Its sources move to Unfiled (files are not deleted).'
+  if (!window.confirm(message)) return
+  emit('delete-collection', collection.id)
+}
+
 onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick))
 
 </script>
@@ -528,6 +719,14 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
         <button
           type="button"
           class="panel-action-btn"
+          :title="ui.newCollection || 'New collection'"
+          :aria-label="ui.newCollection || 'New collection'"
+          @mousedown.stop
+          @click="emit('new-collection', null)"
+        ><span aria-hidden="true">🗂</span></button>
+        <button
+          type="button"
+          class="panel-action-btn"
           :title="ui.rescanWorkspace"
           :aria-label="ui.rescanWorkspace"
           :disabled="isScanning || !hasWorkspace"
@@ -548,105 +747,139 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
     </label>
 
     <div class="tree-area">
-      <section
-        v-for="workspaceRoot in roots"
-        :key="workspaceRoot.id || workspaceRoot.path"
-        class="folder-group"
-        :class="{ 'drop-target': isDropActive && workspaceRoot.id && workspaceRoot.id === dropTargetRootId }"
-        :data-workspace-root-id="workspaceRoot.id"
-      >
-        <div class="workspace-title-row">
-          <button
-            type="button"
-            class="folder-title"
-            :title="rootTitle(workspaceRoot)"
-            @click="emit('toggle-root', workspaceRoot.id)"
+      <!-- Knowledge-base pivot: collection tree. Flattened, depth-indented rows
+           mixing collection folders and their documents; an always-present
+           "Unfiled" node at the bottom holds documents with no collection. -->
+      <div class="collection-tree">
+        <template v-for="row in treeRows" :key="row.type === 'doc' ? `doc-${row.doc.id}` : (row.unfiled ? 'col-unfiled' : `col-${row.collection.id}`)">
+          <!-- Unfiled node -->
+          <div
+            v-if="row.type === 'collection' && row.unfiled"
+            class="collection-row unfiled-row"
+            :style="rowIndentStyle(row.depth)"
           >
-            <span class="folder-caret">{{ workspaceRoot.collapsed ? '▸' : '▾' }}</span>
-            <span class="folder-name">{{ localized(workspaceRoot.name) }}</span>
-          </button>
-          <button
-            type="button"
-            class="folder-open-btn"
-            :title="ui.addPdfs"
-            :aria-label="ui.addPdfs"
-            :disabled="isScanning"
-            @click="emit('add-pdfs', workspaceRoot.id)"
-          >
-            +
-          </button>
-          <button
-            type="button"
-            class="folder-open-btn"
-            :title="ui.openWorkspaceInFileManager"
-            :aria-label="ui.openWorkspaceInFileManager"
-            @click="emit('open-workspace', workspaceRoot.id)"
-          >
-            ↗
-          </button>
-        <button
-          type="button"
-          class="folder-open-btn folder-delete-btn"
-          :title="ui.removeWorkspace"
-          :aria-label="ui.removeWorkspace"
-          @click="triggerDeleteRoot(workspaceRoot, $event)"
-        >
-          <span class="folder-action-icon folder-delete-icon" aria-hidden="true">×</span>
-        </button>
-        </div>
-        <div v-if="!workspaceRoot.collapsed" class="workspace-docs">
-          <template v-for="folder in workspaceRoot.folders" :key="folder.id">
             <button
-              v-for="doc in visibleDocs(folder.docs)"
-              :key="doc.id"
-              class="doc-row"
-              :class="{ active: doc.id === selectedDocId && !trendingActive }"
-              :title="compactDocTitle(doc)"
-              :draggable="doc.chatReady ? 'true' : 'false'"
-              @click="emit('select-doc', doc.id)"
-              @dragstart="handleDocDragStart($event, doc)"
-            >
-              <div class="doc-main">
-                <span class="doc-name-wrap">
-                  <span
-                    class="doc-status-dot"
-                    :class="docStatusKind(doc)"
-                    :title="docStatusTitle(doc)"
-                    :aria-label="docStatusTitle(doc)"
-                  ></span>
-                  <span class="doc-name">{{ doc.shortTitle }}</span>
-                </span>
-                <span class="doc-time">{{ localized(doc.lastOpened) }}</span>
-              </div>
-              <div v-if="doc.indexStatus === 'indexing'" class="doc-progress" aria-hidden="true">
-                <span :style="{ width: `${progressPercent(doc)}%` }"></span>
-              </div>
-              <span class="doc-row-actions">
-                <span
-                  class="doc-action-btn"
-                  role="button"
-                  tabindex="0"
-                  :title="ui.reindexDocument"
-                  :aria-label="ui.reindexDocument"
-                  @click.stop="triggerReindexDoc(doc, $event)"
-                  @keydown.enter.stop.prevent="triggerReindexDoc(doc, $event)"
-                >⟳</span>
-                <span
-                  class="doc-action-btn doc-delete-btn"
-                  role="button"
-                  tabindex="0"
-                  :title="ui.deleteDocument"
-                  :aria-label="ui.deleteDocument"
-                  @click.stop="triggerDeleteDoc(doc, $event)"
-                  @keydown.enter.stop.prevent="triggerDeleteDoc(doc, $event)"
-                >×</span>
-              </span>
-            </button>
-          </template>
-        </div>
-      </section>
+              type="button"
+              class="collection-caret"
+              :aria-label="ui.unfiled || 'Unfiled'"
+              @click="toggleCollectionExpanded('__unfiled__')"
+            >{{ isCollectionExpanded('__unfiled__') ? '▾' : '▸' }}</button>
+            <span class="collection-name">{{ ui.unfiled || 'Unfiled' }}</span>
+            <span class="collection-count">{{ collectionDocCount('__unfiled__') }}</span>
+          </div>
 
-      <div v-if="!allDocs.length" class="empty-tree">
+          <!-- Collection node -->
+          <div
+            v-else-if="row.type === 'collection'"
+            class="collection-row"
+            :class="{ active: row.collection.id === selectedCollectionId }"
+            :style="rowIndentStyle(row.depth)"
+          >
+            <button
+              type="button"
+              class="collection-caret"
+              :aria-label="isCollectionExpanded(row.collection.id) ? ui.collapse : ui.expand"
+              @click.stop="toggleCollectionExpanded(row.collection.id)"
+            >{{ isCollectionExpanded(row.collection.id) ? '▾' : '▸' }}</button>
+            <template v-if="renamingCollectionId === row.collection.id">
+              <input
+                v-model="renameDraft"
+                class="collection-rename-input"
+                type="text"
+                @click.stop
+                @keydown.enter.prevent="commitRenameCollection"
+                @keydown.esc.prevent="cancelRenameCollection"
+                @blur="commitRenameCollection"
+                v-focus
+              />
+            </template>
+            <template v-else>
+              <button
+                type="button"
+                class="collection-name-btn"
+                :title="row.collection.name"
+                @click="emit('select-collection', row.collection.id)"
+              >
+                <span class="collection-name">{{ row.collection.name }}</span>
+              </button>
+              <span class="collection-count">{{ collectionDocCount(row.collection.id) }}</span>
+              <span class="collection-actions">
+                <button
+                  type="button"
+                  class="collection-action-btn"
+                  :title="ui.newSubcollection || 'New sub-collection'"
+                  :aria-label="ui.newSubcollection || 'New sub-collection'"
+                  @click.stop="triggerNewSubcollection(row.collection, $event)"
+                >+</button>
+                <button
+                  type="button"
+                  class="collection-action-btn"
+                  :title="ui.renameCollection || 'Rename'"
+                  :aria-label="ui.renameCollection || 'Rename'"
+                  @click.stop="startRenameCollection(row.collection, $event)"
+                >✎</button>
+                <button
+                  type="button"
+                  class="collection-action-btn collection-delete-btn"
+                  :title="ui.deleteCollection || 'Delete'"
+                  :aria-label="ui.deleteCollection || 'Delete'"
+                  @click.stop="triggerDeleteCollection(row.collection, $event)"
+                >×</button>
+              </span>
+            </template>
+          </div>
+
+          <!-- Document row (indented under its collection) -->
+          <button
+            v-else
+            class="doc-row"
+            :class="{ active: row.doc.id === selectedDocId && !trendingActive }"
+            :style="rowIndentStyle(row.depth)"
+            :title="compactDocTitle(row.doc)"
+            :draggable="row.doc.chatReady ? 'true' : 'false'"
+            @click="emit('select-doc', row.doc.id)"
+            @dragstart="handleDocDragStart($event, row.doc)"
+          >
+            <div class="doc-main">
+              <span class="doc-name-wrap">
+                <span
+                  class="doc-status-dot"
+                  :class="docStatusKind(row.doc)"
+                  :title="docStatusTitle(row.doc)"
+                  :aria-label="docStatusTitle(row.doc)"
+                ></span>
+                <span class="doc-name">{{ row.doc.shortTitle }}</span>
+              </span>
+              <span class="doc-time">{{ localized(row.doc.lastOpened) }}</span>
+            </div>
+            <div v-if="row.doc.indexStatus === 'indexing'" class="doc-progress" aria-hidden="true">
+              <span :style="{ width: `${progressPercent(row.doc)}%` }"></span>
+            </div>
+            <span class="doc-row-actions">
+              <span
+                class="doc-action-btn"
+                role="button"
+                tabindex="0"
+                :title="ui.reindexDocument"
+                :aria-label="ui.reindexDocument"
+                @click.stop="triggerReindexDoc(row.doc, $event)"
+                @keydown.enter.stop.prevent="triggerReindexDoc(row.doc, $event)"
+              >⟳</span>
+              <span
+                class="doc-action-btn doc-delete-btn"
+                role="button"
+                tabindex="0"
+                :title="ui.deleteDocument"
+                :aria-label="ui.deleteDocument"
+                @click.stop="triggerDeleteDoc(row.doc, $event)"
+                @keydown.enter.stop.prevent="triggerDeleteDoc(row.doc, $event)"
+              >×</span>
+            </span>
+          </button>
+        </template>
+      </div>
+
+      <div v-if="!allDocs.length && !collections.length" class="empty-tree">
         {{ ui.noSourcesFound }}
       </div>
     </div>
@@ -1278,6 +1511,135 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
   color: #ff6b6b;
   border-color: rgba(255, 107, 107, 0.4);
   background: rgba(255, 107, 107, 0.12);
+}
+
+/* Knowledge-base pivot: collection tree rows. */
+.collection-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.collection-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  border-radius: 8px;
+  padding: 4px 6px 4px 2px;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+}
+
+.collection-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.collection-row.active {
+  background: rgba(106, 169, 255, 0.12);
+  border-color: rgba(106, 169, 255, 0.25);
+  color: var(--text-primary);
+}
+
+.collection-caret {
+  width: 14px;
+  flex: 0 0 14px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.collection-name-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  padding: 2px 0;
+  text-align: left;
+}
+
+.collection-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.unfiled-row .collection-name {
+  flex: 1;
+  color: var(--text-muted);
+}
+
+.collection-count {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.collection-actions {
+  display: flex;
+  gap: 2px;
+  flex: 0 0 auto;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.collection-row:hover .collection-actions,
+.collection-actions:focus-within {
+  opacity: 1;
+}
+
+.collection-action-btn {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.collection-action-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+}
+
+.collection-delete-btn {
+  color: rgba(255, 102, 102, 0.9);
+}
+
+.collection-delete-btn:hover {
+  background: rgba(255, 102, 102, 0.14);
+  color: rgba(255, 102, 102, 1);
+}
+
+.collection-rename-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 6px;
+  outline: none;
 }
 
 .doc-row {

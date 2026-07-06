@@ -127,6 +127,11 @@ const MODEL_CAPABILITY_OPTIONS = ['vision', 'reasoning', 'tool_use']
 const workspace = reactive({
   roots: [],
 })
+// Knowledge-base pivot: user-authored logical collections (nestable folders
+// decoupled from disk). Flat list of { id, parentId, name, position }.
+const collections = ref([])
+// The collection new imports/notes/clips file into; also the highlighted tree row.
+const selectedCollectionId = usePersistedRef('selectedCollectionId', null)
 const locale = usePersistedRef('locale', 'en')
 const ui = computed(() => messages[locale.value] || messages.en)
 const filter = ref('')
@@ -2045,7 +2050,7 @@ async function handleCreateNote(title = '') {
   const noteTitle = typeof title === 'string' ? title.trim() : ''
   try {
     const result = await invoke('create_note_source', {
-      input: { title: noteTitle, bodyMd: '' },
+      input: { title: noteTitle, bodyMd: '', collectionId: selectedCollectionId.value ?? null },
     })
     if (result?.snapshot) {
       const { root } = upsertWorkspaceRootSnapshot(result.snapshot)
@@ -2070,7 +2075,7 @@ async function handleClipWebPage(url) {
   clipBusy.value = true
   workspaceError.value = ''
   try {
-    const result = await invoke('clip_web_page', { input: { url: target } })
+    const result = await invoke('clip_web_page', { input: { url: target, collectionId: selectedCollectionId.value ?? null } })
     if (result?.snapshot) {
       const { root } = upsertWorkspaceRootSnapshot(result.snapshot)
       if (root) root.collapsed = false
@@ -2083,6 +2088,72 @@ async function handleClipWebPage(url) {
     workspaceError.value = err?.message || String(err)
   } finally {
     clipBusy.value = false
+  }
+}
+
+// Knowledge-base pivot: load the flat collection list (sorted by position/name).
+async function loadCollections() {
+  try {
+    collections.value = await invoke('load_collections')
+  } catch (err) {
+    console.warn('load_collections failed', err)
+  }
+}
+
+async function handleCreateCollection(parentId = null) {
+  const name = ui.value.newCollectionName || 'New collection'
+  try {
+    const created = await invoke('create_collection', {
+      input: { name, parentId: parentId ?? null },
+    })
+    await loadCollections()
+    if (created?.id) selectedCollectionId.value = created.id
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
+async function handleRenameCollection({ id, name } = {}) {
+  if (!id) return
+  const nextName = String(name || '').trim()
+  if (!nextName) return
+  try {
+    await invoke('rename_collection', { input: { id, name: nextName } })
+    await loadCollections()
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
+async function handleDeleteCollection(id) {
+  if (!id) return
+  try {
+    await invoke('delete_collection', { id })
+    // Deleting a collection unfiles its documents (collection_id → null) on the
+    // backend; reload the doc pool so the tree reflects the new unfiled state.
+    await loadLastWorkspace()
+    await loadCollections()
+    if (selectedCollectionId.value === id) selectedCollectionId.value = null
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
+function handleSelectCollection(id) {
+  selectedCollectionId.value = id
+}
+
+async function handleMoveDocToCollection({ docId, collectionId } = {}) {
+  if (!docId) return
+  const target = collectionId ?? null
+  try {
+    await invoke('move_document_to_collection', {
+      input: { documentId: docId, collectionId: target },
+    })
+    const doc = allDocs.value.find((item) => item.id === docId)
+    if (doc) doc.collectionId = target
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
   }
 }
 
@@ -4242,7 +4313,9 @@ async function addWorkspaceRootsFromDrop(rawPaths, options = {}) {
   if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return false
   const sourcePaths = normalizeWorkspaceDropPaths(rawPaths)
   if (!sourcePaths.length) return false
-  const targetRootId = String(options.targetRootId || '').trim() || null
+  // Knowledge-base pivot: imports file into a logical collection (null = unfiled).
+  // Prefer an explicit per-call target, else the currently-selected collection.
+  const targetCollectionId = options.targetCollectionId ?? selectedCollectionId.value ?? null
   ignoreNextTauriFileDrop.value = true
   lastWorkspaceDropAt.value = Date.now()
   workspaceStatus.value = 'scanning'
@@ -4253,7 +4326,7 @@ async function addWorkspaceRootsFromDrop(rawPaths, options = {}) {
     try {
       snapshots = await invoke('import_workspace_paths', {
         args: {
-          targetRootId,
+          targetCollectionId,
           sourcePaths,
         },
       })
@@ -4263,6 +4336,7 @@ async function addWorkspaceRootsFromDrop(rawPaths, options = {}) {
     }
     if (!Array.isArray(snapshots) || !snapshots.length) return false
     snapshots.forEach(upsertWorkspaceRootSnapshot)
+    await loadCollections()
     const previousDocStillExists = allDocs.value.some((doc) => doc.id === previousDocId)
     selectedDocId.value = previousDocStillExists ? previousDocId : allDocs.value[0]?.id || ''
     if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
@@ -4699,6 +4773,9 @@ async function loadLastWorkspace() {
   workspaceError.value = ''
   try {
     const snapshot = await invoke('load_last_workspace')
+    // Load logical collections alongside the doc pool so the sidebar tree can
+    // group documents by collection (independent of whether any roots exist).
+    await loadCollections()
     if (!Array.isArray(snapshot?.roots) || !snapshot.roots.length) {
       workspaceStatus.value = 'idle'
       return
@@ -4739,6 +4816,9 @@ function createLocalDocument(pdf) {
     // Knowledge-base pivot (P2): source kind. Editable text sources
     // (note/markdown/text/web) open in the Markdown editor instead of the reader.
     contentType: pdf.content_type || 'pdf',
+    // Knowledge-base pivot: the logical collection this source is filed into
+    // (null = unfiled). Drives the sidebar collection tree grouping.
+    collectionId: pdf.collection_id ?? null,
     path: pdf.path,
     title,
     shortTitle: pdf.short_title || title,
@@ -5111,6 +5191,9 @@ onMounted(() => {
     </div>
     <WorkspaceSidebar
       :roots="workspace.roots"
+      :collections="collections"
+      :documents="allDocs"
+      :selected-collection-id="selectedCollectionId"
       :selected-doc-id="selectedDocId"
       :selected-doc="selectedDocument"
       :filter="filter"
@@ -5143,6 +5226,11 @@ onMounted(() => {
       @toggle-root="toggleWorkspaceRoot"
       @open-settings="openSettings"
       @toggle-collapse="toggleLeftCollapse"
+      @new-collection="handleCreateCollection"
+      @rename-collection="handleRenameCollection"
+      @delete-collection="handleDeleteCollection"
+      @select-collection="handleSelectCollection"
+      @move-doc-to-collection="handleMoveDocToCollection"
     />
 
     <button
