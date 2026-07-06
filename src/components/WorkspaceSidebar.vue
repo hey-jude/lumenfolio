@@ -638,7 +638,66 @@ function cancelDeleteCollection(event = null) {
   confirmDeleteId.value = null
 }
 
-onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick))
+// Obsidian-style right-click menu. `kind`: 'blank' (empty tree area → top level)
+// or 'collection' (a folder row → scoped to it).
+const contextMenu = reactive({ open: false, x: 0, y: 0, kind: 'blank', collection: null })
+
+function openContextMenu(event, kind, collection = null) {
+  event.preventDefault()
+  event.stopPropagation()
+  contextMenu.open = true
+  contextMenu.x = event.clientX
+  contextMenu.y = event.clientY
+  contextMenu.kind = kind
+  contextMenu.collection = collection
+  // Dedupe: a second right-click while open must not stack listeners.
+  window.removeEventListener('click', closeContextMenu)
+  window.addEventListener('click', closeContextMenu)
+}
+
+function closeContextMenu() {
+  if (!contextMenu.open) return
+  contextMenu.open = false
+  contextMenu.collection = null
+  window.removeEventListener('click', closeContextMenu)
+}
+
+function ctxNewNote() {
+  // Filing a new note into a collection: select it first, then create (the
+  // parent reads the selected collection at create time).
+  if (contextMenu.collection) emit('select-collection', contextMenu.collection.id)
+  closeContextMenu()
+  emit('new-note')
+}
+
+function ctxNewCollection() {
+  const parentId = contextMenu.collection ? contextMenu.collection.id : null
+  closeContextMenu()
+  emit('new-collection', parentId)
+}
+
+function ctxImportFiles() {
+  if (contextMenu.collection) emit('select-collection', contextMenu.collection.id)
+  closeContextMenu()
+  emit('import-files')
+}
+
+function ctxRenameCollection() {
+  const collection = contextMenu.collection
+  closeContextMenu()
+  if (collection) startRenameCollection(collection)
+}
+
+function ctxDeleteCollection() {
+  const collection = contextMenu.collection
+  closeContextMenu()
+  if (collection) requestDeleteCollection(collection)
+}
+
+onBeforeUnmount(() => {
+  window.removeEventListener('click', onAddMenuOutsideClick)
+  window.removeEventListener('click', closeContextMenu)
+})
 
 </script>
 
@@ -803,49 +862,7 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
       <div class="sidebar-main">
     <div class="sidebar-header" data-tauri-drag-region @mousedown="startWindowDrag">
       <span class="panel-label">{{ ui.libraryTitle || 'Library' }}</span>
-      <div class="panel-actions">
-        <div class="add-menu-wrap">
-          <button
-            type="button"
-            class="panel-action-btn"
-            :title="ui.addToLibrary || 'Add'"
-            :aria-label="ui.addToLibrary || 'Add'"
-            :aria-haspopup="true"
-            :aria-expanded="addMenuOpen"
-            :disabled="isScanning"
-            @mousedown.stop
-            @click.stop="toggleAddMenu"
-          ><span aria-hidden="true">+</span></button>
-          <div v-if="addMenuOpen" class="add-menu" @mousedown.stop>
-            <button type="button" class="add-menu-item" @click="chooseAdd('note')">
-              <span class="add-menu-ic" aria-hidden="true">📝</span>{{ ui.newNote }}
-            </button>
-            <button type="button" class="add-menu-item" @click="chooseAdd('files')">
-              <span class="add-menu-ic" aria-hidden="true">📄</span>{{ ui.importFiles || 'Import files…' }}
-            </button>
-            <button type="button" class="add-menu-item" @click="chooseAdd('folder')">
-              <span class="add-menu-ic" aria-hidden="true">📁</span>{{ ui.addFolder }}
-            </button>
-          </div>
-        </div>
-        <button
-          type="button"
-          class="panel-action-btn"
-          :title="ui.newCollection || 'New collection'"
-          :aria-label="ui.newCollection || 'New collection'"
-          @mousedown.stop
-          @click="emit('new-collection', null)"
-        ><span aria-hidden="true">🗂</span></button>
-        <button
-          type="button"
-          class="panel-action-btn"
-          :title="ui.rescanWorkspace"
-          :aria-label="ui.rescanWorkspace"
-          :disabled="isScanning || !hasWorkspace"
-          @mousedown.stop
-          @click="emit('rescan')"
-        ><span aria-hidden="true">↻</span></button>
-      </div>
+      <span class="panel-hint">{{ ui.rightClickHint || '' }}</span>
     </div>
 
     <label class="search-box">
@@ -858,10 +875,11 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
       />
     </label>
 
-    <div class="tree-area">
+    <div class="tree-area" @contextmenu="openContextMenu($event, 'blank')">
       <!-- Knowledge-base pivot: collection tree. Flattened, depth-indented rows
            mixing collection folders and their documents; an always-present
-           "Unfiled" node at the bottom holds documents with no collection. -->
+           "Unfiled" node at the bottom holds documents with no collection.
+           Right-click (blank area or a folder) opens the create/organize menu. -->
       <div class="collection-tree">
         <template v-for="row in treeRows" :key="row.type === 'doc' ? `doc-${row.doc.id}` : (row.unfiled ? 'col-unfiled' : `col-${row.collection.id}`)">
           <!-- Unfiled node -->
@@ -894,6 +912,7 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
               'drag-over': dragOverCollectionId === row.collection.id || dropTargetCollectionId === row.collection.id,
             }"
             :style="rowIndentStyle(row.depth)"
+            @contextmenu.stop="openContextMenu($event, 'collection', row.collection)"
             :data-collection-id="row.collection.id"
             :draggable="renamingCollectionId === row.collection.id ? 'false' : 'true'"
             @dragstart="handleCollectionDragStart($event, row.collection)"
@@ -1033,6 +1052,34 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
       <span v-else-if="allDocs.length">{{ allDocs.length }} {{ ui.sourcesCountLabel || 'sources' }}</span>
     </div>
       </div>
+    </div>
+
+    <!-- Obsidian-style right-click menu (create / organize). -->
+    <div
+      v-if="contextMenu.open"
+      class="ctx-menu"
+      :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
+      @click.stop
+      @contextmenu.prevent.stop
+    >
+      <button type="button" class="ctx-item" @click="ctxNewNote">
+        <span class="ctx-ic" aria-hidden="true">📝</span>{{ ui.newNote }}
+      </button>
+      <button type="button" class="ctx-item" @click="ctxNewCollection">
+        <span class="ctx-ic" aria-hidden="true">📁</span>{{ contextMenu.kind === 'collection' ? (ui.newSubcollection || 'New sub-collection') : (ui.newCollection || 'New collection') }}
+      </button>
+      <button type="button" class="ctx-item" @click="ctxImportFiles">
+        <span class="ctx-ic" aria-hidden="true">📄</span>{{ ui.importFiles || 'Import files…' }}
+      </button>
+      <template v-if="contextMenu.kind === 'collection'">
+        <div class="ctx-sep"></div>
+        <button type="button" class="ctx-item" @click="ctxRenameCollection">
+          <span class="ctx-ic" aria-hidden="true">✎</span>{{ ui.renameCollection || 'Rename' }}
+        </button>
+        <button type="button" class="ctx-item ctx-danger" @click="ctxDeleteCollection">
+          <span class="ctx-ic" aria-hidden="true">×</span>{{ ui.deleteCollection || 'Delete' }}
+        </button>
+      </template>
     </div>
     </template>
   </aside>
@@ -1472,6 +1519,65 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
 .add-menu-ic {
   font-size: 14px;
   line-height: 1;
+}
+
+/* Right-click context menu (fixed to the cursor). */
+.ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 172px;
+  padding: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--bg-panel, #1f1f24);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.38);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ctx-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ctx-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.ctx-item.ctx-danger:hover {
+  background: rgba(224, 106, 106, 0.14);
+  color: var(--danger, #e06a6a);
+}
+
+.ctx-ic {
+  font-size: 14px;
+  line-height: 1;
+  width: 16px;
+  text-align: center;
+}
+
+.ctx-sep {
+  height: 1px;
+  margin: 3px 4px;
+  background: var(--line-soft);
+}
+
+.panel-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-muted, var(--text-secondary));
+  opacity: 0.7;
 }
 
 .path-reveal-btn {
