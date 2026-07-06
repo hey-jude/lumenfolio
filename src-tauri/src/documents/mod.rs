@@ -323,6 +323,82 @@ pub(crate) fn collect_pdfs(
     Ok(())
 }
 
+/// Whether a file extension is an importable source (file-backed or text).
+pub(crate) fn is_importable_ext(ext: &str) -> bool {
+    matches!(ext, "pdf" | "md" | "markdown" | "txt" | "text")
+        || crate::office::office_content_type_for_ext(ext).is_some()
+}
+
+/// Knowledge-base pivot (Collections): recursively collect importable file paths
+/// under a directory (one-shot — no live scan binding). Depth-capped to avoid
+/// pathological trees; ignores dot/build dirs and symlinks.
+pub(crate) fn collect_import_files(
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    if depth > 12 {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            log::warn!("Skipping unreadable directory {}: {err}", dir.display());
+            return Ok(());
+        }
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if should_ignore_name(&name) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_import_files(&path, depth + 1, out)?;
+        } else if file_type.is_file() {
+            let importable = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| extension.to_ascii_lowercase())
+                .is_some_and(|extension| is_importable_ext(&extension));
+            if importable {
+                out.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// File the given documents into a collection (None = unfiled). No-op on empty.
+pub(crate) fn assign_collection(
+    database: &State<'_, AppDatabase>,
+    document_ids: &[String],
+    collection_id: Option<&str>,
+) -> Result<(), String> {
+    if document_ids.is_empty() {
+        return Ok(());
+    }
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let mut stmt = conn
+        .prepare("UPDATE documents SET collection_id = ?2, updated_at = unixepoch() WHERE id = ?1")
+        .map_err(|err| format!("Failed to prepare collection assignment: {err}"))?;
+    for id in document_ids {
+        stmt.execute(params![id, collection_id])
+            .map_err(|err| format!("Failed to assign collection: {err}"))?;
+    }
+    Ok(())
+}
+
 pub(crate) fn build_document_for_path(
     path: &Path,
     workspace_root_id: &str,
@@ -545,7 +621,7 @@ pub(crate) fn stable_path_id(prefix: &str, path: &Path) -> String {
 
 /// Stable id of the virtual Knowledge Base root that owns authored sources.
 pub(crate) const KNOWLEDGE_ROOT_ID: &str = "root-knowledge-base";
-const KNOWLEDGE_ROOT_PATH: &str = "lumenfolio://knowledge";
+pub(crate) const KNOWLEDGE_ROOT_PATH: &str = "lumenfolio://knowledge";
 const KNOWLEDGE_ROOT_NAME: &str = "Knowledge Base";
 
 /// Content types whose body is editable in the Markdown editor.
@@ -589,6 +665,7 @@ pub(crate) fn create_text_document(
     title: &str,
     body_md: &str,
     source_url: Option<&str>,
+    collection_id: Option<&str>,
 ) -> Result<String, String> {
     let conn = database
         .conn
@@ -608,9 +685,9 @@ pub(crate) fn create_text_document(
     conn.execute(
         "INSERT INTO documents
             (id, workspace_root_id, path, title, short_title, file_size, modified,
-             page_count, last_page, content_type, body_md, source_url,
+             page_count, last_page, content_type, body_md, source_url, collection_id,
              index_status, index_version, created_at, updated_at, last_opened_at)
-         VALUES (?1, ?2, ?3, ?4, ?4, ?5, unixepoch(), 0, 1, ?6, ?7, ?8,
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5, unixepoch(), 0, 1, ?6, ?7, ?8, ?9,
                  'pending', 0, unixepoch(), unixepoch(), unixepoch())",
         params![
             id,
@@ -621,6 +698,7 @@ pub(crate) fn create_text_document(
             content_type,
             body_md,
             source_url,
+            collection_id,
         ],
     )
     .map_err(|err| format!("Failed to create text document: {err}"))?;

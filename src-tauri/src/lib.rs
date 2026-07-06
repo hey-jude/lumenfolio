@@ -1120,12 +1120,17 @@ fn scan_workspace_pdfs(
 #[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct ImportWorkspacePathsArgs {
+    /// Logical collection to file the imports into (None = unfiled/inbox).
     #[serde(default)]
-    target_root_id: Option<String>,
+    target_collection_id: Option<String>,
     #[serde(default)]
     source_paths: Vec<String>,
 }
 
+/// Knowledge-base pivot (Collections): import sources into a logical collection.
+/// Files (and, recursively, a folder's contents) are registered by their real
+/// path — never copied, never bound to a live disk scan — and filed into the
+/// target collection. Returns the refreshed Knowledge Base doc pool.
 #[tauri::command]
 fn import_workspace_paths(
     args: ImportWorkspacePathsArgs,
@@ -1134,20 +1139,17 @@ fn import_workspace_paths(
     app: tauri::AppHandle,
 ) -> Result<Vec<WorkspaceRootSnapshot>, String> {
     let ImportWorkspacePathsArgs {
-        target_root_id,
+        target_collection_id,
         source_paths,
     } = args;
-
-    let target_root_id = target_root_id
+    let collection_id = target_collection_id
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    let mut pdf_files: Vec<PathBuf> = Vec::new();
-    // Knowledge-base pivot (P2): editable text imports (path, content_type).
-    let mut text_files: Vec<(PathBuf, &'static str)> = Vec::new();
-    let mut directories: Vec<PathBuf> = Vec::new();
+    // Gather every importable file: individual files directly, directories
+    // recursively (one-shot — no persistent scan/reconcile binding to disk).
+    let mut file_paths: Vec<PathBuf> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
-
     for raw in source_paths {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -1168,136 +1170,66 @@ fn import_workspace_paths(
             }
         };
         if metadata.is_dir() {
-            directories.push(canonical);
+            documents::collect_import_files(&canonical, 0, &mut file_paths)?;
         } else if metadata.is_file() {
-            let ext = canonical
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            match ext.as_str() {
-                // File-backed sources (indexed from disk, build_document_for_path
-                // sets content_type by extension): PDFs + Office formats.
-                "pdf" | "docx" | "xlsx" | "pptx" => pdf_files.push(canonical),
-                "md" | "markdown" => text_files.push((canonical, "markdown")),
-                "txt" | "text" => text_files.push((canonical, "text")),
-                _ => {}
-            }
+            file_paths.push(canonical);
+        }
+    }
+    // A file can arrive via both a directory walk and directly — dedup.
+    file_paths.sort();
+    file_paths.dedup();
+
+    let mut file_backed: Vec<PathBuf> = Vec::new();
+    let mut text_files: Vec<(PathBuf, &'static str)> = Vec::new();
+    for path in file_paths {
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        match ext.as_str() {
+            "pdf" | "docx" | "xlsx" | "pptx" => file_backed.push(path),
+            "md" | "markdown" => text_files.push((path, "markdown")),
+            "txt" | "text" => text_files.push((path, "text")),
+            _ => {}
         }
     }
 
-    let target_root_info = match target_root_id.as_deref() {
-        Some(root_id) => documents::lookup_workspace_root_path(&database, root_id)?
-            .map(|path| (root_id.to_string(), path)),
-        None => None,
-    };
+    let mut imported_ids: Vec<String> = Vec::new();
 
-    let mut snapshots: HashMap<String, WorkspaceRootSnapshot> = HashMap::new();
-    let mut snapshot_order: Vec<String> = Vec::new();
-
-    for dir in directories {
-        let workspace_root_id = documents::stable_path_id("root", &dir);
+    // File-backed sources register under the Knowledge storage root — their real
+    // path is preserved (for reading/preview), disk location no longer drives
+    // organization. Existing rows dedup by stable id.
+    if !file_backed.is_empty() {
+        let root_path = PathBuf::from(documents::KNOWLEDGE_ROOT_PATH);
         let mut docs = Vec::new();
-        documents::collect_pdfs(&dir, &workspace_root_id, &mut docs)?;
-        docs.sort_by(|left, right| {
-            left.short_title
-                .to_lowercase()
-                .cmp(&right.short_title.to_lowercase())
-        });
-        documents::persist_workspace_scan(&database, &workspace_root_id, &dir, &docs)?;
-        let snapshot_docs = documents::load_documents_for_root(&database, &workspace_root_id)?;
-        documents::upsert_registry_paths(&registry, &snapshot_docs)?;
-        let snapshot = WorkspaceRootSnapshot {
-            root: WorkspaceRoot {
-                id: workspace_root_id.clone(),
-                path: dir.to_string_lossy().to_string(),
-            },
-            documents: snapshot_docs,
-        };
-        if !snapshots.contains_key(&workspace_root_id) {
-            snapshot_order.push(workspace_root_id.clone());
+        for path in &file_backed {
+            match documents::build_document_for_path(path, documents::KNOWLEDGE_ROOT_ID) {
+                Ok(Some(doc)) => {
+                    imported_ids.push(doc.id.clone());
+                    docs.push(doc);
+                }
+                Ok(None) => {}
+                Err(err) => errors.push(format!("Cannot import {}: {err}", path.display())),
+            }
         }
-        snapshots.insert(workspace_root_id, snapshot);
-    }
-
-    let mut grouped_files: HashMap<String, (PathBuf, Vec<PathBuf>)> = HashMap::new();
-    let mut grouped_order: Vec<String> = Vec::new();
-
-    for source in pdf_files {
-        let (root_id, root_path, final_path) = match &target_root_info {
-            Some((root_id, root_path)) => {
-                let final_path = if source.starts_with(root_path) {
-                    source.clone()
-                } else {
-                    let file_name = source
-                        .file_name()
-                        .ok_or_else(|| format!("Invalid file name for {}", source.display()))?;
-                    let destination = documents::unique_destination_path(root_path, file_name);
-                    fs::copy(&source, &destination).map_err(|err| {
-                        format!(
-                            "Failed to copy {} into {}: {err}",
-                            source.display(),
-                            root_path.display()
-                        )
-                    })?;
-                    destination
-                        .canonicalize()
-                        .unwrap_or(destination)
-                };
-                (root_id.clone(), root_path.clone(), final_path)
+        if !docs.is_empty() {
+            documents::additive_upsert_documents(
+                &database,
+                documents::KNOWLEDGE_ROOT_ID,
+                &root_path,
+                &docs,
+            )?;
+            let snapshot_docs =
+                documents::load_documents_for_root(&database, documents::KNOWLEDGE_ROOT_ID)?;
+            documents::upsert_registry_paths(&registry, &snapshot_docs)?;
+            for doc in &docs {
+                let _ = document_index::enqueue_document_reindex(doc.id.clone(), app.clone());
             }
-            None => {
-                let parent = source.parent().ok_or_else(|| {
-                    format!("Cannot resolve parent folder for {}", source.display())
-                })?;
-                let root_path = parent.to_path_buf();
-                let root_id = documents::stable_path_id("root", &root_path);
-                (root_id, root_path, source.clone())
-            }
-        };
-
-        let entry = grouped_files
-            .entry(root_id.clone())
-            .or_insert_with(|| (root_path.clone(), Vec::new()));
-        entry.1.push(final_path);
-        if !grouped_order.contains(&root_id) {
-            grouped_order.push(root_id);
         }
     }
 
-    for root_id in grouped_order {
-        let Some((root_path, files)) = grouped_files.remove(&root_id) else {
-            continue;
-        };
-        let mut docs = Vec::new();
-        for file_path in &files {
-            if let Some(doc) = documents::build_document_for_path(file_path, &root_id)? {
-                docs.push(doc);
-            }
-        }
-        if docs.is_empty() {
-            continue;
-        }
-        documents::additive_upsert_documents(&database, &root_id, &root_path, &docs)?;
-        let snapshot_docs = documents::load_documents_for_root(&database, &root_id)?;
-        documents::upsert_registry_paths(&registry, &snapshot_docs)?;
-        let snapshot = WorkspaceRootSnapshot {
-            root: WorkspaceRoot {
-                id: root_id.clone(),
-                path: root_path.to_string_lossy().to_string(),
-            },
-            documents: snapshot_docs,
-        };
-        if !snapshots.contains_key(&root_id) {
-            snapshot_order.push(root_id.clone());
-        }
-        snapshots.insert(root_id, snapshot);
-    }
-
-    // Knowledge-base pivot (P2): editable text imports (.md / .txt) are snapshot
-    // into the virtual Knowledge Base root as editable sources — their content is
-    // copied into body_md so they re-chunk on edit, decoupled from the disk file.
-    let mut imported_text = 0usize;
+    // Text sources: content copied into body_md (editable, decoupled from file).
     for (path, content_type) in &text_files {
         let body_md = match fs::read_to_string(path) {
             Ok(contents) => contents,
@@ -1311,35 +1243,32 @@ fn import_workspace_paths(
             .and_then(|stem| stem.to_str())
             .unwrap_or("Untitled")
             .to_string();
-        match documents::create_text_document(&database, content_type, &title, &body_md, None) {
+        match documents::create_text_document(
+            &database,
+            content_type,
+            &title,
+            &body_md,
+            None,
+            collection_id.as_deref(),
+        ) {
             Ok(document_id) => {
-                let _ = document_index::enqueue_document_reindex(document_id, app.clone());
-                imported_text += 1;
+                let _ = document_index::enqueue_document_reindex(document_id.clone(), app.clone());
+                imported_ids.push(document_id);
             }
             Err(err) => errors.push(format!("Cannot import {}: {err}", path.display())),
         }
     }
-    if imported_text > 0 {
-        let snapshot = knowledge_root_snapshot(&database)?;
-        let root_id = documents::KNOWLEDGE_ROOT_ID.to_string();
-        if !snapshots.contains_key(&root_id) {
-            snapshot_order.push(root_id.clone());
-        }
-        snapshots.insert(root_id, snapshot);
-    }
 
-    if snapshots.is_empty() && !errors.is_empty() {
+    // File the newly-imported sources into the target collection.
+    documents::assign_collection(&database, &imported_ids, collection_id.as_deref())?;
+
+    if imported_ids.is_empty() && !errors.is_empty() {
         return Err(errors.join("; "));
     }
 
-    let mut result = Vec::with_capacity(snapshot_order.len());
-    for root_id in snapshot_order {
-        if let Some(snapshot) = snapshots.remove(&root_id) {
-            result.push(snapshot);
-        }
-    }
-    Ok(result)
+    Ok(vec![knowledge_root_snapshot(&database)?])
 }
+
 
 // ---------------------------------------------------------------------------
 // Knowledge-base pivot (P2): authored sources (notes / web clips / md imports).
@@ -1377,6 +1306,8 @@ struct CreateNoteSourceInput {
     title: String,
     #[serde(default)]
     body_md: String,
+    #[serde(default)]
+    collection_id: Option<String>,
 }
 
 #[tauri::command]
@@ -1385,8 +1316,19 @@ fn create_note_source(
     database: State<'_, AppDatabase>,
     app: tauri::AppHandle,
 ) -> Result<CreateSourceOutput, String> {
-    let document_id =
-        documents::create_text_document(&database, "note", &input.title, &input.body_md, None)?;
+    let collection_id = input
+        .collection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let document_id = documents::create_text_document(
+        &database,
+        "note",
+        &input.title,
+        &input.body_md,
+        None,
+        collection_id,
+    )?;
     // Index the new note (chunks → artifacts → graph) in the background so it
     // is immediately askable / linkable. Failure to enqueue is non-fatal —
     // selecting the note re-triggers indexing.
@@ -1456,6 +1398,8 @@ fn web_clip_title(extracted: &str, url: &str) -> String {
 #[serde(rename_all = "camelCase")]
 struct ClipWebPageInput {
     url: String,
+    #[serde(default)]
+    collection_id: Option<String>,
 }
 
 #[tauri::command]
@@ -1488,8 +1432,19 @@ fn clip_web_page(
     // Front-matter keeps the origin visible in the editor body too (and survives
     // export), beyond the structured source_url column.
     let body_md = format!("> [{title}]({url})\n\n{extracted}");
-    let document_id =
-        documents::create_text_document(&database, "web", &title, &body_md, Some(url))?;
+    let collection_id = input
+        .collection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let document_id = documents::create_text_document(
+        &database,
+        "web",
+        &title,
+        &body_md,
+        Some(url),
+        collection_id,
+    )?;
     let _ = document_index::enqueue_document_reindex(document_id.clone(), app);
     let snapshot = knowledge_root_snapshot(&database)?;
     Ok(CreateSourceOutput {
