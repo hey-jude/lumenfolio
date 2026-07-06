@@ -296,6 +296,8 @@ const documentDeleteError = ref('')
 const documentDeleteTarget = ref({ id: '', title: '', isNote: false })
 const workspaceDropActive = ref(false)
 const workspaceDropTargetRootId = ref('')
+// C-d: collection row (or '__unfiled__') an OS-file drag is hovering over.
+const workspaceDropTargetCollectionId = ref('')
 const lastWorkspaceDropAt = ref(0)
 const ignoreNextTauriFileDrop = ref(false)
 const providerTestStatus = ref('idle')
@@ -2152,6 +2154,18 @@ async function handleMoveDocToCollection({ docId, collectionId } = {}) {
     })
     const doc = allDocs.value.find((item) => item.id === docId)
     if (doc) doc.collectionId = target
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
+// C-d: nest / reparent a collection by dragging it onto another (or to top level
+// when dropped on Unfiled). The backend rejects cycles.
+async function handleMoveCollection({ id, parentId } = {}) {
+  if (!id || id === parentId) return
+  try {
+    await invoke('move_collection', { input: { id, parentId: parentId ?? null } })
+    await loadCollections()
   } catch (err) {
     workspaceError.value = err?.message || String(err)
   }
@@ -4231,6 +4245,7 @@ function setWorkspaceDropActive(nextState) {
   workspaceDropActive.value = Boolean(nextState)
   if (!workspaceDropActive.value) {
     workspaceDropTargetRootId.value = ''
+    workspaceDropTargetCollectionId.value = ''
   }
 }
 
@@ -4266,33 +4281,31 @@ function pointInsideRect(point, rect) {
   )
 }
 
-function pickTargetRootIdForPoint(point) {
+// Knowledge-base pivot (C-d): map an OS-file drag point to the collection row
+// under it, so dropping files onto a collection imports them into it. Returns
+// '__unfiled__' for the Unfiled row, '' when over no row.
+function pickTargetCollectionIdForPoint(point) {
   if (!point || typeof document === 'undefined') return ''
-  const groups = Array.from(document.querySelectorAll('.folder-group[data-workspace-root-id]'))
+  const rows = Array.from(document.querySelectorAll('.collection-row[data-collection-id]'))
     .map((el) => ({
-      id: el.getAttribute('data-workspace-root-id') || '',
+      id: el.getAttribute('data-collection-id') || '',
       rect: el.getBoundingClientRect(),
     }))
     .filter((entry) => entry.id && entry.rect && entry.rect.height > 0)
-  if (!groups.length) return ''
-
-  for (const group of groups) {
-    if (
-      point.y >= group.rect.top
-      && point.y <= group.rect.bottom
-    ) {
-      return group.id
+  if (!rows.length) return ''
+  for (const row of rows) {
+    if (point.y >= row.rect.top && point.y <= row.rect.bottom) {
+      return row.id
     }
   }
-
-  let nearest = groups[0]
+  let nearest = rows[0]
   let nearestDistance = Number.POSITIVE_INFINITY
-  for (const group of groups) {
-    const center = group.rect.top + group.rect.height / 2
+  for (const row of rows) {
+    const center = row.rect.top + row.rect.height / 2
     const distance = Math.abs(center - point.y)
     if (distance < nearestDistance) {
       nearestDistance = distance
-      nearest = group
+      nearest = row
     }
   }
   return nearest?.id || ''
@@ -4304,9 +4317,20 @@ function applyTauriDragPosition(payload) {
   const insideSidebar = pointInsideRect(point, sidebarRect)
   setWorkspaceDropActive(insideSidebar)
   if (insideSidebar) {
-    setWorkspaceDropTargetRootId(pickTargetRootIdForPoint(point))
+    workspaceDropTargetCollectionId.value = pickTargetCollectionIdForPoint(point)
+  } else {
+    workspaceDropTargetCollectionId.value = ''
   }
   return { point, insideSidebar }
+}
+
+// Resolve the hovered collection row to an import target: '__unfiled__' → null
+// (inbox), '' (over no row) → the currently-selected collection.
+function resolveDropCollectionId() {
+  const hovered = workspaceDropTargetCollectionId.value
+  if (hovered === '__unfiled__') return null
+  if (hovered) return hovered
+  return selectedCollectionId.value ?? null
 }
 
 async function addWorkspaceRootsFromDrop(rawPaths, options = {}) {
@@ -4351,9 +4375,9 @@ async function addWorkspaceRootsFromDrop(rawPaths, options = {}) {
 }
 
 async function handleWorkspaceDrop(rawPaths = []) {
-  const targetRootId = workspaceDropTargetRootId.value
+  const targetCollectionId = resolveDropCollectionId()
   setWorkspaceDropActive(false)
-  await addWorkspaceRootsFromDrop(rawPaths, { targetRootId })
+  await addWorkspaceRootsFromDrop(rawPaths, { targetCollectionId })
 }
 
 // "+" on a folder header: a discoverable alternative to drag-and-drop. Opens a
@@ -4419,8 +4443,9 @@ async function handleTauriWorkspaceDrop(payload = null, options = {}) {
     ignoreNextTauriFileDrop.value = false
   }
   lastWorkspaceDropAt.value = now
-  const targetRootId = options.targetRootId || ''
-  await addWorkspaceRootsFromDrop(paths, { targetRootId })
+  await addWorkspaceRootsFromDrop(paths, {
+    targetCollectionId: options.targetCollectionId ?? null,
+  })
 }
 
 async function chooseWorkspace() {
@@ -5161,10 +5186,12 @@ onMounted(() => {
   listen('tauri://drag-drop', (event) => {
     const payload = event.payload
     const { insideSidebar } = applyTauriDragPosition(payload)
-    const targetRootId = workspaceDropTargetRootId.value
+    // Import into the collection under the cursor (falls back to the selected
+    // collection, or the inbox when dropped on Unfiled).
+    const targetCollectionId = resolveDropCollectionId()
     setWorkspaceDropActive(false)
     if (!insideSidebar) return
-    void handleTauriWorkspaceDrop(payload, { targetRootId })
+    void handleTauriWorkspaceDrop(payload, { targetCollectionId })
   }).then((unlisten) => {
     dragDropUnlisten = unlisten
   }).catch((err) => {
@@ -5204,6 +5231,7 @@ onMounted(() => {
       :ui="ui"
       :drop-active="workspaceDropActive"
       :drop-target-root-id="workspaceDropTargetRootId"
+      :drop-target-collection-id="workspaceDropTargetCollectionId"
       :trending-active="showTrending"
       :trending-enabled="trendingEnabled"
       :graph-active="showGraph"
@@ -5231,6 +5259,7 @@ onMounted(() => {
       @delete-collection="handleDeleteCollection"
       @select-collection="handleSelectCollection"
       @move-doc-to-collection="handleMoveDocToCollection"
+      @move-collection="handleMoveCollection"
     />
 
     <button

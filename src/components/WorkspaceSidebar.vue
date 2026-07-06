@@ -63,6 +63,11 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  // Collection id (or '__unfiled__') the OS-file drag is currently hovering.
+  dropTargetCollectionId: {
+    type: String,
+    default: '',
+  },
   trendingActive: {
     type: Boolean,
     default: false,
@@ -105,7 +110,50 @@ const emit = defineEmits([
   'delete-collection',
   'select-collection',
   'move-doc-to-collection',
+  'move-collection',
 ])
+
+// C-d: which collection row an internal (doc/collection) drag is hovering.
+const dragOverCollectionId = ref(null)
+
+function handleCollectionDragStart(event, collection) {
+  if (!event?.dataTransfer) return
+  event.dataTransfer.setData('application/x-lumenfolio-collection-id', collection.id)
+  event.dataTransfer.effectAllowed = 'move'
+}
+
+function handleCollectionDragOver(event, collectionId) {
+  const dt = event.dataTransfer
+  if (!dt) return
+  const draggingDoc = dt.types.includes('application/x-lumenfolio-doc-id')
+  const draggingCollection = dt.types.includes('application/x-lumenfolio-collection-id')
+  if (!draggingDoc && !draggingCollection) return
+  event.preventDefault()
+  dt.dropEffect = 'move'
+  dragOverCollectionId.value = collectionId
+}
+
+function handleCollectionDragLeave(collectionId) {
+  if (dragOverCollectionId.value === collectionId) {
+    dragOverCollectionId.value = null
+  }
+}
+
+function handleCollectionDrop(event, collectionId) {
+  const dt = event.dataTransfer
+  dragOverCollectionId.value = null
+  if (!dt) return
+  const docId = dt.getData('application/x-lumenfolio-doc-id')
+  const movedCollectionId = dt.getData('application/x-lumenfolio-collection-id')
+  const target = collectionId === '__unfiled__' ? null : collectionId
+  if (docId) {
+    event.preventDefault()
+    emit('move-doc-to-collection', { docId, collectionId: target })
+  } else if (movedCollectionId && movedCollectionId !== collectionId) {
+    event.preventDefault()
+    emit('move-collection', { id: movedCollectionId, parentId: target })
+  }
+}
 
 const normalizedFilter = computed(() => String(props.filter || '').trim().toLowerCase())
 const hasWorkspace = computed(() => props.roots.some((root) => Boolean(String(root.path || '').trim())))
@@ -756,7 +804,12 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
           <div
             v-if="row.type === 'collection' && row.unfiled"
             class="collection-row unfiled-row"
+            :class="{ 'drag-over': dragOverCollectionId === '__unfiled__' || dropTargetCollectionId === '__unfiled__' }"
             :style="rowIndentStyle(row.depth)"
+            data-collection-id="__unfiled__"
+            @dragover="handleCollectionDragOver($event, '__unfiled__')"
+            @dragleave="handleCollectionDragLeave('__unfiled__')"
+            @drop="handleCollectionDrop($event, '__unfiled__')"
           >
             <button
               type="button"
@@ -772,8 +825,17 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
           <div
             v-else-if="row.type === 'collection'"
             class="collection-row"
-            :class="{ active: row.collection.id === selectedCollectionId }"
+            :class="{
+              active: row.collection.id === selectedCollectionId,
+              'drag-over': dragOverCollectionId === row.collection.id || dropTargetCollectionId === row.collection.id,
+            }"
             :style="rowIndentStyle(row.depth)"
+            :data-collection-id="row.collection.id"
+            :draggable="renamingCollectionId === row.collection.id ? 'false' : 'true'"
+            @dragstart="handleCollectionDragStart($event, row.collection)"
+            @dragover="handleCollectionDragOver($event, row.collection.id)"
+            @dragleave="handleCollectionDragLeave(row.collection.id)"
+            @drop="handleCollectionDrop($event, row.collection.id)"
           >
             <button
               type="button"
@@ -1538,6 +1600,13 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
 .collection-row.active {
   background: rgba(106, 169, 255, 0.12);
   border-color: rgba(106, 169, 255, 0.25);
+  color: var(--text-primary);
+}
+
+/* C-d: highlight a collection as a drop target (doc move / nest / OS file). */
+.collection-row.drag-over {
+  background: rgba(106, 169, 255, 0.2);
+  border-color: rgba(106, 169, 255, 0.55);
   color: var(--text-primary);
 }
 

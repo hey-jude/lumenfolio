@@ -136,8 +136,9 @@
 - **C-a 数据模型 + 迁移 + CRUD** ✅:`collections` 表(id/parent_id/name/position, 嵌套 ON DELETE CASCADE);`documents.collection_id`(可空=未归类);一次性迁移(app_settings 标志防复活);命令 load/create/rename/delete_collection、move_document_to_collection、move_collection(删=子树降级到未归类不删文件;移动防环)。
 - **C-b 导入改造** ✅:`import_workspace_paths` 收 `targetCollectionId`;文件夹递归一次性登记(不 reconcile/不实时绑定),文件直接登记;file-backed 存 KNOWLEDGE 存储根(保留真实 path 供读/预览),文本入 body_md;全部 `assign_collection` 归入目标集合。note/clip 也带 collectionId。
 - **C-c 侧栏改为集合树** ✅:`WorkspaceSidebar` 渲染扁平化嵌套集合树(替代磁盘根)+ 未归类节点;新建/重命名(内联)/删除(降级未归类)集合;导入/新建笔记/剪藏归入选中集合;`createLocalDocument` 带 collectionId;折叠态轨道保持不变。
-- **C-d 拖拽** ⬜:文档在集合间拖动;OS 文件拖入集合即导入;集合拖入集合嵌套/重排。
-- **风险:** 中。结构性重构;`workspace_roots` 降级为隐藏存储层,`scan_workspace_pdfs` 变遗留。
+- **C-d 拖拽** ✅:文档在集合间拖动(HTML5,doc→collection move);集合拖入集合嵌套/重排(move_collection,后端防环);OS 文件拖到某集合行即导入到该集合(Tauri 拖放点命中 `.collection-row[data-collection-id]` → targetCollectionId;拖到未归类=inbox,拖到空处=当前选中集合);拖放高亮。
+- **风险:** 中(已落地)。结构性重构;`workspace_roots` 降级为隐藏存储层,`scan_workspace_pdfs`/`folder-group` 点命中等成遗留(保留不清理,聚焦 diff)。
+- **后续(非阻塞)**:概念/搜索独立面板;虚拟集合(按类型/最近/标签);集合排序持久化;清理遗留 root 代码路径。
 
 ### P4 — 信息架构收尾
 
