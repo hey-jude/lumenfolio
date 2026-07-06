@@ -108,8 +108,11 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         -- Knowledge-base pivot (Collections): user-authored logical folders,
         -- nestable via parent_id, fully decoupled from disk directories. A
         -- source's membership lives on documents.collection_id (single home).
-        -- Deleting a collection cascades to its subcollections; affected docs
-        -- drop to unfiled (documents FK is ON DELETE SET NULL) — never deleted.
+        -- Deleting a collection unfiles the whole subtree explicitly in
+        -- delete_collection (documents.collection_id has NO FK — the column is
+        -- added by ALTER on upgrade, where SQLite can't add one — so the code,
+        -- not the schema, drops affected docs to unfiled; files are never
+        -- deleted). The frontend also treats any dangling collection_id as unfiled.
         CREATE TABLE IF NOT EXISTS collections (
           id TEXT PRIMARY KEY,
           parent_id TEXT,

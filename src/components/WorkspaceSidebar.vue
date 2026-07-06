@@ -139,6 +139,24 @@ function handleCollectionDragLeave(collectionId) {
   }
 }
 
+// Whether `candidateId` is `ancestorId` itself or inside its subtree — used to
+// reject dropping a collection into its own descendant before hitting the
+// backend (which would reject the cycle with a raw error).
+function isCollectionInSubtree(candidateId, ancestorId) {
+  if (candidateId === ancestorId) return true
+  const childrenOf = collectionChildren.value
+  const seen = new Set()
+  const stack = [...(childrenOf.get(ancestorId) || [])]
+  while (stack.length) {
+    const node = stack.pop()
+    if (!node || seen.has(node.id)) continue
+    seen.add(node.id)
+    if (node.id === candidateId) return true
+    stack.push(...(childrenOf.get(node.id) || []))
+  }
+  return false
+}
+
 function handleCollectionDrop(event, collectionId) {
   const dt = event.dataTransfer
   dragOverCollectionId.value = null
@@ -150,6 +168,8 @@ function handleCollectionDrop(event, collectionId) {
     event.preventDefault()
     emit('move-doc-to-collection', { docId, collectionId: target })
   } else if (movedCollectionId && movedCollectionId !== collectionId) {
+    // Reject self / descendant targets here so the backend never has to.
+    if (target !== null && isCollectionInSubtree(collectionId, movedCollectionId)) return
     event.preventDefault()
     emit('move-collection', { id: movedCollectionId, parentId: target })
   }
@@ -289,7 +309,9 @@ function handleDrop(event) {
 // dedicated MIME so the composer can tell it apart from an image-file drop, and
 // so it never collides with the sidebar's own file-drop (which carries files).
 function handleDocDragStart(event, doc) {
-  if (!doc?.chatReady || !event?.dataTransfer) return
+  // Any source can be dragged to refile it — even one still indexing (readiness
+  // gates asking, not organizing).
+  if (!doc?.id || !event?.dataTransfer) return
   event.dataTransfer.setData('application/x-lumenfolio-doc-id', doc.id)
   event.dataTransfer.effectAllowed = 'move'
 }
@@ -488,20 +510,37 @@ function toggleCollectionExpanded(id) {
 const treeRows = computed(() => {
   const rows = []
   const childrenOf = collectionChildren.value
+  // Guards against a hypothetical parent-id cycle and lets us surface orphans.
+  const seen = new Set()
+
+  const pushCollection = (collection, depth) => {
+    seen.add(collection.id)
+    rows.push({ type: 'collection', depth, collection })
+    if (isCollectionExpanded(collection.id)) {
+      walk(collection.id, depth + 1)
+      for (const doc of visibleDocs(docsByCollection.value.get(collection.id) || [])) {
+        rows.push({ type: 'doc', depth: depth + 1, doc })
+      }
+    }
+  }
 
   const walk = (parentId, depth) => {
     const children = childrenOf.get(parentId ?? null) || []
     for (const collection of children) {
-      rows.push({ type: 'collection', depth, collection })
-      if (isCollectionExpanded(collection.id)) {
-        walk(collection.id, depth + 1)
-        for (const doc of visibleDocs(docsByCollection.value.get(collection.id) || [])) {
-          rows.push({ type: 'doc', depth: depth + 1, doc })
-        }
-      }
+      if (seen.has(collection.id)) continue
+      pushCollection(collection, depth)
     }
   }
   walk(null, 0)
+
+  // Defensive: a collection unreachable from the root (dangling parent id, or a
+  // cycle) would otherwise never render — and its documents, bucketed under it
+  // by docsByCollection, would vanish. Surface any such orphan at the top level.
+  for (const collection of props.collections || []) {
+    if (!seen.has(collection.id)) {
+      pushCollection(collection, 0)
+    }
+  }
 
   // Unfiled node — always present, even with no collections yet.
   rows.push({ type: 'collection', depth: 0, unfiled: true })
@@ -898,7 +937,7 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
             :class="{ active: row.doc.id === selectedDocId && !trendingActive }"
             :style="rowIndentStyle(row.depth)"
             :title="compactDocTitle(row.doc)"
-            :draggable="row.doc.chatReady ? 'true' : 'false'"
+            draggable="true"
             @click="emit('select-doc', row.doc.id)"
             @dragstart="handleDocDragStart($event, row.doc)"
           >

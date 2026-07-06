@@ -701,9 +701,24 @@ function chatStreamDebug(label, payload = {}) {
   console.debug(`[chat-stream] ${label}`, payload)
 }
 
-const allDocs = computed(() => workspace.roots.flatMap((workspaceRoot) => (
-  workspaceRoot.folders.flatMap((folder) => folder.docs)
-)))
+// Dedupe by id: a source can transiently appear under more than one storage
+// root (legacy disk root + the Knowledge root after a re-import), but it is one
+// document — the collection tree and search must not double-count it.
+const allDocs = computed(() => {
+  const seen = new Set()
+  const out = []
+  for (const workspaceRoot of workspace.roots) {
+    for (const folder of workspaceRoot.folders) {
+      for (const doc of folder.docs) {
+        if (doc && doc.id && !seen.has(doc.id)) {
+          seen.add(doc.id)
+          out.push(doc)
+        }
+      }
+    }
+  }
+  return out
+})
 // Locally-installed Codex / Claude as virtual chat models (no DB row — computed
 // from detection). The synthetic provider id `local-agent-<kind>` is recognized
 // by the backend dispatch; modelKey is a placeholder.
@@ -2131,10 +2146,16 @@ async function handleDeleteCollection(id) {
   if (!id) return
   try {
     await invoke('delete_collection', { id })
-    // Deleting a collection unfiles its documents (collection_id → null) on the
-    // backend; reload the doc pool so the tree reflects the new unfiled state.
-    await loadLastWorkspace()
+    // The backend unfiled the whole deleted subtree (collection_id → null).
+    // Refresh the collection list, then reconcile local docs in place — cheaper
+    // and less disruptive than a full workspace reload (which would reset the
+    // open tab / selection / chat). Any doc still pointing at a now-gone
+    // collection drops to unfiled.
     await loadCollections()
+    const known = new Set(collections.value.map((collection) => collection.id))
+    for (const doc of allDocs.value) {
+      if (doc.collectionId && !known.has(doc.collectionId)) doc.collectionId = null
+    }
     if (selectedCollectionId.value === id) selectedCollectionId.value = null
   } catch (err) {
     workspaceError.value = err?.message || String(err)
@@ -4414,7 +4435,9 @@ async function addPdfsToRoot(rootId) {
     workspaceStatus.value = 'idle'
   }
   if (Array.isArray(paths) && paths.length) {
-    await addWorkspaceRootsFromDrop(paths, { targetRootId: rootId })
+    // Files import into the active collection (the legacy per-root target no
+    // longer exists — organization is by collection now).
+    await addWorkspaceRootsFromDrop(paths)
   }
 }
 
@@ -4449,19 +4472,23 @@ async function handleTauriWorkspaceDrop(payload = null, options = {}) {
 }
 
 async function chooseWorkspace() {
+  if (workspaceStatus.value === 'scanning' || workspaceStatus.value === 'choosing') return
   workspaceStatus.value = 'choosing'
   workspaceError.value = ''
+  let folder = null
   try {
-    const folder = await invoke('choose_workspace')
-    if (!folder) {
-      workspaceStatus.value = 'idle'
-      return
-    }
-    await scanWorkspace(folder, { mode: 'add' })
+    folder = await invoke('choose_workspace')
   } catch (err) {
     workspaceStatus.value = 'failed'
     workspaceError.value = err?.message || String(err)
+    return
+  } finally {
+    workspaceStatus.value = 'idle'
   }
+  if (!folder) return
+  // Collections model: import the folder's supported files ONE-SHOT into the
+  // active collection (no live disk-scan root, no reconcile binding).
+  await addWorkspaceRootsFromDrop([folder])
 }
 
 async function rescanWorkspace() {

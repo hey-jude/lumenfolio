@@ -376,12 +376,18 @@ pub(crate) fn collect_import_files(
     Ok(())
 }
 
-/// File the given documents into a collection (None = unfiled). No-op on empty.
+/// File the given documents into a collection. Only an explicit target moves a
+/// source: a `None` target is a no-op — re-importing an already-filed source
+/// must NOT unfile it, and brand-new sources already default to unfiled. A
+/// stale/deleted target is ignored rather than orphaning docs into a ghost id.
 pub(crate) fn assign_collection(
     database: &State<'_, AppDatabase>,
     document_ids: &[String],
     collection_id: Option<&str>,
 ) -> Result<(), String> {
+    let Some(target) = collection_id else {
+        return Ok(());
+    };
     if document_ids.is_empty() {
         return Ok(());
     }
@@ -389,11 +395,21 @@ pub(crate) fn assign_collection(
         .conn
         .lock()
         .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM collections WHERE id = ?1",
+            params![target],
+            |row| row.get(0),
+        )
+        .map_err(|err| format!("Failed to check target collection: {err}"))?;
+    if exists == 0 {
+        return Ok(());
+    }
     let mut stmt = conn
         .prepare("UPDATE documents SET collection_id = ?2, updated_at = unixepoch() WHERE id = ?1")
         .map_err(|err| format!("Failed to prepare collection assignment: {err}"))?;
     for id in document_ids {
-        stmt.execute(params![id, collection_id])
+        stmt.execute(params![id, target])
             .map_err(|err| format!("Failed to assign collection: {err}"))?;
     }
     Ok(())
