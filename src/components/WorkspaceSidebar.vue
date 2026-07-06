@@ -111,6 +111,7 @@ const emit = defineEmits([
   'select-collection',
   'move-doc-to-collection',
   'move-collection',
+  'clear-unfiled',
 ])
 
 // C-d: which collection row an internal (doc/collection) drag is hovering.
@@ -638,6 +639,26 @@ function cancelDeleteCollection(event = null) {
   confirmDeleteId.value = null
 }
 
+// One-click empty of the Unfiled inbox (two-step confirm; non-destructive to the
+// files on disk — only removes the sources from the knowledge base).
+const confirmClearUnfiled = ref(false)
+
+function requestClearUnfiled(event = null) {
+  if (event) event.stopPropagation()
+  confirmClearUnfiled.value = true
+}
+
+function confirmClearUnfiledAction(event = null) {
+  if (event) event.stopPropagation()
+  confirmClearUnfiled.value = false
+  emit('clear-unfiled')
+}
+
+function cancelClearUnfiled(event = null) {
+  if (event) event.stopPropagation()
+  confirmClearUnfiled.value = false
+}
+
 // Obsidian-style right-click menu. `kind`: 'blank' (empty tree area → top level)
 // or 'collection' (a folder row → scoped to it).
 const contextMenu = reactive({ open: false, x: 0, y: 0, kind: 'blank', collection: null })
@@ -901,6 +922,31 @@ onBeforeUnmount(() => {
             >{{ isCollectionExpanded('__unfiled__') ? '▾' : '▸' }}</button>
             <span class="collection-name">{{ ui.unfiled || 'Unfiled' }}</span>
             <span class="collection-count">{{ collectionDocCount('__unfiled__') }}</span>
+            <span v-if="confirmClearUnfiled" class="collection-actions collection-confirm">
+              <button
+                type="button"
+                class="collection-action-btn collection-confirm-yes"
+                :title="ui.clearUnfiledConfirm || 'Delete all unfiled sources? Files on disk are kept.'"
+                :aria-label="ui.clearUnfiled || 'Clear Unfiled'"
+                @click.stop="confirmClearUnfiledAction"
+              >✓</button>
+              <button
+                type="button"
+                class="collection-action-btn"
+                :title="ui.cancel || 'Cancel'"
+                :aria-label="ui.cancel || 'Cancel'"
+                @click.stop="cancelClearUnfiled"
+              >✗</button>
+            </span>
+            <span v-else class="collection-actions">
+              <button
+                type="button"
+                class="collection-action-btn collection-delete-btn"
+                :title="ui.clearUnfiled || 'Clear Unfiled'"
+                :aria-label="ui.clearUnfiled || 'Clear Unfiled'"
+                @click.stop="requestClearUnfiled"
+              >🗑</button>
+            </span>
           </div>
 
           <!-- Collection node -->

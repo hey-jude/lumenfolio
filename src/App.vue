@@ -2166,6 +2166,33 @@ function handleSelectCollection(id) {
   selectedCollectionId.value = id
 }
 
+// Empty the Unfiled inbox: delete every source not in a (still-existing)
+// collection. Non-destructive to the files on disk — delete_document only drops
+// the knowledge-base record. Reuses the single-doc delete path per source.
+async function handleClearUnfiled() {
+  const known = new Set(collections.value.map((collection) => collection.id))
+  const unfiled = allDocs.value.filter(
+    (doc) => doc && doc.id && (!doc.collectionId || !known.has(doc.collectionId)),
+  )
+  if (!unfiled.length) return
+  workspaceError.value = ''
+  for (const doc of unfiled) {
+    try {
+      await invoke('delete_document', { documentId: doc.id })
+      removeDocFromWorkspaceState(doc.id)
+      openTabs.value = openTabs.value.filter((tabId) => tabId !== doc.id)
+      precipitationQueued.delete(doc.id)
+      visualIndexRuns.delete(doc.id)
+    } catch (err) {
+      workspaceError.value = err?.message || String(err)
+    }
+  }
+  if (!allDocs.value.some((doc) => doc.id === selectedDocId.value)) {
+    selectedDocId.value = allDocs.value[0]?.id || ''
+    if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
+  }
+}
+
 async function handleMoveDocToCollection({ docId, collectionId } = {}) {
   if (!docId) return
   const target = collectionId ?? null
@@ -5287,6 +5314,7 @@ onMounted(() => {
       @select-collection="handleSelectCollection"
       @move-doc-to-collection="handleMoveDocToCollection"
       @move-collection="handleMoveCollection"
+      @clear-unfiled="handleClearUnfiled"
     />
 
     <button
