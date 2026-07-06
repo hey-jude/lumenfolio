@@ -89,7 +89,8 @@ pub(crate) fn load_documents_for_root_conn(
                     COALESCE(vij.status, 'pending') AS visual_index_status,
                     COALESCE(vij.version, 0) AS visual_index_version,
                     COALESCE(vij.error, '') AS visual_index_error,
-                    documents.content_type
+                    documents.content_type,
+                    documents.collection_id
 	             FROM documents
 	             LEFT JOIN document_index_jobs vij
 	               ON vij.document_id = documents.id
@@ -119,6 +120,7 @@ pub(crate) fn load_documents_for_root_conn(
                 visual_index_version: row.get(13)?,
                 visual_index_error: row.get(14)?,
                 content_type: row.get(15)?,
+                collection_id: row.get(16)?,
             })
         })
         .map_err(|err| format!("Failed to load documents: {err}"))?
@@ -371,6 +373,7 @@ pub(crate) fn build_document_for_path(
         short_title: title.clone(),
         title,
         content_type: content_type.to_string(),
+        collection_id: None,
         path: canonical_path.to_string_lossy().to_string(),
         size: metadata.len(),
         modified: metadata
@@ -734,6 +737,7 @@ mod tests {
               page_count INTEGER NOT NULL DEFAULT 0,
               last_page INTEGER NOT NULL DEFAULT 1,
               content_type TEXT NOT NULL DEFAULT 'pdf',
+              collection_id TEXT,
               index_status TEXT NOT NULL DEFAULT 'pending',
               index_version INTEGER NOT NULL DEFAULT 0
             );

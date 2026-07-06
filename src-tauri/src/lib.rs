@@ -11,6 +11,7 @@ use std::{
 use tauri::{Emitter, Manager, State};
 
 mod agent_judge;
+mod collections;
 pub mod debug_probe;
 mod diagnostics;
 mod document_index;
@@ -80,6 +81,8 @@ struct PdfDocument {
     path: String,
     /// Source kind: 'pdf' today; the KB pivot adds 'docx'|'web'|'note'|… later.
     content_type: String,
+    /// Logical collection membership (None = unfiled). Decoupled from disk.
+    collection_id: Option<String>,
     size: u64,
     modified: u64,
     page_count: u32,
@@ -5769,6 +5772,12 @@ pub fn run() {
             load_note_source,
             load_note_links,
             clip_web_page,
+            collections::load_collections,
+            collections::create_collection,
+            collections::rename_collection,
+            collections::delete_collection,
+            collections::move_document_to_collection,
+            collections::move_collection,
             trending::fetch_trending_papers,
             trending::add_trending_paper,
             runtime::precipitation::enqueue_document_knowledge,

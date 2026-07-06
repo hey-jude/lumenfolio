@@ -105,6 +105,23 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           last_opened_at INTEGER NOT NULL
         );
 
+        -- Knowledge-base pivot (Collections): user-authored logical folders,
+        -- nestable via parent_id, fully decoupled from disk directories. A
+        -- source's membership lives on documents.collection_id (single home).
+        -- Deleting a collection cascades to its subcollections; affected docs
+        -- drop to unfiled (documents FK is ON DELETE SET NULL) — never deleted.
+        CREATE TABLE IF NOT EXISTS collections (
+          id TEXT PRIMARY KEY,
+          parent_id TEXT,
+          name TEXT NOT NULL,
+          position INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY(parent_id) REFERENCES collections(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_collections_parent ON collections(parent_id);
+
         CREATE TABLE IF NOT EXISTS documents (
           id TEXT PRIMARY KEY,
           workspace_root_id TEXT NOT NULL,
@@ -126,6 +143,9 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           body_md TEXT,
           -- Origin URL for web clips (content_type='web'); NULL otherwise.
           source_url TEXT,
+          -- Knowledge-base pivot (Collections): logical home, decoupled from disk.
+          -- NULL = unfiled (inbox). workspace_root_id remains the storage origin.
+          collection_id TEXT,
           index_status TEXT NOT NULL DEFAULT 'pending',
           index_version INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
@@ -663,6 +683,13 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         "source_url",
         "ALTER TABLE documents ADD COLUMN source_url TEXT",
     )?;
+    // Knowledge-base pivot (Collections): logical folder membership (NULL = unfiled).
+    ensure_column(
+        conn,
+        "documents",
+        "collection_id",
+        "ALTER TABLE documents ADD COLUMN collection_id TEXT",
+    )?;
     // Recognized text inside figure/chart/image crops (OCR). The crop image
     // itself (image_path) is always preserved as the primary evidence; this
     // only ADDS searchable text alongside it.
@@ -808,6 +835,98 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|err| format!("Failed to create visual evidence indexes: {err}"))?;
 
+    migrate_workspace_roots_to_collections(conn)?;
+
+    Ok(())
+}
+
+/// Knowledge-base pivot (Collections): one-time seed of the logical folder tree
+/// from existing disk-scanned workspace roots. Each root that owns documents
+/// becomes a same-named top-level collection and its docs are filed into it, so
+/// the switch from "roots = disk folders" to "collections" preserves the user's
+/// current organization. Gated by an app_settings flag (runs exactly once) so a
+/// collection the user later deletes doesn't resurrect on the next launch.
+fn migrate_workspace_roots_to_collections(conn: &Connection) -> Result<(), String> {
+    let already: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM app_settings WHERE key = 'collections_migrated'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|err| format!("Failed to check collections migration flag: {err}"))?;
+    if already > 0 {
+        return Ok(());
+    }
+    // A real database always has documents.workspace_root_id; only minimal legacy
+    // fixtures (in other migration tests) lack it. Skip gracefully there.
+    if !table_columns(conn, "documents")?
+        .iter()
+        .any(|column| column == "workspace_root_id")
+    {
+        conn.execute(
+            "INSERT INTO app_settings (key, value, updated_at)
+             VALUES ('collections_migrated', '1', unixepoch())
+             ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = unixepoch()",
+            [],
+        )
+        .map_err(|err| format!("Failed to set collections migration flag: {err}"))?;
+        return Ok(());
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT wr.id, wr.name, wr.path
+             FROM workspace_roots wr
+             WHERE wr.id != 'root-knowledge-base'
+               AND EXISTS (SELECT 1 FROM documents d WHERE d.workspace_root_id = wr.id)",
+        )
+        .map_err(|err| format!("Failed to read workspace roots for migration: {err}"))?;
+    let roots = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|err| format!("Failed to load workspace roots for migration: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to collect workspace roots for migration: {err}"))?;
+    drop(stmt);
+
+    for (root_id, name, path) in roots {
+        let collection_id = format!("col-{root_id}");
+        let display = if name.trim().is_empty() {
+            path.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .find(|part| !part.is_empty())
+                .unwrap_or("Imported")
+                .to_string()
+        } else {
+            name
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO collections
+                (id, parent_id, name, position, created_at, updated_at)
+             VALUES (?1, NULL, ?2, 0, unixepoch(), unixepoch())",
+            rusqlite::params![collection_id, display],
+        )
+        .map_err(|err| format!("Failed to create migrated collection: {err}"))?;
+        conn.execute(
+            "UPDATE documents SET collection_id = ?1
+             WHERE workspace_root_id = ?2 AND collection_id IS NULL",
+            rusqlite::params![collection_id, root_id],
+        )
+        .map_err(|err| format!("Failed to file migrated documents: {err}"))?;
+    }
+
+    conn.execute(
+        "INSERT INTO app_settings (key, value, updated_at)
+         VALUES ('collections_migrated', '1', unixepoch())
+         ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = unixepoch()",
+        [],
+    )
+    .map_err(|err| format!("Failed to set collections migration flag: {err}"))?;
     Ok(())
 }
 
@@ -1498,5 +1617,60 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM chat_sessions", [], |row| row.get(0))
             .expect("session count again");
         assert_eq!(session_count_again, 2, "migration is idempotent");
+    }
+
+    #[test]
+    fn migrate_roots_to_collections_files_docs_and_never_resurrects() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "
+            CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE workspace_roots (id TEXT PRIMARY KEY, path TEXT NOT NULL, name TEXT NOT NULL);
+            CREATE TABLE collections (id TEXT PRIMARY KEY, parent_id TEXT, name TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+            CREATE TABLE documents (id TEXT PRIMARY KEY, workspace_root_id TEXT NOT NULL, collection_id TEXT);
+            INSERT INTO workspace_roots (id, path, name) VALUES ('r1', '/x/Papers', 'Papers');
+            INSERT INTO workspace_roots (id, path, name) VALUES ('root-knowledge-base', 'lumenfolio://knowledge', 'Knowledge Base');
+            INSERT INTO documents (id, workspace_root_id) VALUES ('d1', 'r1'), ('d2', 'r1'), ('n1', 'root-knowledge-base');
+            ",
+        )
+        .expect("seed");
+
+        migrate_workspace_roots_to_collections(&conn).expect("first migration");
+
+        let collection_id: String = conn
+            .query_row(
+                "SELECT id FROM collections WHERE name = 'Papers'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("migrated collection exists");
+        let filed: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM documents WHERE collection_id = ?1",
+                rusqlite::params![collection_id],
+                |row| row.get(0),
+            )
+            .expect("filed count");
+        assert_eq!(filed, 2, "both r1 docs filed into the collection");
+        let note_unfiled: Option<String> = conn
+            .query_row(
+                "SELECT collection_id FROM documents WHERE id = 'n1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("note row");
+        assert_eq!(note_unfiled, None, "knowledge-root docs are not migrated");
+
+        // User deletes the migrated collection (docs drop to unfiled).
+        conn.execute("DELETE FROM collections", []).expect("delete");
+        conn.execute("UPDATE documents SET collection_id = NULL", [])
+            .expect("unfile");
+
+        // Re-running must NOT resurrect the deleted collection (flag gates it).
+        migrate_workspace_roots_to_collections(&conn).expect("second migration");
+        let collection_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM collections", [], |row| row.get(0))
+            .expect("collection count");
+        assert_eq!(collection_count, 0, "deleted collection stays deleted");
     }
 }
