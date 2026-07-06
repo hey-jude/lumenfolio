@@ -602,15 +602,35 @@ function triggerNewSubcollection(collection, event = null) {
   emit('new-collection', collection.id)
 }
 
-function triggerDeleteCollection(collection, event = null) {
+// Inline two-step delete confirm. `window.confirm` is unreliable in the Tauri
+// webview (returns false on WKWebView), so the row swaps its actions for a
+// ✓/✗ pair instead of popping a native dialog. Delete is non-destructive:
+// sources drop to Unfiled, files on disk are untouched.
+const confirmDeleteId = ref(null)
+
+function requestDeleteCollection(collection, event = null) {
   if (event) {
     event.preventDefault()
     event.stopPropagation()
   }
-  const message = props.ui?.deleteCollectionConfirm
-    || 'Delete this collection? Its sources move to Unfiled (files are not deleted).'
-  if (!window.confirm(message)) return
+  confirmDeleteId.value = collection.id
+}
+
+function confirmDeleteCollection(collection, event = null) {
+  if (event) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+  confirmDeleteId.value = null
   emit('delete-collection', collection.id)
+}
+
+function cancelDeleteCollection(event = null) {
+  if (event) {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+  confirmDeleteId.value = null
 }
 
 onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick))
@@ -904,7 +924,23 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
                 <span class="collection-name">{{ row.collection.name }}</span>
               </button>
               <span class="collection-count">{{ collectionDocCount(row.collection.id) }}</span>
-              <span class="collection-actions">
+              <span v-if="confirmDeleteId === row.collection.id" class="collection-actions collection-confirm">
+                <button
+                  type="button"
+                  class="collection-action-btn collection-confirm-yes"
+                  :title="ui.deleteCollectionConfirm || 'Delete? Sources move to Unfiled.'"
+                  :aria-label="ui.deleteCollection || 'Delete'"
+                  @click.stop="confirmDeleteCollection(row.collection, $event)"
+                >✓</button>
+                <button
+                  type="button"
+                  class="collection-action-btn"
+                  :title="ui.cancel || 'Cancel'"
+                  :aria-label="ui.cancel || 'Cancel'"
+                  @click.stop="cancelDeleteCollection($event)"
+                >✗</button>
+              </span>
+              <span v-else class="collection-actions">
                 <button
                   type="button"
                   class="collection-action-btn"
@@ -924,7 +960,7 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
                   class="collection-action-btn collection-delete-btn"
                   :title="ui.deleteCollection || 'Delete'"
                   :aria-label="ui.deleteCollection || 'Delete'"
-                  @click.stop="triggerDeleteCollection(row.collection, $event)"
+                  @click.stop="requestDeleteCollection(row.collection, $event)"
                 >×</button>
               </span>
             </template>
@@ -1704,8 +1740,14 @@ onBeforeUnmount(() => window.removeEventListener('click', onAddMenuOutsideClick)
 }
 
 .collection-row:hover .collection-actions,
-.collection-actions:focus-within {
+.collection-actions:focus-within,
+.collection-actions.collection-confirm {
   opacity: 1;
+}
+
+/* Inline delete confirm: keep the ✓/✗ visible regardless of hover. */
+.collection-confirm-yes {
+  color: var(--danger, #e06a6a);
 }
 
 .collection-action-btn {
