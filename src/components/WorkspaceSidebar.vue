@@ -542,11 +542,16 @@ const treeRows = computed(() => {
     }
   }
 
-  // Unfiled node — always present, even with no collections yet.
-  rows.push({ type: 'collection', depth: 0, unfiled: true })
-  if (isCollectionExpanded(UNFILED_ID)) {
-    for (const doc of visibleDocs(docsByCollection.value.get(UNFILED_ID) || [])) {
-      rows.push({ type: 'doc', depth: 1, doc })
+  // Unfiled node — only shown when it actually holds un-filed sources, so an
+  // empty inbox doesn't read as mystery clutter. It is not a user collection and
+  // has no delete/rename; sources leave it by being filed into a collection or
+  // deleted.
+  if ((docsByCollection.value.get(UNFILED_ID) || []).length > 0) {
+    rows.push({ type: 'collection', depth: 0, unfiled: true })
+    if (isCollectionExpanded(UNFILED_ID)) {
+      for (const doc of visibleDocs(docsByCollection.value.get(UNFILED_ID) || [])) {
+        rows.push({ type: 'doc', depth: 1, doc })
+      }
     }
   }
   return rows
