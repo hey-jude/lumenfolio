@@ -84,6 +84,11 @@ const props = defineProps({
     type: Boolean,
     default: true,
   },
+  // True when the center shows the "ask my knowledge base" home (no doc open).
+  homeActive: {
+    type: Boolean,
+    default: false,
+  },
 })
 
 const emit = defineEmits([
@@ -112,6 +117,7 @@ const emit = defineEmits([
   'move-doc-to-collection',
   'move-collection',
   'clear-unfiled',
+  'go-home',
 ])
 
 // C-d: which collection row an internal (doc/collection) drag is hovering.
@@ -746,10 +752,10 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="rail-mode"
-          :class="{ active: !trendingActive && !graphActive }"
-          :title="ui.sources || 'Sources'"
-          :aria-label="ui.sources || 'Sources'"
-          @click="emit('toggle-collapse')"
+          :class="{ active: homeActive }"
+          :title="ui.myKnowledgeBase || ui.sources || 'Home'"
+          :aria-label="ui.myKnowledgeBase || ui.sources || 'Home'"
+          @click="emit('go-home'); emit('toggle-collapse')"
         ><span aria-hidden="true">📚</span></button>
         <button
           type="button"
@@ -846,7 +852,14 @@ onBeforeUnmount(() => {
       <!-- Knowledge-base pivot (P1): Obsidian-style icon rail. Sources (the tree)
            is the default panel; the other icons reuse the existing navigation. -->
       <nav class="sidebar-rail-strip" aria-label="Knowledge base sections">
-        <button type="button" class="rail-mode active" :title="ui.sources || 'Sources'" :aria-label="ui.sources || 'Sources'">
+        <button
+          type="button"
+          class="rail-mode"
+          :class="{ active: homeActive }"
+          :title="ui.myKnowledgeBase || ui.sources || 'Home'"
+          :aria-label="ui.myKnowledgeBase || ui.sources || 'Home'"
+          @click="emit('go-home')"
+        >
           <span aria-hidden="true">📚</span>
         </button>
         <button

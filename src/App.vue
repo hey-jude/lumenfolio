@@ -819,9 +819,11 @@ const emptyDocument = computed(() => ({
   notesLoaded: false,
   notesLoading: null,
 }))
+// Knowledge-base pivot: an empty (or stale) selection resolves to the empty
+// document so the center shows the "ask my knowledge base" home — NOT the first
+// PDF. Opening a source is always an explicit act now.
 const selectedDocument = computed(() => (
   allDocs.value.find((doc) => doc.id === selectedDocId.value)
-  || allDocs.value[0]
   || emptyDocument.value
 ))
 
@@ -1895,6 +1897,13 @@ function handleOpenGraph() {
   openGraphView()
 }
 
+// Return to the "ask my knowledge base" home: leave any doc / trending / graph.
+function goHome() {
+  trendingView.value = false
+  graphView.value = false
+  selectedDocId.value = ''
+}
+
 // Exit the global graph back to the reader (close button / ESC / sidebar toggle).
 function handleCloseGraph() {
   graphView.value = false
@@ -2188,7 +2197,7 @@ async function handleClearUnfiled() {
     }
   }
   if (!allDocs.value.some((doc) => doc.id === selectedDocId.value)) {
-    selectedDocId.value = allDocs.value[0]?.id || ''
+    selectedDocId.value = ''
     if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
   }
 }
@@ -3054,7 +3063,7 @@ function confirmRemoveWorkspaceRoot() {
       }
 
       if (!allDocs.value.some((doc) => doc.id === selectedDocId.value)) {
-        selectedDocId.value = allDocs.value[0]?.id || ''
+        selectedDocId.value = ''
       }
 
       if (selectedDocId.value) {
@@ -3120,7 +3129,7 @@ function confirmDeleteDocument() {
       visualIndexRuns.delete(target.id)
       // If the deleted document was active, fall back to the first remaining one.
       if (selectedDocId.value === target.id) {
-        selectedDocId.value = allDocs.value[0]?.id || ''
+        selectedDocId.value = ''
         if (selectedDocId.value) {
           loadChatHistoryForDocument(selectedDocId.value)
         }
@@ -4410,7 +4419,9 @@ async function addWorkspaceRootsFromDrop(rawPaths, options = {}) {
     snapshots.forEach(upsertWorkspaceRootSnapshot)
     await loadCollections()
     const previousDocStillExists = allDocs.value.some((doc) => doc.id === previousDocId)
-    selectedDocId.value = previousDocStillExists ? previousDocId : allDocs.value[0]?.id || ''
+    // Keep the prior selection if it survived; otherwise stay on the home
+    // surface rather than force-opening an imported document.
+    selectedDocId.value = previousDocStillExists ? previousDocId : ''
     if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
   } finally {
     workspaceStatus.value = 'idle'
@@ -4840,9 +4851,7 @@ async function scanWorkspaces(folders) {
   }
   snapshots.forEach(upsertWorkspaceRootSnapshot)
   const previousDocStillExists = allDocs.value.some((doc) => doc.id === previousDocId)
-  selectedDocId.value = previousDocStillExists
-    ? previousDocId
-    : allDocs.value[0]?.id || ''
+  selectedDocId.value = previousDocStillExists ? previousDocId : ''
   if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
   workspaceStatus.value = 'idle'
 }
@@ -4860,11 +4869,10 @@ async function loadLastWorkspace() {
       return
     }
     workspace.roots = snapshot.roots.map((rootSnapshot) => createWorkspaceRoot(rootSnapshot))
-    // Restore the last-selected document if it still exists in the workspace
-    // (it may have been deleted/moved since last run), else fall back to first.
-    const savedDocId = readPersisted('selectedDocId', '')
-    const savedStillExists = savedDocId && allDocs.value.some((doc) => doc.id === savedDocId)
-    selectedDocId.value = savedStillExists ? savedDocId : (allDocs.value[0]?.id || '')
+    // Knowledge-base pivot: launch on the "ask my knowledge base" home, not a
+    // document. PDFs are no longer the top-priority surface, so we don't
+    // auto-open the last-viewed (or first) source — the user opens one on demand.
+    selectedDocId.value = ''
     // Restore the tab working set, dropping any docs deleted/moved since last run,
     // and ensure the active doc is always present as a tab.
     const savedTabs = readPersisted('openTabs', [])
@@ -5275,6 +5283,7 @@ onMounted(() => {
       :collections="collections"
       :documents="allDocs"
       :selected-collection-id="selectedCollectionId"
+      :home-active="!showTrending && !showGraph && selectedDocument.id === 'empty'"
       :selected-doc-id="selectedDocId"
       :selected-doc="selectedDocument"
       :filter="filter"
@@ -5315,6 +5324,7 @@ onMounted(() => {
       @move-doc-to-collection="handleMoveDocToCollection"
       @move-collection="handleMoveCollection"
       @clear-unfiled="handleClearUnfiled"
+      @go-home="goHome"
     />
 
     <button
