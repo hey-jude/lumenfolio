@@ -2483,9 +2483,19 @@ function evidenceSourceLabel(source) {
   transition: none;
 }
 
-.chat-shell.centered .message-list,
-.chat-shell.centered .chat-composer {
+/* Centered mode: the SCROLL container stays full width so its scrollbar sits at
+   the window's right edge (not floating mid-screen); only the content inside is
+   centered to a readable column. The composer aligns to that same column width. */
+.chat-shell.centered .message-list {
+  align-items: center;
+}
+
+.chat-shell.centered .message-list > * {
   width: 100%;
+  max-width: 820px;
+}
+
+.chat-shell.centered .chat-composer {
   max-width: 820px;
   margin-left: auto;
   margin-right: auto;
@@ -2531,8 +2541,7 @@ function evidenceSourceLabel(source) {
 }
 
 .chat-header,
-.message-list,
-.chat-composer {
+.message-list {
   width: 100%;
 }
 
@@ -4266,14 +4275,23 @@ button.agent-process-head:disabled {
   white-space: pre-wrap;
 }
 
+/* Single-layer composer: one rounded card holding the input and its controls —
+   no separate outer bar + inner pill (the old "two layers"). Floats with a small
+   margin so it never touches the window edges. */
 .chat-composer {
   position: relative;
-  padding: 18px;
-  border-top: 1px solid var(--line-soft);
+  margin: 4px 14px 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 20px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.012), rgba(255, 255, 255, 0.035));
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.chat-composer:focus-within {
+  border-color: rgba(106, 169, 255, 0.4);
 }
 
 .composer-file-input {
@@ -4457,13 +4475,13 @@ button.agent-process-head:disabled {
 
 .chat-composer textarea {
   width: 100%;
-  min-height: 122px;
+  min-height: 64px;
   resize: none;
-  border-radius: 22px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.05);
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-primary);
-  padding: 18px;
+  padding: 4px 6px;
   outline: none;
   line-height: 1.6;
   font: inherit;
