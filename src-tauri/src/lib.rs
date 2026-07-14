@@ -3246,6 +3246,129 @@ async fn run_ask_document(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
+
+    // ── Layer 1: conversational fast-path ──────────────────────────────────────
+    // A bare greeting / thanks / "who are you" has nothing to retrieve. Answer it
+    // directly and skip the whole evidence loop, instead of grinding the step budget
+    // and refusing with "insufficient evidence". Conservative by design
+    // (runtime::conversation::is_smalltalk): only short, unambiguous smalltalk with no
+    // focus document and no text selection — a real question is never brushed off. If
+    // no chat provider is configured we fall through so the normal path surfaces the
+    // usual "configure a model" error.
+    let has_reader_context = !document_id.is_empty()
+        || input
+            .selected_text
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty());
+    if runtime::conversation::is_smalltalk(question, has_reader_context) {
+        if let Ok((provider, provider_label)) = provider_result.as_ref() {
+            let system = "You are Lumenfolio, a friendly assistant for the user's personal \
+                knowledge base. The user sent a brief conversational message (a greeting, thanks, \
+                or a question about you), NOT a question about their documents. Reply briefly and \
+                warmly in the SAME language as the user's message. Do not mention retrieval, \
+                evidence, citations, or documents. You may add one short sentence inviting them to \
+                ask about their library.";
+            let answer = llm::chat::run_simple_completion(provider, system, question, 0.7, 30)
+                .await
+                .unwrap_or_else(|_| runtime::conversation::default_reply(question));
+            let is_zh = input
+                .locale
+                .as_deref()
+                .is_some_and(|locale| locale.starts_with("zh"))
+                || question
+                    .chars()
+                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+            let (ev_title, ev_summary) = if is_zh {
+                ("直接回复", "寒暄消息 — 直接作答，无需检索")
+            } else {
+                (
+                    "Direct reply",
+                    "Conversational message — answered directly, no retrieval needed",
+                )
+            };
+            let mut trace = runtime::agent::AgentTrace {
+                run_id: String::new(),
+                intent: "smalltalk".to_string(),
+                tree_nodes: Vec::new(),
+                candidates: Vec::new(),
+                finalize_gate: serde_json::json!({
+                    "status": "conversational",
+                    "runtime": "smalltalk-direct",
+                    "citation_count": 0,
+                }),
+                evidence_chain: Vec::new(),
+                events: vec![runtime::agent::AgentTraceEvent::new(
+                    "smalltalk",
+                    "answer_direct",
+                    "completed",
+                    ev_title,
+                    ev_summary,
+                    "smalltalk gate matched; skipped the retrieval loop",
+                )],
+                session_summary: None,
+                compact: None,
+            };
+            trace.renumber_events();
+            if let Some(event_id) = activity_event_id.as_deref() {
+                agent_judge::emit_agent_activity(app, Some(event_id), trace.events[0].clone());
+            }
+            let provider_id_opt = if selected_provider_id.is_empty() {
+                None
+            } else {
+                Some(selected_provider_id)
+            };
+            let no_citations: Vec<runtime::rag::Citation> = Vec::new();
+            let no_claims: Vec<AskDocumentClaim> = Vec::new();
+            runtime::agent::record_completed_turn(
+                agent_sessions,
+                runtime::agent::CompletedTurnRecord {
+                    session_key: &session_id,
+                    provider_id: provider_id_opt,
+                    question,
+                    answer: &answer,
+                    selected_text: input.selected_text.as_deref(),
+                    citations: &no_citations,
+                    trace: &trace,
+                },
+            );
+            if let Err(err) = persist_chat_turn(
+                database,
+                ChatTurnPersistInput {
+                    turn_id: activity_event_id.as_deref(),
+                    session_id: &session_id,
+                    document_id,
+                    provider_id: provider_id_opt,
+                    model_key: input.model_key.as_deref(),
+                    provider_label: provider_label.as_str(),
+                    user_message: question,
+                    assistant_answer: &answer,
+                    reasoning_content: None,
+                    selected_text: input.selected_text.as_deref(),
+                    image_data_url: input.image_data_url.as_deref(),
+                    citations: &no_citations,
+                    claims: &no_claims,
+                    retrieval_trace: &trace,
+                    referenced_document_ids: &reference_document_ids,
+                    knowledge_enabled: input.knowledge_enabled.unwrap_or(true),
+                },
+            ) {
+                log::warn!("Failed to persist smalltalk turn: {err}");
+            }
+            return Ok(AskDocumentOutput {
+                answer,
+                reasoning_content: None,
+                provider: provider_label.clone(),
+                claims: Vec::new(),
+                citations: Vec::new(),
+                retrieval_trace: trace,
+                can_continue_retrieval: false,
+                retrieval_attempt_count: 0,
+                retrieval_budget_exhausted: false,
+            });
+        }
+    }
+
     agent_judge::emit_agent_activity(
         app,
         activity_event_id.as_deref(),

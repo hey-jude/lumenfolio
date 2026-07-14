@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod conversation;
 pub mod knowledge_graph;
 pub mod precipitation;
 pub mod rag;

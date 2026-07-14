@@ -17,6 +17,14 @@ use super::trace::{
 
 const DEFAULT_MAX_RETRIEVAL_STEPS: u32 = 20;
 const MAX_RETRIEVAL_STEPS: u32 = 20;
+/// No-progress early exit: after this many retrieval rounds with ZERO accumulated
+/// evidence, stop instead of grinding to the step limit. More rounds of the same
+/// library-wide tools won't conjure evidence that isn't there, so this bounds the
+/// wasted work (and the "I searched 20 times, found nothing" refusal) for off-topic,
+/// empty-library, or missed-smalltalk messages. Any genuinely retrievable evidence —
+/// a focus document's own text — already surfaces in the seed, so a real question is
+/// never cut short by this.
+const MAX_EMPTY_RETRIEVAL_ATTEMPTS: u32 = 3;
 
 pub struct AgentRunRequest<'a> {
     pub document_id: &'a str,
@@ -247,6 +255,30 @@ where
 
         if !decision.needs_more_evidence {
             return Ok((retrieval_run, decision, ledger));
+        }
+
+        // No-progress early exit (Layer 2): several rounds have yielded zero evidence,
+        // so more of the same retrieval won't help. Stop now instead of exhausting the
+        // budget and refusing after 20 empty rounds. Only fires on a truly empty
+        // accumulation, so it never truncates a question that found anything at all.
+        let empty_rounds = attempt.saturating_sub(attempt_offset);
+        if accumulated_citations.is_empty() && empty_rounds >= MAX_EMPTY_RETRIEVAL_ATTEMPTS {
+            let mut terminal = decision.clone();
+            terminal.status = FinalizeStatus::Insufficient;
+            terminal.needs_more_evidence = false;
+            terminal.next_tool_call = None;
+            terminal.reason = format!(
+                "{} No evidence surfaced after {} rounds; stopping early instead of exhausting the retrieval budget.",
+                terminal.reason.trim(),
+                empty_rounds
+            );
+            let skipped = skipped_event(
+                AgentStepKind::SearchChunks,
+                format!("no evidence after {empty_rounds} rounds; early exit"),
+            );
+            on_event(&skipped);
+            loop_events.push(skipped);
+            return Ok((retrieval_run, terminal, ledger));
         }
 
         let fallback_query = broad_context_query(intent, attempt);
