@@ -758,13 +758,6 @@ onBeforeUnmount(() => {
           @click="emit('go-home'); emit('toggle-collapse')"
         ><span aria-hidden="true">📚</span></button>
         <button
-          type="button"
-          class="rail-mode"
-          :title="ui.newNote"
-          :aria-label="ui.newNote"
-          @click="emit('new-note')"
-        ><span aria-hidden="true">📝</span></button>
-        <button
           v-if="graphEnabled"
           type="button"
           class="rail-mode"
@@ -864,13 +857,6 @@ onBeforeUnmount(() => {
         >
           <span aria-hidden="true">📚</span>
         </button>
-        <button
-          type="button"
-          class="rail-mode"
-          :title="ui.newNote"
-          :aria-label="ui.newNote"
-          @click="emit('new-note')"
-        ><span aria-hidden="true">📝</span></button>
         <button
           v-if="graphEnabled"
           type="button"
