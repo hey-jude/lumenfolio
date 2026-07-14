@@ -890,7 +890,12 @@ onBeforeUnmount(() => {
     </div>
 
     <label class="search-box">
-      <span class="search-icon">⌕</span>
+      <span class="search-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8">
+          <circle cx="11" cy="11" r="7" />
+          <path d="M20 20l-4.3-4.3" stroke-linecap="round" />
+        </svg>
+      </span>
       <input
         :value="filter"
         type="text"
@@ -1696,7 +1701,13 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.search-icon,
+.search-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-muted);
+}
+
 .tree-area {
   flex: 1;
   min-width: 0;
