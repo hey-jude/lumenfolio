@@ -64,6 +64,12 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  // When true, this pane IS the main stage (no document open): it fills the center
+  // at full width instead of sitting as a fixed-width right rail, and cannot collapse.
+  centered: {
+    type: Boolean,
+    default: false,
+  },
   width: {
     type: Number,
     default: 420,
@@ -1653,8 +1659,12 @@ function evidenceSourceLabel(source) {
 </script>
 
 <template>
-  <aside class="chat-shell" :style="{ width: collapsed ? '44px' : `${width}px` }" :class="{ collapsed }">
-    <button class="collapse-btn" type="button" @click="emit('toggle-collapse')">
+  <aside
+    class="chat-shell"
+    :style="centered ? null : { width: collapsed ? '44px' : `${width}px` }"
+    :class="{ collapsed, centered }"
+  >
+    <button v-if="!centered" class="collapse-btn" type="button" @click="emit('toggle-collapse')">
       {{ collapsed ? '❮' : '❯' }}
     </button>
 
@@ -2375,6 +2385,23 @@ function evidenceSourceLabel(source) {
   display: flex;
   flex-direction: column;
   min-width: 44px;
+}
+
+/* Centered mode: the conversation is the main stage (no document open). Fill the
+   remaining width and keep the thread/composer readable with a centered max-width. */
+.chat-shell.centered {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-left: none;
+  transition: none;
+}
+
+.chat-shell.centered .message-list,
+.chat-shell.centered .chat-composer {
+  width: 100%;
+  max-width: 820px;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .collapse-btn {

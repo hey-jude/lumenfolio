@@ -864,12 +864,17 @@ const suggestedQuestions = computed(() => {
   }
   return questions.filter(Boolean)
 })
-// Show the Trending discovery feed when explicitly opened, OR when there is no
-// real document to read (empty reader doubles as the discovery surface). Never
-// when the user has disabled online discovery.
+// Show the Trending discovery feed ONLY when the user explicitly opens it. It is
+// a secondary surface now (knowledge-base pivot) — the empty state defaults to the
+// conversation, never to Trending. Gated off entirely when discovery is disabled.
 const showTrending = computed(() => (
-  trendingEnabled.value
-  && (trendingView.value || selectedDocument.value.id === 'empty')
+  trendingEnabled.value && trendingView.value
+))
+// No document open (and not on a discovery surface) → the main stage IS the
+// conversation. The single ChatPane fills the center; there is no separate reader
+// column and no duplicate right-side chat.
+const conversationCentered = computed(() => (
+  !showTrending.value && !showGraph.value && selectedDocument.value.id === 'empty'
 ))
 // Tab descriptors for the reader tab bar: resolve each open id to its document,
 // dropping any that no longer exist. Status mirrors the sidebar status dot.
@@ -5041,12 +5046,12 @@ function loadLastWorkspaceAfterFirstPaint() {
   const wantTrending = readPersisted('trendingView', false)
   return loadLastWorkspace().finally(() => {
     markStartup('workspace-loaded')
-    // Re-open the discovery feed if that's where the user left off (the doc-restore
-    // above turned it off). Gated on trendingEnabled via showTrending semantics.
+    // Re-open the discovery feed ONLY if the user explicitly left off there. The
+    // empty state no longer implies Trending — a fresh/empty library opens to the
+    // conversation, so this never fires unless trendingView was truly persisted on.
     if (wantTrending && trendingEnabled.value) trendingView.value = true
-    // Only NOW (workspace settled) decide whether to fetch trending: if the user
-    // genuinely has no documents the empty reader is the discovery surface, so
-    // load it. Users who have documents never trigger a startup network call.
+    // Fetch the feed only when Trending is the surface the user is actually on.
+    // No documents no longer triggers a startup network call — the center is chat.
     if (showTrending.value && trendingStatus.value === 'idle') fetchTrending()
     // Best-effort "newer version?" check — silent on failure, off the critical path.
     checkForUpdate()
@@ -5283,7 +5288,7 @@ onMounted(() => {
       :collections="collections"
       :documents="allDocs"
       :selected-collection-id="selectedCollectionId"
-      :home-active="!showTrending && !showGraph && selectedDocument.id === 'empty'"
+      :home-active="conversationCentered"
       :selected-doc-id="selectedDocId"
       :selected-doc="selectedDocument"
       :filter="filter"
@@ -5367,21 +5372,7 @@ onMounted(() => {
       @close="handleCloseGraph"
     />
 
-    <div v-if="!showTrending && !showGraph && selectedDocument.id === 'empty'" class="reader-column">
-      <KnowledgeHome
-        :ui="ui"
-        :recent-docs="knowledgeHomeRecentDocs"
-        :concepts="knowledgeHomeConcepts"
-        :model-configured="chatModelConfigured"
-        :clipping="clipBusy"
-        @ask="handleKnowledgeHomeAsk"
-        @open-doc="selectDoc"
-        @new-note="handleCreateNote"
-        @clip-web="handleClipWebPage"
-      />
-    </div>
-
-    <div v-else-if="!showTrending && !showGraph && officeSelected" class="reader-column">
+    <div v-if="!showTrending && !showGraph && !conversationCentered && officeSelected" class="reader-column">
       <OfficeViewer
         :key="selectedDocument.id"
         :document-id="selectedDocument.id"
@@ -5391,7 +5382,7 @@ onMounted(() => {
       />
     </div>
 
-    <div v-else-if="!showTrending && !showGraph && editableSelected" class="reader-column">
+    <div v-else-if="!showTrending && !showGraph && !conversationCentered && editableSelected" class="reader-column">
       <NoteEditor
         :key="selectedDocument.id"
         :document-id="selectedDocument.id"
@@ -5403,7 +5394,7 @@ onMounted(() => {
       />
     </div>
 
-    <div v-else-if="!showTrending && !showGraph" class="reader-column">
+    <div v-else-if="!showTrending && !showGraph && !conversationCentered" class="reader-column">
     <ReaderPane
       :key="`${selectedDocument.id}:${viewerReloadKey}`"
       :document="selectedDocument"
@@ -5464,7 +5455,7 @@ onMounted(() => {
     </ReaderPane>
     </div>
 
-    <div v-if="!rightCollapsed" class="drag-handle" @mousedown.prevent="startResize" />
+    <div v-if="!rightCollapsed && !conversationCentered" class="drag-handle" @mousedown.prevent="startResize" />
 
     <ChatPane
       :session="activeSession"
@@ -5474,7 +5465,8 @@ onMounted(() => {
       :browsing-label="chatBrowsingLabel"
       :running-event-id="globalRunningEventId"
       :all-documents="allDocs"
-      :collapsed="rightCollapsed"
+      :centered="conversationCentered"
+      :collapsed="!conversationCentered && rightCollapsed"
       :width="rightWidth"
       :active-citation-id="activeCitationId"
       :available-models="availableChatModels"

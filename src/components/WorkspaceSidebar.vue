@@ -773,15 +773,6 @@ onBeforeUnmount(() => {
           :aria-label="ui.knowledgeGraph"
           @click="emit('open-graph')"
         ><span aria-hidden="true">🕸</span></button>
-        <button
-          v-if="trendingEnabled"
-          type="button"
-          class="rail-mode"
-          :class="{ active: trendingActive }"
-          :title="ui.trendingPapers"
-          :aria-label="ui.trendingPapers"
-          @click="emit('open-trending')"
-        ><span aria-hidden="true">🔥</span></button>
       </nav>
 
       <div class="rail-divider"></div>
@@ -836,6 +827,17 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <button
+          v-if="trendingEnabled"
+          type="button"
+          class="rail-btn rail-btn-muted"
+          :class="{ active: trendingActive }"
+          :title="ui.trendingPapers"
+          :aria-label="ui.trendingPapers"
+          @click="emit('open-trending')"
+        >
+          🔥
+        </button>
+        <button
           type="button"
           class="rail-btn"
           :title="ui.settings"
@@ -878,16 +880,18 @@ onBeforeUnmount(() => {
           :aria-label="ui.knowledgeGraph"
           @click="emit('open-graph')"
         ><span aria-hidden="true">🕸</span></button>
+        <span class="rail-spacer"></span>
+        <!-- Trending is a secondary discovery utility, grouped with Settings at the
+             bottom — not a primary knowledge-base action. -->
         <button
           v-if="trendingEnabled"
           type="button"
-          class="rail-mode"
+          class="rail-mode rail-mode-muted"
           :class="{ active: trendingActive }"
           :title="ui.trendingPapers"
           :aria-label="ui.trendingPapers"
           @click="emit('open-trending')"
         ><span aria-hidden="true">🔥</span></button>
-        <span class="rail-spacer"></span>
         <button type="button" class="rail-mode" :title="ui.settings" :aria-label="ui.settings" @click="emit('open-settings')">
           <span aria-hidden="true">⚙</span>
         </button>
@@ -1200,6 +1204,18 @@ onBeforeUnmount(() => {
   background: var(--accent-soft, rgba(106, 169, 255, 0.14));
   border-color: rgba(106, 169, 255, 0.3);
   color: var(--accent, #6aa9ff);
+}
+
+/* Trending is a secondary discovery utility — dimmer at rest so it never competes
+   with the core knowledge actions, but fully legible on hover / when active. */
+.rail-mode-muted:not(.active),
+.rail-btn-muted:not(.active) {
+  opacity: 0.5;
+}
+
+.rail-mode-muted:hover,
+.rail-btn-muted:hover {
+  opacity: 1;
 }
 
 /* Collapsed rail: the section ribbon fills the width and its icons read a bit
