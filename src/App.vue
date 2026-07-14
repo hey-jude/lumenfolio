@@ -294,6 +294,12 @@ const documentDeleteConfirmOpen = ref(false)
 const documentDeleteStatus = ref('idle')
 const documentDeleteError = ref('')
 const documentDeleteTarget = ref({ id: '', title: '', isNote: false })
+// Provider delete confirm — window.confirm() no-ops in Tauri's WKWebView, so
+// destructive provider removal goes through an in-app modal like the others.
+const providerDeleteConfirmOpen = ref(false)
+const providerDeleteStatus = ref('idle')
+const providerDeleteError = ref('')
+const providerDeleteTarget = ref({ key: '', id: '', name: '' })
 const workspaceDropActive = ref(false)
 const workspaceDropTargetRootId = ref('')
 // C-d: collection row (or '__unfiled__') an OS-file drag is hovering over.
@@ -1223,42 +1229,70 @@ function ensureProviderSelectionAfterRemoval(preferredKey = '') {
   resetProviderForm(next)
 }
 
-async function removeEditableProvider(provider) {
+function removeEditableProvider(provider) {
   const key = providerEditKey(provider)
   if (!key || settingsStatus.value === 'saving') return
   persistCurrentProviderEdit()
 
   if (provider.id) {
-    const providerName = providerListName(provider)
-    if (!window.confirm(ui.value.deleteProviderConfirm.replace('{name}', providerName))) return
-    settingsStatus.value = 'saving'
-    settingsError.value = ''
-    providerTestStatus.value = 'idle'
-    providerTestMessage.value = ''
-    modelFetchStatus.value = 'idle'
-    modelFetchMessage.value = ''
+    // Persisted provider — confirm through the in-app modal. window.confirm()
+    // silently returns false in Tauri's WKWebView, which made delete a no-op.
+    providerDeleteError.value = ''
+    providerDeleteStatus.value = 'idle'
+    providerDeleteTarget.value = { key, id: provider.id, name: providerListName(provider) }
+    providerDeleteConfirmOpen.value = true
+    return
+  }
+
+  // Unsaved draft — nothing persisted yet, so drop it locally without a prompt.
+  editableProviders.value = editableProviders.value.filter((item) => providerEditKey(item) !== key)
+  if (selectedProviderEditKey.value !== key) return
+  ensureProviderSelectionAfterRemoval()
+}
+
+function closeDeleteProviderConfirm() {
+  if (providerDeleteStatus.value === 'deleting') return
+  providerDeleteConfirmOpen.value = false
+  providerDeleteStatus.value = 'idle'
+  providerDeleteError.value = ''
+  providerDeleteTarget.value = { key: '', id: '', name: '' }
+}
+
+function confirmDeleteProvider() {
+  const target = providerDeleteTarget.value
+  if (!target?.id || providerDeleteStatus.value === 'deleting') return
+  providerDeleteStatus.value = 'deleting'
+  providerDeleteError.value = ''
+  settingsStatus.value = 'saving'
+  settingsError.value = ''
+  providerTestStatus.value = 'idle'
+  providerTestMessage.value = ''
+  modelFetchStatus.value = 'idle'
+  modelFetchMessage.value = ''
+
+  void (async () => {
     try {
-      await invoke('delete_model_provider', { input: { id: provider.id } })
-      const preferredKey = selectedProviderEditKey.value === key ? '' : selectedProviderEditKey.value
+      await invoke('delete_model_provider', { input: { id: target.id } })
+      const preferredKey = selectedProviderEditKey.value === target.key ? '' : selectedProviderEditKey.value
       await loadModelProviders()
       const unsavedDrafts = editableProviders.value
-        .filter((item) => !item.id && providerEditKey(item) !== key)
+        .filter((item) => !item.id && providerEditKey(item) !== target.key)
       editableProviders.value = [
         ...modelProviders.value.map((item) => cloneProviderForEdit(item, `saved:${item.id}`)),
         ...unsavedDrafts,
       ]
       ensureProviderSelectionAfterRemoval(preferredKey)
       settingsStatus.value = 'saved'
+      providerDeleteConfirmOpen.value = false
+      providerDeleteStatus.value = 'idle'
+      providerDeleteTarget.value = { key: '', id: '', name: '' }
     } catch (err) {
       settingsStatus.value = 'failed'
       settingsError.value = err?.message || String(err)
+      providerDeleteStatus.value = 'failed'
+      providerDeleteError.value = err?.message || String(err)
     }
-    return
-  }
-
-  editableProviders.value = editableProviders.value.filter((item) => providerEditKey(item) !== key)
-  if (selectedProviderEditKey.value !== key) return
-  ensureProviderSelectionAfterRemoval()
+  })()
 }
 
 function applyProviderTypePreset(providerType) {
@@ -5615,6 +5649,47 @@ onMounted(() => {
             @click="confirmDeleteDocument"
           >
             {{ documentDeleteStatus === 'deleting' ? `${ui.delete}...` : ui.delete }}
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="providerDeleteConfirmOpen" class="confirm-backdrop" @click.self="closeDeleteProviderConfirm">
+      <section class="confirm-modal" role="dialog" aria-modal="true" :aria-label="ui.deleteProviderTitle">
+        <div class="confirm-head">
+          <div class="confirm-title">{{ ui.deleteProviderTitle }}</div>
+          <button
+            class="confirm-close"
+            type="button"
+            :aria-label="ui.close"
+            :disabled="providerDeleteStatus === 'deleting'"
+            @click="closeDeleteProviderConfirm"
+          >
+            ×
+          </button>
+        </div>
+        <div class="confirm-body">
+          <p>{{ ui.deleteProviderConfirm.replace('{name}', providerDeleteTarget.name) }}</p>
+          <div v-if="providerDeleteStatus === 'failed'" class="confirm-error">
+            {{ ui.deleteProviderFailed }}: {{ providerDeleteError }}
+          </div>
+        </div>
+        <div class="confirm-actions">
+          <button
+            type="button"
+            class="confirm-btn"
+            :disabled="providerDeleteStatus === 'deleting'"
+            @click="closeDeleteProviderConfirm"
+          >
+            {{ ui.cancel }}
+          </button>
+          <button
+            type="button"
+            class="confirm-btn danger"
+            :disabled="providerDeleteStatus === 'deleting'"
+            @click="confirmDeleteProvider"
+          >
+            {{ providerDeleteStatus === 'deleting' ? `${ui.delete}...` : ui.delete }}
           </button>
         </div>
       </section>
