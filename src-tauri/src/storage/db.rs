@@ -617,7 +617,11 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           index_version INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
-          FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+          -- Chat history is decoupled from document lifetime: deleting a document
+          -- must NOT destroy the conversation. SET NULL turns the affected turns
+          -- library-wide (document_id → NULL) but keeps the turn and its session.
+          -- Legacy CASCADE databases are rebuilt by migrate_chat_turns_document_id_set_null.
+          FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE SET NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_chat_turns_document_created
@@ -757,6 +761,7 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
     .map_err(|err| format!("Failed to create chat turn session index: {err}"))?;
     migrate_chat_turns_to_sessions(conn)?;
     migrate_chat_turns_document_id_nullable(conn)?;
+    migrate_chat_turns_document_id_set_null(conn)?;
     ensure_column(
         conn,
         "document_blocks",
@@ -980,7 +985,7 @@ fn migrate_chat_turns_document_id_nullable(conn: &Connection) -> Result<(), Stri
           session_id TEXT NOT NULL DEFAULT '',
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
-          FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+          FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE SET NULL
         );
         INSERT INTO chat_turns__kb_new ({col_list}) SELECT {col_list} FROM chat_turns;
         DROP TABLE chat_turns;
@@ -1000,6 +1005,88 @@ fn migrate_chat_turns_document_id_nullable(conn: &Connection) -> Result<(), Stri
     let result = conn.execute_batch(&sql);
     let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
     result.map_err(|err| format!("Failed to make chat_turns.document_id nullable: {err}"))
+}
+
+/// Whether `chat_turns.document_id`'s foreign key deletes with ON DELETE CASCADE.
+/// Legacy databases created it that way, which meant deleting a document also
+/// destroyed its conversation — the binding we are removing (→ SET NULL).
+fn chat_turns_document_fk_is_cascade(conn: &Connection) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare("PRAGMA foreign_key_list(chat_turns)")
+        .map_err(|err| format!("Failed to inspect chat_turns foreign keys: {err}"))?;
+    // foreign_key_list columns: id(0) seq(1) table(2) from(3) to(4) on_update(5)
+    // on_delete(6) match(7). Match the FK on the document_id column.
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(3)?, row.get::<_, String>(6)?))
+        })
+        .map_err(|err| format!("Failed to read chat_turns foreign keys: {err}"))?
+        .collect::<Result<Vec<(String, String)>, _>>()
+        .map_err(|err| format!("Failed to read chat_turns foreign keys: {err}"))?;
+    Ok(rows
+        .iter()
+        .any(|(from, on_delete)| from == "document_id" && on_delete.eq_ignore_ascii_case("CASCADE")))
+}
+
+/// Decouple chat history from document lifetime: rebuild `chat_turns` so its
+/// document_id foreign key is ON DELETE SET NULL instead of CASCADE. Deleting a
+/// document (or clearing Unfiled) then leaves the conversation intact — the
+/// affected turns just become library-wide (document_id → NULL).
+///
+/// Runs only when the live FK is still CASCADE. Databases whose document_id is
+/// still NOT NULL are handled by migrate_chat_turns_document_id_nullable (which
+/// now also produces SET NULL), so this is a no-op there.
+fn migrate_chat_turns_document_id_set_null(conn: &Connection) -> Result<(), String> {
+    if column_is_not_null(conn, "chat_turns", "document_id")? {
+        return Ok(());
+    }
+    if !chat_turns_document_fk_is_cascade(conn)? {
+        return Ok(());
+    }
+    let live = table_columns(conn, "chat_turns")?;
+    let shared: Vec<&str> = CHAT_TURNS_COLUMNS
+        .iter()
+        .copied()
+        .filter(|col| live.iter().any(|name| name == col))
+        .collect();
+    let col_list = shared.join(", ");
+    let sql = format!(
+        "BEGIN;
+        CREATE TABLE chat_turns__setnull_new (
+          id TEXT PRIMARY KEY,
+          document_id TEXT,
+          provider_id TEXT NOT NULL DEFAULT '',
+          model_key TEXT NOT NULL DEFAULT '',
+          provider_label TEXT NOT NULL DEFAULT '',
+          user_message TEXT NOT NULL,
+          assistant_answer TEXT NOT NULL,
+          reasoning_content TEXT NOT NULL DEFAULT '',
+          selected_text TEXT NOT NULL DEFAULT '',
+          image_data_url TEXT NOT NULL DEFAULT '',
+          citations_json TEXT NOT NULL DEFAULT '[]',
+          claims_json TEXT NOT NULL DEFAULT '[]',
+          retrieval_trace_json TEXT NOT NULL DEFAULT '{{}}',
+          referenced_document_ids_json TEXT NOT NULL DEFAULT '[]',
+          index_version INTEGER NOT NULL DEFAULT 0,
+          session_id TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE SET NULL
+        );
+        INSERT INTO chat_turns__setnull_new ({col_list}) SELECT {col_list} FROM chat_turns;
+        DROP TABLE chat_turns;
+        ALTER TABLE chat_turns__setnull_new RENAME TO chat_turns;
+        CREATE INDEX IF NOT EXISTS idx_chat_turns_document_created
+          ON chat_turns(document_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_chat_turns_session_created
+          ON chat_turns(session_id, created_at DESC);
+        COMMIT;"
+    );
+    conn.execute_batch("PRAGMA foreign_keys=OFF;")
+        .map_err(|err| format!("Failed to disable foreign keys for rebuild: {err}"))?;
+    let result = conn.execute_batch(&sql);
+    let _ = conn.execute_batch("PRAGMA foreign_keys=ON;");
+    result.map_err(|err| format!("Failed to set chat_turns.document_id ON DELETE SET NULL: {err}"))
 }
 
 /// The canonical chat_turns column set (the new table's columns). The rebuild
@@ -1299,6 +1386,69 @@ mod tests {
         // Idempotent: a second run is a no-op.
         migrate_chat_turns_document_id_nullable(&conn).expect("idempotent");
         assert!(!column_is_not_null(&conn, "chat_turns", "document_id").unwrap());
+    }
+
+    #[test]
+    fn migrate_chat_turns_set_null_keeps_chat_when_document_deleted() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        // Legacy database: document_id is already nullable, but the FK still
+        // CASCADE-deletes turns when their document is removed (the binding we drop).
+        conn.execute_batch(
+            "CREATE TABLE documents (id TEXT PRIMARY KEY, collection_id TEXT);
+             CREATE TABLE chat_turns (
+               id TEXT PRIMARY KEY,
+               document_id TEXT,
+               provider_id TEXT NOT NULL DEFAULT '',
+               model_key TEXT NOT NULL DEFAULT '',
+               provider_label TEXT NOT NULL DEFAULT '',
+               user_message TEXT NOT NULL,
+               assistant_answer TEXT NOT NULL,
+               reasoning_content TEXT NOT NULL DEFAULT '',
+               selected_text TEXT NOT NULL DEFAULT '',
+               image_data_url TEXT NOT NULL DEFAULT '',
+               citations_json TEXT NOT NULL DEFAULT '[]',
+               claims_json TEXT NOT NULL DEFAULT '[]',
+               retrieval_trace_json TEXT NOT NULL DEFAULT '{}',
+               referenced_document_ids_json TEXT NOT NULL DEFAULT '[]',
+               index_version INTEGER NOT NULL DEFAULT 0,
+               session_id TEXT NOT NULL DEFAULT '',
+               created_at INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL,
+               FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+             );
+             INSERT INTO documents (id, collection_id) VALUES ('doc-1', NULL);
+             INSERT INTO chat_turns (id, document_id, session_id, user_message, assistant_answer, created_at, updated_at)
+               VALUES ('turn-1', 'doc-1', 'sess-1', 'q', 'a', 1, 1);",
+        )
+        .expect("legacy schema");
+        assert!(chat_turns_document_fk_is_cascade(&conn).unwrap());
+
+        migrate_chat_turns_document_id_set_null(&conn).expect("migrate");
+
+        // FK is now SET NULL, and the pre-existing turn survived the rebuild.
+        assert!(!chat_turns_document_fk_is_cascade(&conn).unwrap());
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_turns WHERE id = 'turn-1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Deleting the document keeps the conversation: the turn stays, and its
+        // document_id is nulled (it becomes a library-wide turn).
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        conn.execute("DELETE FROM documents WHERE id = 'doc-1'", []).unwrap();
+        let (surviving, doc_id): (i64, Option<String>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(document_id) FROM chat_turns WHERE id = 'turn-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(surviving, 1, "chat turn must survive document deletion");
+        assert_eq!(doc_id, None, "document_id should be nulled, not cascade-deleted");
+
+        // Idempotent: a second run is a no-op.
+        migrate_chat_turns_document_id_set_null(&conn).expect("idempotent");
+        assert!(!chat_turns_document_fk_is_cascade(&conn).unwrap());
     }
 
     #[test]

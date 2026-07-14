@@ -2191,26 +2191,28 @@ function handleSelectCollection(id) {
 // collection. Non-destructive to the files on disk — delete_document only drops
 // the knowledge-base record. Reuses the single-doc delete path per source.
 async function handleClearUnfiled() {
-  const known = new Set(collections.value.map((collection) => collection.id))
-  const unfiled = allDocs.value.filter(
-    (doc) => doc && doc.id && (!doc.collectionId || !known.has(doc.collectionId)),
-  )
-  if (!unfiled.length) return
+  // The backend is the single source of truth for "unfiled" (collection_id IS
+  // NULL) and deletes in one transaction. This deliberately does NOT filter on
+  // the frontend: a stale/half-loaded collections list must never be able to
+  // classify filed documents as unfiled and wipe the library. Chat history is
+  // preserved (chat_turns.document_id is ON DELETE SET NULL).
   workspaceError.value = ''
-  for (const doc of unfiled) {
-    try {
-      await invoke('delete_document', { documentId: doc.id })
-      removeDocFromWorkspaceState(doc.id)
-      openTabs.value = openTabs.value.filter((tabId) => tabId !== doc.id)
-      precipitationQueued.delete(doc.id)
-      visualIndexRuns.delete(doc.id)
-    } catch (err) {
-      workspaceError.value = err?.message || String(err)
-    }
+  let deletedIds = []
+  try {
+    deletedIds = await invoke('clear_unfiled_documents')
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+    return
+  }
+  if (!Array.isArray(deletedIds) || !deletedIds.length) return
+  for (const id of deletedIds) {
+    removeDocFromWorkspaceState(id)
+    openTabs.value = openTabs.value.filter((tabId) => tabId !== id)
+    precipitationQueued.delete(id)
+    visualIndexRuns.delete(id)
   }
   if (!allDocs.value.some((doc) => doc.id === selectedDocId.value)) {
     selectedDocId.value = ''
-    if (selectedDocId.value) loadChatHistoryForDocument(selectedDocId.value)
   }
 }
 

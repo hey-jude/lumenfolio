@@ -1626,7 +1626,10 @@ fn delete_document(
     .map_err(|err| format!("Failed to clear table-fact FTS rows: {err}"))?;
     // Every other document-scoped table has ON DELETE CASCADE to documents(id), so
     // removing the row cleans pages/blocks/lines/chunks/tables/artifacts/claims/
-    // links/notes/chat_turns/translations in one shot (connection runs foreign_keys=ON).
+    // links/notes/translations in one shot (connection runs foreign_keys=ON).
+    // chat_turns is the deliberate exception: its FK is ON DELETE SET NULL, so the
+    // conversation survives — affected turns just become library-wide (document_id
+    // → NULL). Deleting a document must never destroy chat history.
     let deleted = tx
         .execute("DELETE FROM documents WHERE id = ?1", params![document_id])
         .map_err(|err| format!("Failed to delete document: {err}"))?;
@@ -1643,6 +1646,78 @@ fn delete_document(
     // Invalidate any cached working memory for this document's default session.
     agent_sessions.clear_session(&migrated_session_id(&document_id));
     Ok(())
+}
+
+/// Clear the Unfiled bucket: permanently remove every document that has no logical
+/// collection (`collection_id IS NULL`) from the library, in one transaction.
+///
+/// Robustness contract (this command exists precisely because the old frontend
+/// loop was unsafe):
+/// - "Unfiled" is decided by the DATABASE, never the frontend's in-memory view. A
+///   client whose collections list hasn't loaded would classify every document as
+///   unfiled; keying off `collection_id IS NULL` here makes that impossible.
+/// - A document filed into ANY collection is never touched, even a dangling one.
+/// - Chat history survives (chat_turns.document_id is ON DELETE SET NULL).
+/// - Original files on disk are left untouched; a rescan re-adds file-backed docs.
+///
+/// Returns the ids that were removed so the caller can update its view.
+#[tauri::command]
+fn clear_unfiled_documents(
+    registry: State<'_, PdfRegistry>,
+    database: State<'_, AppDatabase>,
+    agent_sessions: State<'_, AgentSessionState>,
+) -> Result<Vec<String>, String> {
+    let mut conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    // Snapshot the unfiled ids first — needed to prune the registry / working
+    // memory after the rows are gone.
+    let ids: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM documents WHERE collection_id IS NULL")
+            .map_err(|err| format!("Failed to list unfiled documents: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|err| format!("Failed to list unfiled documents: {err}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("Failed to list unfiled documents: {err}"))?;
+        rows
+    };
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tx = conn
+        .transaction()
+        .map_err(|err| format!("Failed to start clear-unfiled transaction: {err}"))?;
+    // FTS5 virtual tables carry no foreign key, so the document cascade cannot
+    // reach them — clear their rows explicitly first.
+    tx.execute(
+        "DELETE FROM document_chunks_fts
+         WHERE document_id IN (SELECT id FROM documents WHERE collection_id IS NULL)",
+        [],
+    )
+    .map_err(|err| format!("Failed to clear chunk FTS rows: {err}"))?;
+    tx.execute(
+        "DELETE FROM document_table_facts_fts
+         WHERE document_id IN (SELECT id FROM documents WHERE collection_id IS NULL)",
+        [],
+    )
+    .map_err(|err| format!("Failed to clear table-fact FTS rows: {err}"))?;
+    tx.execute("DELETE FROM documents WHERE collection_id IS NULL", [])
+        .map_err(|err| format!("Failed to clear unfiled documents: {err}"))?;
+    tx.commit()
+        .map_err(|err| format!("Failed to commit clear-unfiled: {err}"))?;
+    drop(conn);
+    if let Ok(mut paths) = registry.paths.lock() {
+        for id in &ids {
+            paths.remove(id);
+        }
+    }
+    for id in &ids {
+        agent_sessions.clear_session(&migrated_session_id(id));
+    }
+    Ok(ids)
 }
 
 #[tauri::command]
@@ -2398,8 +2473,9 @@ fn delete_chat_session(
         .conn
         .lock()
         .map_err(|_| "SQLite lock was poisoned".to_string())?;
-    // chat_turns FK cascades on document deletion, not session, so remove this
-    // session's turns explicitly before dropping the session row.
+    // chat_turns has no foreign key to chat_sessions (its document_id FK is now
+    // ON DELETE SET NULL), so deleting a session never cascades to its turns —
+    // remove this session's turns explicitly before dropping the session row.
     conn.execute(
         "DELETE FROM chat_turns WHERE session_id = ?1",
         params![session_id],
@@ -5790,6 +5866,7 @@ pub fn run() {
             save_proxy_settings,
             remove_workspace_root,
             delete_document,
+            clear_unfiled_documents,
             list_model_providers,
             save_model_provider,
             delete_model_provider,
