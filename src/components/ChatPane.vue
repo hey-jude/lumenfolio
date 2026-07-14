@@ -2496,6 +2496,7 @@ function evidenceSourceLabel(source) {
 }
 
 .chat-shell.centered .chat-composer {
+  width: 100%;
   max-width: 820px;
   margin-left: auto;
   margin-right: auto;
@@ -4280,6 +4281,7 @@ button.agent-process-head:disabled {
    margin so it never touches the window edges. */
 .chat-composer {
   position: relative;
+  box-sizing: border-box;
   margin: 4px 14px 14px;
   padding: 10px 12px;
   border: 1px solid var(--line-soft);
