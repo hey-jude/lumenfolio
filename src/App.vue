@@ -56,12 +56,6 @@ const TrendingFeed = defineAsyncComponent({
   delay: 80,
   timeout: ASYNC_COMPONENT_TIMEOUT_MS,
 })
-const KnowledgeHome = defineAsyncComponent({
-  loader: () => import('./components/KnowledgeHome.vue'),
-  loadingComponent: AsyncPanelLoading,
-  delay: 80,
-  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
-})
 const KnowledgePane = defineAsyncComponent({
   loader: () => import('./components/KnowledgePane.vue'),
   delay: 120,
@@ -2083,27 +2077,6 @@ function applyCitationJump(citation) {
 function nextLocalId(prefix) {
   localMessageCounter += 1
   return `${prefix}-${Date.now()}-${localMessageCounter}`
-}
-
-// Knowledge-home (P1): recent sources + precipitated concepts for the landing.
-const knowledgeHomeRecentDocs = computed(() =>
-  allDocs.value.filter((doc) => doc && doc.id && doc.id !== 'empty').slice(0, 12),
-)
-const knowledgeHomeConcepts = computed(() => {
-  const artifacts = graphData.value?.artifacts || graphData.value?.nodes || []
-  return artifacts
-    .filter((node) => (node?.kind || node?.type) === 'concept')
-    .map((node) => node?.name || node?.label)
-    .filter((label) => typeof label === 'string' && label.trim())
-    .slice(0, 12)
-})
-
-// Home ask box: send a library-wide question (no focus document → handleSend
-// goes library-wide and the answer streams into the right-pane chat).
-function handleKnowledgeHomeAsk(text) {
-  const question = String(text || '').trim()
-  if (!question) return
-  handleSend(question)
 }
 
 // Knowledge-base pivot (P2): create a blank standalone note, merge it into the
@@ -5501,6 +5474,8 @@ onMounted(() => {
       :all-documents="allDocs"
       :centered="conversationCentered"
       :collapsed="!conversationCentered && rightCollapsed"
+      :clipping="clipBusy"
+      :graph-enabled="knowledgeEnabled"
       :width="rightWidth"
       :active-citation-id="activeCitationId"
       :available-models="availableChatModels"
@@ -5536,6 +5511,9 @@ onMounted(() => {
       @edit-resend="handleEditResend"
       @send="handleSend"
       @open-doc="selectDoc"
+      @new-note="handleCreateNote"
+      @clip-web="handleClipWebPage"
+      @open-graph="handleOpenGraph"
     />
 
     <Transition name="notes-drawer">

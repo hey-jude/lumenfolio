@@ -70,6 +70,16 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  // Home quick actions (centered empty state): web-clip in flight, and whether the
+  // knowledge-graph surface is available.
+  clipping: {
+    type: Boolean,
+    default: false,
+  },
+  graphEnabled: {
+    type: Boolean,
+    default: false,
+  },
   width: {
     type: Number,
     default: 420,
@@ -145,6 +155,10 @@ const emit = defineEmits([
   'edit-resend',
   'open-doc',
   'toggle-web-search',
+  // Home quick actions, shown in the centered empty state (no conversation yet).
+  'new-note',
+  'clip-web',
+  'open-graph',
 ])
 
 // Post-answer recommendations (related papers / prior knowledge) attach to the
@@ -219,6 +233,22 @@ const visibleMessages = computed(() => sessionMessages.value
   .filter((message) => !String(message.id || '').startsWith(welcomePrefix.value)))
 const hasChatHistory = computed(() => sessionMessages.value
   .some((message) => !String(message.id || '').startsWith(welcomePrefix.value)))
+// Recent sources shown as quick-open chips in the centered empty state. Mirrors the
+// old KnowledgeHome landing: the head of the library list (already recency-ordered).
+const homeRecentDocs = computed(() => (props.allDocuments || [])
+  .filter((doc) => doc && doc.id && doc.id !== 'empty')
+  .slice(0, 8))
+// Web-clip quick action: reveal an inline URL field, then hand the URL to the parent
+// (which owns the clip_web_page call and the clipping flag).
+const homeClipOpen = ref(false)
+const homeClipUrl = ref('')
+function submitHomeClip() {
+  const url = homeClipUrl.value.trim()
+  if (!url) return
+  emit('clip-web', url)
+  homeClipUrl.value = ''
+  homeClipOpen.value = false
+}
 const pendingImageDataUrl = ref('')
 const pendingImageName = ref('')
 const fileInputRef = ref(null)
@@ -1830,6 +1860,63 @@ function evidenceSourceLabel(source) {
         <div v-if="!visibleMessages.length" class="chat-empty-state">
           <div class="chat-empty-title">{{ ui.chatEmptyTitle }}</div>
           <div class="chat-empty-copy">{{ ui.chatEmptyHint }}</div>
+
+          <!-- Home quick actions + recent sources: only when this pane is the main
+               stage (no document open). A right-docked empty chat stays minimal. -->
+          <template v-if="centered">
+            <div class="home-quick-row">
+              <button type="button" class="home-quick-btn" @click="emit('new-note')">
+                <span class="home-quick-ic" aria-hidden="true">📝</span>{{ ui.newNote }}
+              </button>
+              <button
+                type="button"
+                class="home-quick-btn"
+                :class="{ active: homeClipOpen }"
+                @click="homeClipOpen = !homeClipOpen"
+              >
+                <span class="home-quick-ic" aria-hidden="true">🔗</span>{{ ui.clipWebPage }}
+              </button>
+              <button
+                v-if="graphEnabled"
+                type="button"
+                class="home-quick-btn"
+                @click="emit('open-graph')"
+              >
+                <span class="home-quick-ic" aria-hidden="true">🕸</span>{{ ui.knowledgeGraph }}
+              </button>
+            </div>
+
+            <form v-if="homeClipOpen" class="home-clip-form" @submit.prevent="submitHomeClip">
+              <input
+                v-model="homeClipUrl"
+                type="url"
+                class="home-clip-input"
+                :placeholder="ui.clipUrlPlaceholder"
+                :disabled="clipping"
+                autofocus
+              />
+              <button type="submit" class="home-clip-go" :disabled="clipping || !homeClipUrl.trim()">
+                {{ clipping ? (ui.clipping || '…') : (ui.clipGo || 'Clip') }}
+              </button>
+            </form>
+
+            <div v-if="homeRecentDocs.length" class="home-recent">
+              <div class="home-recent-label">{{ ui.recent }}</div>
+              <div class="home-recent-chips">
+                <button
+                  v-for="doc in homeRecentDocs"
+                  :key="doc.id"
+                  type="button"
+                  class="home-recent-chip"
+                  :title="docDisplayName(doc)"
+                  @click="emit('open-doc', doc.id)"
+                >
+                  {{ docDisplayName(doc) || doc.id }}
+                </button>
+              </div>
+            </div>
+          </template>
+
           <div
             v-if="chatInputEnabled && suggestedQuestions.length"
             class="chat-suggestions"
@@ -2923,6 +3010,117 @@ function evidenceSourceLabel(source) {
 .chat-suggestion-chip:hover {
   border-color: var(--accent, #8ae8ff);
   background: rgba(138, 232, 255, 0.1);
+}
+
+/* Home quick actions + recent sources (centered empty state) — the KnowledgeHome
+   landing folded into the conversation's blank slate. */
+.home-quick-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 30rem;
+  margin-top: 18px;
+}
+
+.home-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  color: var(--text-primary);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.home-quick-btn:hover,
+.home-quick-btn.active {
+  border-color: rgba(106, 169, 255, 0.4);
+  background: rgba(106, 169, 255, 0.1);
+}
+
+.home-quick-ic {
+  font-size: 13px;
+}
+
+.home-clip-form {
+  display: flex;
+  gap: 8px;
+  max-width: 30rem;
+  margin-top: 10px;
+}
+
+.home-clip-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-size: 12.5px;
+}
+
+.home-clip-input:focus {
+  outline: none;
+  border-color: rgba(106, 169, 255, 0.5);
+}
+
+.home-clip-go {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border: 1px solid rgba(106, 169, 255, 0.4);
+  border-radius: 9px;
+  background: rgba(106, 169, 255, 0.14);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.home-clip-go:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.home-recent {
+  max-width: 30rem;
+  margin-top: 18px;
+}
+
+.home-recent-label {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.home-recent-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.home-recent-chip {
+  max-width: 100%;
+  padding: 5px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.home-recent-chip:hover {
+  color: var(--text-primary);
+  border-color: rgba(106, 169, 255, 0.4);
+  background: rgba(106, 169, 255, 0.08);
 }
 
 .message-role,
