@@ -55,7 +55,12 @@ const crepeError = ref('')
 // only). Persisted so the user's choice sticks across notes/sessions. `splitRatio`
 // is the editor's fraction of the body width in split mode (debounced writes keep
 // dragging cheap).
-const viewMode = usePersistedRef('noteEditorViewMode', 'split')
+// Live (Milkdown/Crepe) is the default editing experience — you write formatted
+// prose, not raw syntax. The storage key is versioned: the old key's stored value
+// ('split' for anyone who used a previous build) would otherwise pin existing users
+// to the old default forever. Bumping it re-seeds everyone onto Live; whatever they
+// pick next persists under the new key.
+const viewMode = usePersistedRef('noteEditorViewModeV2', 'live')
 const splitRatio = usePersistedRef('noteEditorSplitRatio', 0.5, { debounceMs: 150 })
 const bodyHost = ref(null)
 let dividerDragging = false
