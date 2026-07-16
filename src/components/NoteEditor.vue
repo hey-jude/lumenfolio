@@ -97,10 +97,22 @@ async function mountCrepe() {
       import('../editor/wikiLink.js'),
       import('@milkdown/crepe/theme/common/style.css'),
       import('@milkdown/crepe/theme/frame-dark.css'),
+      // Crepe's Latex feature renders with katex, which needs its stylesheet. The
+      // preview pane happens to import it too, but live mode must not depend on that
+      // component being mounted — import it here so math is styled on its own terms.
+      import('katex/dist/katex.min.css'),
     ])
     // Bail out if the user left live mode (or the note closed) while loading.
     if (viewMode.value !== 'live' || !liveHost.value) return
-    const instance = new Crepe({ root: liveHost.value, defaultValue: body.value })
+    const instance = new Crepe({
+      root: liveHost.value,
+      defaultValue: body.value,
+      featureConfigs: {
+        placeholder: {
+          text: props.ui.liveEditorPlaceholder || 'Write, or type / for commands…',
+        },
+      },
+    })
     // Teach the pipeline about [[wikilinks]] BEFORE create(): Crepe builds its Editor
     // in the constructor and only wires it up on create(), so this is the seam where
     // extra schema/remark plugins can still be registered. Without this, remark would
@@ -675,9 +687,40 @@ const editorTheme = EditorView.theme(
   height: 100%;
 }
 
+/* Theme alignment: Crepe exposes its whole palette as --crepe-* custom properties,
+   so map them onto the app's tokens instead of fighting its stylesheet's specificity.
+   The imported frame-dark theme sets these on .milkdown; we override them there. */
 .note-crepe-host :deep(.milkdown) {
   height: 100%;
   background: transparent;
+
+  --crepe-color-background: transparent;
+  --crepe-color-on-background: var(--text-primary);
+  --crepe-color-surface: var(--bg-panel);
+  --crepe-color-surface-low: var(--bg-elevated);
+  --crepe-color-on-surface: var(--text-primary);
+  --crepe-color-on-surface-variant: var(--text-secondary);
+  --crepe-color-outline: var(--line-soft);
+  --crepe-color-primary: var(--accent);
+  --crepe-color-secondary: var(--accent-soft);
+  --crepe-color-on-secondary: var(--text-primary);
+  --crepe-color-inverse: var(--bg-elevated);
+  --crepe-color-on-inverse: var(--text-primary);
+  --crepe-color-inline-code: #ff9d9d;
+  --crepe-color-error: #ffb3b3;
+  --crepe-color-hover: rgba(255, 255, 255, 0.05);
+  --crepe-color-selected: var(--accent-soft);
+  --crepe-color-inline-area: var(--bg-elevated);
+
+  /* The stock theme ships Noto Serif/Noto Sans/Space Mono — fonts this app doesn't
+     load, so headings would fall back to a different family than the rest of the UI. */
+  --crepe-font-title: inherit;
+  --crepe-font-default: inherit;
+  --crepe-font-code: 'SF Mono', 'JetBrains Mono', Menlo, Monaco, 'Courier New', monospace;
+
+  /* frame-dark uses white-tinted shadows, which glow oddly on this darker surface. */
+  --crepe-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --crepe-shadow-2: 0 4px 14px rgba(0, 0, 0, 0.45);
 }
 
 .note-crepe-host :deep(.milkdown .ProseMirror) {
