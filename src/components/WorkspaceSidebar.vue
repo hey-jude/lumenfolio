@@ -397,22 +397,6 @@ function triggerDeleteRoot(root, event = null) {
   emit('delete-root', root)
 }
 
-function triggerDeleteDoc(doc, event = null) {
-  if (event) {
-    event.preventDefault()
-    event.stopPropagation()
-  }
-  emit('delete-doc', doc)
-}
-
-function triggerReindexDoc(doc, event = null) {
-  if (event) {
-    event.preventDefault()
-    event.stopPropagation()
-  }
-  emit('reindex-doc', doc)
-}
-
 // "Add to library" menu: type-agnostic entry (new note / import files / add
 // folder) replacing the old PDF-folder-only "+".
 const addMenuOpen = ref(false)
@@ -667,9 +651,16 @@ function cancelClearUnfiled(event = null) {
 
 // Obsidian-style right-click menu. `kind`: 'blank' (empty tree area → top level)
 // or 'collection' (a folder row → scoped to it).
-const contextMenu = reactive({ open: false, x: 0, y: 0, kind: 'blank', collection: null })
+const contextMenu = reactive({
+  open: false,
+  x: 0,
+  y: 0,
+  kind: 'blank',
+  collection: null,
+  doc: null,
+})
 
-function openContextMenu(event, kind, collection = null) {
+function openContextMenu(event, kind, collection = null, doc = null) {
   event.preventDefault()
   event.stopPropagation()
   contextMenu.open = true
@@ -677,6 +668,7 @@ function openContextMenu(event, kind, collection = null) {
   contextMenu.y = event.clientY
   contextMenu.kind = kind
   contextMenu.collection = collection
+  contextMenu.doc = doc
   // Dedupe: a second right-click while open must not stack listeners.
   window.removeEventListener('click', closeContextMenu)
   window.addEventListener('click', closeContextMenu)
@@ -686,7 +678,20 @@ function closeContextMenu() {
   if (!contextMenu.open) return
   contextMenu.open = false
   contextMenu.collection = null
+  contextMenu.doc = null
   window.removeEventListener('click', closeContextMenu)
+}
+
+function ctxReindexDoc() {
+  const doc = contextMenu.doc
+  closeContextMenu()
+  if (doc) emit('reindex-doc', doc)
+}
+
+function ctxDeleteDoc() {
+  const doc = contextMenu.doc
+  closeContextMenu()
+  if (doc) emit('delete-doc', doc)
 }
 
 function ctxNewNote() {
@@ -1054,6 +1059,7 @@ onBeforeUnmount(() => {
             draggable="true"
             @click="emit('select-doc', row.doc.id)"
             @dragstart="handleDocDragStart($event, row.doc)"
+            @contextmenu="openContextMenu($event, 'doc', null, row.doc)"
           >
             <div class="doc-main">
               <span class="doc-name-wrap">
@@ -1070,26 +1076,6 @@ onBeforeUnmount(() => {
             <div v-if="row.doc.indexStatus === 'indexing'" class="doc-progress" aria-hidden="true">
               <span :style="{ width: `${progressPercent(row.doc)}%` }"></span>
             </div>
-            <span class="doc-row-actions">
-              <span
-                class="doc-action-btn"
-                role="button"
-                tabindex="0"
-                :title="ui.reindexDocument"
-                :aria-label="ui.reindexDocument"
-                @click.stop="triggerReindexDoc(row.doc, $event)"
-                @keydown.enter.stop.prevent="triggerReindexDoc(row.doc, $event)"
-              >⟳</span>
-              <span
-                class="doc-action-btn doc-delete-btn"
-                role="button"
-                tabindex="0"
-                :title="ui.deleteDocument"
-                :aria-label="ui.deleteDocument"
-                @click.stop="triggerDeleteDoc(row.doc, $event)"
-                @keydown.enter.stop.prevent="triggerDeleteDoc(row.doc, $event)"
-              >×</span>
-            </span>
           </button>
         </template>
       </div>
@@ -1116,15 +1102,19 @@ onBeforeUnmount(() => {
       @click.stop
       @contextmenu.prevent.stop
     >
-      <button type="button" class="ctx-item" @click="ctxNewNote">
-        <span class="ctx-ic" aria-hidden="true">📝</span>{{ ui.newNote }}
-      </button>
-      <button type="button" class="ctx-item" @click="ctxNewCollection">
-        <span class="ctx-ic" aria-hidden="true">📁</span>{{ contextMenu.kind === 'collection' ? (ui.newSubcollection || 'New sub-collection') : (ui.newCollection || 'New collection') }}
-      </button>
-      <button type="button" class="ctx-item" @click="ctxImportFiles">
-        <span class="ctx-ic" aria-hidden="true">📄</span>{{ ui.importFiles || 'Import files…' }}
-      </button>
+      <!-- Create actions belong to the tree, not to a single source: right-clicking a
+           document offers actions for that document instead. -->
+      <template v-if="contextMenu.kind !== 'doc'">
+        <button type="button" class="ctx-item" @click="ctxNewNote">
+          <span class="ctx-ic" aria-hidden="true">📝</span>{{ ui.newNote }}
+        </button>
+        <button type="button" class="ctx-item" @click="ctxNewCollection">
+          <span class="ctx-ic" aria-hidden="true">📁</span>{{ contextMenu.kind === 'collection' ? (ui.newSubcollection || 'New sub-collection') : (ui.newCollection || 'New collection') }}
+        </button>
+        <button type="button" class="ctx-item" @click="ctxImportFiles">
+          <span class="ctx-ic" aria-hidden="true">📄</span>{{ ui.importFiles || 'Import files…' }}
+        </button>
+      </template>
       <template v-if="contextMenu.kind === 'collection'">
         <div class="ctx-sep"></div>
         <button type="button" class="ctx-item" @click="ctxRenameCollection">
@@ -1132,6 +1122,14 @@ onBeforeUnmount(() => {
         </button>
         <button type="button" class="ctx-item ctx-danger" @click="ctxDeleteCollection">
           <span class="ctx-ic" aria-hidden="true">×</span>{{ ui.deleteCollection || 'Delete' }}
+        </button>
+      </template>
+      <template v-else-if="contextMenu.kind === 'doc'">
+        <button type="button" class="ctx-item" @click="ctxReindexDoc">
+          <span class="ctx-ic" aria-hidden="true">⟳</span>{{ ui.reindexDocument }}
+        </button>
+        <button type="button" class="ctx-item ctx-danger" @click="ctxDeleteDoc">
+          <span class="ctx-ic" aria-hidden="true">×</span>{{ ui.deleteDocument }}
         </button>
       </template>
     </div>
@@ -2001,49 +1999,6 @@ onBeforeUnmount(() => {
 }
 
 /* Per-document actions (reindex + delete), revealed on row hover. */
-.doc-row-actions {
-  position: absolute;
-  top: 7px;
-  right: 8px;
-  display: flex;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-
-.doc-row:hover .doc-row-actions,
-.doc-row-actions:focus-within {
-  opacity: 1;
-}
-
-.doc-action-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 6px;
-  color: var(--text-secondary);
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
-}
-
-.doc-action-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-primary);
-}
-
-.doc-delete-btn {
-  color: rgba(255, 102, 102, 0.9);
-}
-
-.doc-delete-btn:hover {
-  background: rgba(255, 102, 102, 0.14);
-  color: rgba(255, 102, 102, 1);
-}
-
 .doc-row:hover {
   background: rgba(255, 255, 255, 0.04);
 }
