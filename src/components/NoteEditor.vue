@@ -36,6 +36,7 @@ const lastSavedTitle = ref('')
 const lastSavedBody = ref('')
 
 const editorHost = ref(null)
+const titleInput = ref(null)
 let view = null
 let savedFlashTimer = null
 
@@ -202,6 +203,29 @@ const previewBody = computed(() => {
 
 watch(dirty, (value) => emit('dirty-change', value))
 
+// Autosave. Saving is a DB write plus a re-index enqueue, and the backend's job
+// queue already de-dupes a pending re-index for the same document — but we still
+// debounce rather than save per keystroke, so the indexer only wakes once the user
+// actually pauses. Cmd+S (immediate) and the save-on-close in onBeforeUnmount both
+// remain as the belt-and-braces paths.
+const AUTOSAVE_DELAY_MS = 1000
+let autosaveTimer = null
+
+function queueAutosave() {
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = null
+    if (dirty.value && !saving.value) void save()
+  }, AUTOSAVE_DELAY_MS)
+}
+
+watch([title, body], () => {
+  // load() assigns title/body and then immediately re-baselines lastSaved*, so a
+  // freshly-loaded note is never dirty here and won't self-save on open.
+  if (loading.value || !dirty.value) return
+  queueAutosave()
+})
+
 function buildEditor() {
   if (!editorHost.value || view) return
   const state = EditorState.create({
@@ -248,6 +272,7 @@ async function load() {
     // Crepe is seeded with `defaultValue` at construction, so it can only be built
     // once the body has actually arrived — not at mount time when it's still empty.
     if (viewMode.value === 'live') await mountCrepe()
+    focusTitleIfNew()
     loadLinks()
   } catch (err) {
     error.value = err?.message || String(err)
@@ -341,6 +366,35 @@ function onKeydown(event) {
   }
 }
 
+/** Move the caret into the note body, whichever editor is currently mounted. */
+function focusBody() {
+  if (viewMode.value === 'live') {
+    liveHost.value?.querySelector('.ProseMirror')?.focus()
+    return
+  }
+  view?.focus()
+}
+
+// Enter in the title jumps to the body rather than doing nothing — the title is a
+// single line, and this matches the title-then-write flow Obsidian uses.
+function onTitleKeydown(event) {
+  if (event.key !== 'Enter') return
+  event.preventDefault()
+  focusBody()
+}
+
+// A brand-new note lands as the backend's placeholder title with an empty body.
+// Focus and select it so the first thing you type names the note — the title IS the
+// document's name, so this is the "name it first" flow. Selecting (rather than
+// clearing) keeps a sensible name if the user just starts writing in the body.
+function focusTitleIfNew() {
+  if (title.value !== 'Untitled' || body.value !== '') return
+  const input = titleInput.value
+  if (!input) return
+  input.focus()
+  input.select()
+}
+
 onMounted(() => {
   buildEditor()
   load()
@@ -352,6 +406,7 @@ onBeforeUnmount(() => {
   // document id, so switching sources destroys/recreates it; without this the
   // CodeMirror buffer (and the user's edits) would be silently lost. Fire-and-
   // forget — the IPC call completes even after the component is gone.
+  if (autosaveTimer) clearTimeout(autosaveTimer)
   if (dirty.value && !saving.value) void save()
   void destroyCrepe()
   window.removeEventListener('keydown', onKeydown)
@@ -404,11 +459,13 @@ const editorTheme = EditorView.theme(
   <div class="note-editor">
     <header class="note-editor-head">
       <input
+        ref="titleInput"
         v-model="title"
         class="note-title-input"
         type="text"
         :placeholder="ui.noteTitlePlaceholder"
         :disabled="loading"
+        @keydown="onTitleKeydown"
       />
       <div class="note-head-meta">
         <div class="note-view-toggle" role="group" :aria-label="ui.viewMode || 'View'">
@@ -446,14 +503,11 @@ const editorTheme = EditorView.theme(
           rel="noopener noreferrer"
           :title="sourceUrl"
         >{{ ui.sourceLink || 'Source' }}</a>
-        <span v-if="indexStatus === 'indexing'" class="note-index-status">{{ ui.indexing || 'Indexing…' }}</span>
+        <!-- Autosaved: no Save button. This is a status read-out, not a control —
+             Cmd+S still forces an immediate save for anyone who reaches for it. -->
+        <span v-if="saving" class="note-index-status">{{ ui.saving || 'Saving…' }}</span>
+        <span v-else-if="indexStatus === 'indexing'" class="note-index-status">{{ ui.indexing || 'Indexing…' }}</span>
         <span v-else-if="savedFlash" class="note-index-status note-saved">{{ ui.savedAndIndexed || 'Saved' }}</span>
-        <button
-          type="button"
-          class="note-save-btn"
-          :disabled="!dirty || saving"
-          @click="save"
-        >{{ saving ? (ui.saving || 'Saving…') : (ui.save || 'Save') }}</button>
       </div>
     </header>
 
@@ -614,21 +668,6 @@ const editorTheme = EditorView.theme(
 
 .note-index-status.note-saved {
   color: var(--success, #4caf86);
-}
-
-.note-save-btn {
-  border: none;
-  border-radius: 8px;
-  background: var(--accent, #6aa9ff);
-  color: #fff;
-  font-size: 13px;
-  padding: 6px 14px;
-  cursor: pointer;
-}
-
-.note-save-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 
 .note-error {
