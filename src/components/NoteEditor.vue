@@ -92,14 +92,20 @@ async function mountCrepe() {
   crepeLoading.value = true
   crepeError.value = ''
   try {
-    const [{ Crepe }] = await Promise.all([
+    const [{ Crepe }, { wikiLinkPlugins }] = await Promise.all([
       import('@milkdown/crepe'),
+      import('../editor/wikiLink.js'),
       import('@milkdown/crepe/theme/common/style.css'),
       import('@milkdown/crepe/theme/frame-dark.css'),
     ])
     // Bail out if the user left live mode (or the note closed) while loading.
     if (viewMode.value !== 'live' || !liveHost.value) return
     const instance = new Crepe({ root: liveHost.value, defaultValue: body.value })
+    // Teach the pipeline about [[wikilinks]] BEFORE create(): Crepe builds its Editor
+    // in the constructor and only wires it up on create(), so this is the seam where
+    // extra schema/remark plugins can still be registered. Without this, remark would
+    // escape the brackets to \[\[…]] and break wikilink extraction on the next save.
+    instance.editor.use(wikiLinkPlugins)
     instance.on((listener) => {
       listener.markdownUpdated((_ctx, markdown) => {
         if (!crepeReady) return
@@ -274,6 +280,16 @@ function onPreviewClick(event) {
   navigateWiki(decodeURIComponent(href.slice('#wiki:'.length)))
 }
 
+// Live mode renders wikilinks as <span data-wiki-link data-target="…">. Handle the
+// click here on the host rather than inside a ProseMirror plugin: the event bubbles
+// out of the editor, and this reuses the exact same resolve/create path as preview.
+function onLiveClick(event) {
+  const chip = event.target.closest?.('[data-wiki-link]')
+  if (!chip) return
+  event.preventDefault()
+  navigateWiki(chip.getAttribute('data-target') || '')
+}
+
 async function save() {
   if (saving.value || !dirty.value) return
   saving.value = true
@@ -436,7 +452,7 @@ const editorTheme = EditorView.theme(
            when Crepe is built; only one editor instance is ever alive, so Crepe and
            the CodeMirror view never fight over `body`. -->
       <div v-show="viewMode === 'live'" class="note-pane note-live-pane">
-        <div ref="liveHost" class="note-crepe-host"></div>
+        <div ref="liveHost" class="note-crepe-host" @click="onLiveClick"></div>
         <p v-if="crepeLoading" class="note-live-status">{{ ui.liveEditorLoading || 'Loading editor…' }}</p>
         <p v-else-if="crepeError" class="note-live-status note-live-error">
           {{ ui.liveEditorFailed || 'Live editor failed to load; use Edit mode.' }}
@@ -668,6 +684,25 @@ const editorTheme = EditorView.theme(
   max-width: 820px;
   margin: 0 auto;
   padding: 8px 16px 48px;
+}
+
+/* [[wikilink]] chips inside the live editor. Atomic nodes, so they read as one
+   clickable unit rather than editable bracket syntax. */
+.note-crepe-host :deep(.wiki-link) {
+  padding: 1px 4px;
+  border-radius: 5px;
+  background: rgba(106, 169, 255, 0.12);
+  color: var(--accent, #6aa9ff);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.note-crepe-host :deep(.wiki-link:hover) {
+  background: rgba(106, 169, 255, 0.22);
+}
+
+.note-crepe-host :deep(.wiki-link.ProseMirror-selectednode) {
+  outline: 1px solid rgba(106, 169, 255, 0.6);
 }
 
 .note-live-status {
