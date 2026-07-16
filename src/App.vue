@@ -2242,8 +2242,13 @@ async function handleMoveCollection({ id, parentId } = {}) {
   }
 }
 
-// After a note saves, reflect the new title in the tree and show the indexing
-// state — the global document-index listener flips it back to 'indexed'.
+// After a note saves, reflect the new title in the tree. Index status is
+// deliberately NOT written here: the reindex already emits queued → indexing →
+// indexed, and those events drive the status in the right order. This callback runs
+// after `await invoke('update_note_source')` resolves, which for a short note is
+// *after* the whole index has already finished — so optimistically setting
+// 'indexing' here clobbered the final 'indexed' with no event left to correct it,
+// pinning the UI on "Indexing…" forever. Autosave made that race fire on every edit.
 function handleNoteSaved(payload) {
   const target = allDocs.value.find((doc) => doc.id === payload?.documentId)
   if (!target) return
@@ -2251,9 +2256,6 @@ function handleNoteSaved(payload) {
     target.title = payload.title
     target.shortTitle = payload.title
   }
-  target.indexStatus = 'indexing'
-  target.status = 'indexing'
-  target.statusTone = 'warning'
 }
 
 async function handleSend(payload, selection = null) {
