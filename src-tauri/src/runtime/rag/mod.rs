@@ -753,15 +753,26 @@ pub fn rag_tool_specs_for_capabilities(
     // it, and the editor — the single writer — applies it if the user accepts.
     specs.push(RagToolSpec {
         name: "propose_note_edit",
-        description: "Propose a rewrite of the current authored source. Pass the COMPLETE new Markdown (not a diff, not an excerpt) as `content` — it replaces the whole note if the user accepts. This does NOT save: the user reviews your proposal and applies it. Call read_note_source first so you rewrite the real text, and preserve [[wikilinks]] verbatim. After calling, briefly say what you changed; do not repeat the full text in your answer.",
+        description: "Propose a change to the current authored source. PREFER `edits`: a list of exact string replacements, which touches only what you name and leaves the rest of the note — including anything the user is typing right now — alone. Use `content` (a complete rewrite) only when the whole note genuinely changes. Call read_note_source first and copy `oldText` VERBATIM from it, including whitespace and line breaks; each oldText must match exactly once, so include surrounding lines if it would otherwise be ambiguous. Preserve [[wikilinks]]. This does NOT save: the user reviews and applies it. After calling, briefly say what you changed; do not repeat the note's text in your answer.",
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "content": { "type": "string", "description": "The complete new Markdown body of the note" },
+                "edits": {
+                    "type": "array",
+                    "description": "Precise replacements, applied in order to the ORIGINAL note. Preferred over `content`.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "oldText": { "type": "string", "description": "Exact text from the note to replace; must occur exactly once" },
+                            "newText": { "type": "string", "description": "Replacement text; empty string deletes" }
+                        },
+                        "required": ["oldText", "newText"]
+                    }
+                },
+                "content": { "type": "string", "description": "Complete new Markdown body — only for a full rewrite" },
                 "summary": { "type": "string", "description": "One short line describing the change" },
                 "documentId": { "type": "string", "description": "Source id; defaults to the focus document" }
-            },
-            "required": ["content"]
+            }
         }),
     });
     if web_enabled {
@@ -1519,8 +1530,13 @@ fn execute_propose_note_edit_tool(
     args: &serde_json::Value,
 ) -> Result<RagToolExecutionOutput, String> {
     let content = string_arg(args, "content").unwrap_or_default();
-    if content.trim().is_empty() {
-        return Err("propose_note_edit needs the complete new Markdown in `content`".to_string());
+    let raw_edits = args.get("edits").and_then(|value| value.as_array());
+    let has_edits = raw_edits.is_some_and(|list| !list.is_empty());
+    if !has_edits && content.trim().is_empty() {
+        return Err(
+            "propose_note_edit needs either `edits` (preferred) or a complete `content` rewrite"
+                .to_string(),
+        );
     }
     let row: Option<(String, String, Option<String>)> = registry
         .conn
@@ -1533,13 +1549,46 @@ fn execute_propose_note_edit_tool(
     let Some((title, content_type, body_md)) = row else {
         return Err("Document not found".to_string());
     };
-    if body_md.unwrap_or_default().trim().is_empty() {
+    let body = body_md.unwrap_or_default();
+    if body.trim().is_empty() {
         return Err(format!(
             "'{title}' is a {content_type} source and cannot be edited — only notes, markdown files and web clips have an editable body."
         ));
     }
     let summary = string_arg(args, "summary").unwrap_or_default();
-    let line_count = content.lines().count();
+
+    // Precise mode. Resolve every oldText against the note NOW: the model gets its
+    // mistakes back immediately (ambiguous / not found, with the text echoed) instead
+    // of the user discovering them at apply time. Resolution also rewrites each
+    // oldText to the note's verbatim slice, so the apply step downstream only ever
+    // needs a plain exact match and this matcher stays in one place.
+    let (proposed_content, resolved_edits, line_count) = if has_edits {
+        let mut parsed = Vec::new();
+        for (index, item) in raw_edits.unwrap_or(&Vec::new()).iter().enumerate() {
+            let old_text = item
+                .get("oldText")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let new_text = item
+                .get("newText")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| format!("Edit {}: newText is required (use \"\" to delete)", index + 1))?
+                .to_string();
+            parsed.push(crate::runtime::note_edit::NoteEdit { old_text, new_text });
+        }
+        let (next, resolved) = crate::runtime::note_edit::apply_edits(&body, &parsed)?;
+        let count = resolved.len();
+        let json = resolved
+            .into_iter()
+            .map(|item| {
+                serde_json::json!({ "oldText": item.old_text, "newText": item.new_text })
+            })
+            .collect::<Vec<_>>();
+        (next, serde_json::Value::Array(json), count)
+    } else {
+        (content.to_string(), serde_json::Value::Null, content.lines().count())
+    };
     // A short ack, not the text: the model already has its own proposal, so echoing
     // it back as evidence would just burn context.
     let citation = Citation {
@@ -1549,7 +1598,12 @@ fn execute_propose_note_edit_tool(
         block_id: String::new(),
         section_title: Some(format!("{title} (proposed edit)")),
         quote: format!(
-            "Proposed rewrite recorded for '{title}' ({line_count} lines){}. Awaiting the user's approval — it is not saved yet.",
+            "Proposed {} for '{title}'{}. Awaiting the user's approval — it is not saved yet.",
+            if has_edits {
+                format!("{line_count} precise edit(s)")
+            } else {
+                format!("a full rewrite ({line_count} lines)")
+            },
             if summary.trim().is_empty() {
                 String::new()
             } else {
@@ -1566,11 +1620,14 @@ fn execute_propose_note_edit_tool(
         tree_nodes: Vec::new(),
         tool_call: tool_success_call(
             RagToolName::ProposeNoteEdit,
-            // Carries `content` — this is what the UI reads to render the diff card.
+            // What the UI reads. `edits` carry note-verbatim oldText (already resolved),
+            // so applying is a plain exact match; `content` is the resulting full text,
+            // used for the preview and as the fallback for whole-note rewrites.
             serde_json::json!({
                 "documentId": registry.document_id,
                 "summary": summary,
-                "content": content,
+                "edits": resolved_edits,
+                "content": proposed_content,
             }),
             1,
         ),
@@ -7907,11 +7964,57 @@ mod tests {
             .expect("body");
         assert_eq!(body, "old body");
 
-        // Empty content and file-backed sources are rejected.
+        // Neither edits nor content, and file-backed sources, are rejected.
         let empty = serde_json::json!({ "content": "   " });
         assert!(execute_propose_note_edit_tool(&registry, &empty).is_err());
         let pdf = RagToolRegistry::new(&conn, "pdf-1", 400);
         assert!(execute_propose_note_edit_tool(&pdf, &args).is_err());
+    }
+
+    #[test]
+    fn propose_note_edit_resolves_precise_edits_against_the_note() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                body_md TEXT
+            );
+             INSERT INTO documents (id, title, content_type, body_md)
+               VALUES ('note-1', 'Draft', 'note', '# Title\n\nHe said “hi” — ok.\n\ntail\n');",
+        )
+        .expect("schema");
+        let registry = RagToolRegistry::new(&conn, "note-1", 400);
+
+        // The model sends ASCII punctuation it can actually type.
+        let args = serde_json::json!({
+            "edits": [{ "oldText": "He said \"hi\" - ok.", "newText": "He said hello." }],
+            "summary": "reworded",
+        });
+        let output = execute_propose_note_edit_tool(&registry, &args).expect("proposal");
+
+        // oldText comes back resolved to the note's VERBATIM text (curly punctuation
+        // intact), so the apply step needs only an exact match.
+        assert_eq!(output.tool_call.input["edits"][0]["oldText"], "He said “hi” — ok.");
+        // `content` is the resulting full text, for the preview.
+        assert_eq!(
+            output.tool_call.input["content"],
+            "# Title\n\nHe said hello.\n\ntail\n"
+        );
+        // Still no write.
+        let body: String = conn
+            .query_row("SELECT body_md FROM documents WHERE id = 'note-1'", [], |r| r.get(0))
+            .expect("body");
+        assert!(body.contains("He said “hi” — ok."));
+
+        // A bad edit fails the call and echoes the text, rather than half-applying.
+        let bad = serde_json::json!({ "edits": [{ "oldText": "not present", "newText": "x" }] });
+        let err = match execute_propose_note_edit_tool(&registry, &bad) {
+            Ok(_) => panic!("missing oldText must fail"),
+            Err(err) => err,
+        };
+        assert!(err.contains("not present"), "{err}");
     }
 
     #[test]

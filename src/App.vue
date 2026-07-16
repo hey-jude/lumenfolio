@@ -2223,18 +2223,26 @@ async function handleClearUnfiled() {
 // (the single writer) rather than written to the database, so it can never race the
 // autosave. Requires the proposal's note to be the one on screen: applying to a
 // document the user isn't looking at would be an invisible edit.
-async function handleApplyNoteEdit({ documentId, content } = {}) {
-  if (typeof content !== 'string') return
+async function handleApplyNoteEdit(proposal = {}) {
+  const { documentId } = proposal
   if (documentId && documentId !== selectedDocId.value) {
     selectDoc(documentId)
     await nextTick()
   }
   const editor = noteEditorRef.value
-  if (!editor?.applyMarkdown) {
+  if (!editor?.applyProposal) {
     workspaceError.value = ui.value.proposedEditNeedsNote || 'Open the note to apply this edit.'
     return
   }
-  await editor.applyMarkdown(content)
+  try {
+    await editor.applyProposal(proposal)
+    workspaceError.value = ''
+  } catch (err) {
+    // A precise edit refused to apply because the note moved on under it. Say so
+    // rather than falling back to a whole-note overwrite, which is exactly the
+    // silent data loss precise edits exist to prevent.
+    workspaceError.value = err?.message || String(err)
+  }
 }
 
 async function handleMoveDocToCollection({ docId, collectionId } = {}) {

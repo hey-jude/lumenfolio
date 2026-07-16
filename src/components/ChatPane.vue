@@ -175,12 +175,16 @@ function noteEditProposal(message) {
     if (tool?.name !== 'propose_note_edit') continue
     const content = tool.args?.content
     if (typeof content !== 'string' || !content.trim()) continue
+    const edits = Array.isArray(tool.args?.edits) ? tool.args.edits : null
     return {
       key: `${message.id}:${index}`,
       documentId: String(tool.args?.documentId || ''),
       summary: String(tool.args?.summary || ''),
+      // Precise replacements when the agent scoped its change; null for a rewrite.
+      edits,
       content,
       lineCount: content.split('\n').length,
+      editCount: edits?.length || 0,
     }
   }
   return null
@@ -191,6 +195,7 @@ function applyNoteEdit(proposal) {
   appliedEditIds.add(proposal.key)
   emit('apply-note-edit', {
     documentId: proposal.documentId,
+    edits: proposal.edits,
     content: proposal.content,
   })
 }
@@ -2154,7 +2159,9 @@ function evidenceSourceLabel(source) {
               <div class="note-edit-head">
                 <span class="note-edit-title">{{ ui.proposedEdit || 'Proposed edit' }}</span>
                 <span class="note-edit-meta">
-                  {{ (ui.proposedEditLines || '{n} lines').replace('{n}', noteEditProposal(message).lineCount) }}
+                  {{ noteEditProposal(message).editCount
+                    ? (ui.proposedEditCount || '{n} edits').replace('{n}', noteEditProposal(message).editCount)
+                    : (ui.proposedEditLines || '{n} lines').replace('{n}', noteEditProposal(message).lineCount) }}
                 </span>
               </div>
               <div v-if="noteEditProposal(message).summary" class="note-edit-summary">
@@ -2162,7 +2169,20 @@ function evidenceSourceLabel(source) {
               </div>
               <details class="note-edit-details">
                 <summary>{{ ui.proposedEditPreview || 'Preview' }}</summary>
-                <pre class="note-edit-preview">{{ noteEditProposal(message).content }}</pre>
+                <!-- Precise edits show only what changes; a rewrite has to show the
+                     whole resulting note, since all of it is the change. -->
+                <div v-if="noteEditProposal(message).editCount" class="note-edit-hunks">
+                  <div
+                    v-for="(hunk, i) in noteEditProposal(message).edits"
+                    :key="`${noteEditProposal(message).key}-h${i}`"
+                    class="note-edit-hunk"
+                  >
+                    <pre class="note-edit-old">{{ hunk.oldText }}</pre>
+                    <pre v-if="hunk.newText" class="note-edit-new">{{ hunk.newText }}</pre>
+                    <div v-else class="note-edit-deleted">{{ ui.proposedEditDeleted || '(deleted)' }}</div>
+                  </div>
+                </div>
+                <pre v-else class="note-edit-preview">{{ noteEditProposal(message).content }}</pre>
               </details>
               <div class="note-edit-actions">
                 <span v-if="appliedEditIds.has(noteEditProposal(message).key)" class="note-edit-applied">
@@ -3252,6 +3272,48 @@ function evidenceSourceLabel(source) {
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.note-edit-hunks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.note-edit-hunk {
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.note-edit-old,
+.note-edit-new {
+  margin: 0;
+  padding: 6px 9px;
+  max-height: 160px;
+  overflow: auto;
+  font-family: 'SF Mono', Menlo, Monaco, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.note-edit-old {
+  background: rgba(255, 102, 102, 0.12);
+  color: rgba(255, 179, 179, 0.95);
+}
+
+.note-edit-new {
+  background: rgba(106, 220, 140, 0.12);
+  color: rgba(160, 230, 180, 0.95);
+}
+
+.note-edit-deleted {
+  padding: 6px 9px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-muted);
+  font-size: 11.5px;
 }
 
 .note-edit-actions {

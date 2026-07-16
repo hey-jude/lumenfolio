@@ -363,6 +363,51 @@ async function flushSave() {
   if (dirty.value && !saving.value) await save()
 }
 
+// Apply the agent's precise edits to the CURRENT buffer.
+//
+// This is the compare-and-swap step, and the reason precise edits matter beyond
+// saving tokens: the proposal was built from the note as it was when the agent read
+// it, and the user may have kept typing since. Each oldText arrives already resolved
+// to the note's verbatim text, so a plain exact match is enough here — and if a
+// target no longer matches uniquely we refuse the whole apply rather than clobber
+// whatever the user wrote in the meantime. A whole-note rewrite cannot do this: it
+// would silently overwrite those edits.
+function applyEditsToText(source, edits) {
+  let next = source
+  for (const [index, edit] of edits.entries()) {
+    const oldText = String(edit?.oldText ?? '')
+    const newText = String(edit?.newText ?? '')
+    if (!oldText) throw new Error(`Edit ${index + 1}: empty oldText`)
+    const first = next.indexOf(oldText)
+    if (first === -1) {
+      throw new Error(`Edit ${index + 1}: the text this edit targets is no longer in the note.`)
+    }
+    if (next.indexOf(oldText, first + oldText.length) !== -1) {
+      throw new Error(`Edit ${index + 1}: the text this edit targets now appears more than once.`)
+    }
+    // Deleting a whole line takes its newline, or a blank line is left behind.
+    const end = !newText && next[first + oldText.length] === '\n'
+      ? first + oldText.length + 1
+      : first + oldText.length
+    // Splice rather than String.replace: a newText containing `$&` or `$1` would be
+    // expanded as a replacement pattern.
+    next = next.slice(0, first) + newText + next.slice(end)
+  }
+  return next
+}
+
+/** Apply an agent proposal: precise edits when present, else a full rewrite. */
+async function applyProposal(proposal) {
+  const edits = Array.isArray(proposal?.edits) ? proposal.edits : null
+  if (edits && edits.length) {
+    // Build in memory first so a failure leaves the note untouched.
+    const next = applyEditsToText(body.value, edits)
+    await applyMarkdown(next)
+    return
+  }
+  await applyMarkdown(proposal?.content ?? '')
+}
+
 // Apply an agent-proposed rewrite. This is the ONLY path by which anything other
 // than the user changes the note, and it deliberately goes through the editor rather
 // than the database: the editor is the single writer, so an apply can never race the
@@ -387,7 +432,7 @@ async function applyMarkdown(markdown) {
   await flushSave()
 }
 
-defineExpose({ flushSave, applyMarkdown })
+defineExpose({ flushSave, applyMarkdown, applyProposal })
 
 function flashSaved() {
   savedFlash.value = true
