@@ -39,6 +39,18 @@ const editorHost = ref(null)
 let view = null
 let savedFlashTimer = null
 
+// Live (Typora-style) editing via Milkdown's Crepe. It reads/writes the SAME
+// `body` ref as the CodeMirror source editor, so save / dirty / autosave / wikilink
+// extraction are all unchanged — body_md stays the single source of truth. Loaded
+// lazily so the (large) editor bundle only arrives when the mode is actually used.
+const liveHost = ref(null)
+let crepe = null
+// Guards the markdownUpdated listener: Crepe's own serializer may normalize the
+// document while it boots, and recording that would mark a pristine note dirty.
+let crepeReady = false
+const crepeLoading = ref(false)
+const crepeError = ref('')
+
 // View mode: 'split' (editor + preview), 'edit' (editor only), 'preview' (preview
 // only). Persisted so the user's choice sticks across notes/sessions. `splitRatio`
 // is the editor's fraction of the body width in split mode (debounced writes keep
@@ -54,13 +66,69 @@ const editPaneStyle = computed(() => (
     : {}
 ))
 
+// Tear down / stand up Crepe as the user enters and leaves live mode. Keeping only
+// one editor alive at a time avoids two views racing to own `body`.
+async function destroyCrepe() {
+  crepeReady = false
+  const instance = crepe
+  crepe = null
+  if (!instance) return
+  try {
+    await instance.destroy()
+  } catch {
+    /* editor already torn down */
+  }
+}
+
+async function mountCrepe() {
+  await destroyCrepe()
+  await nextTick()
+  if (!liveHost.value) return
+  crepeLoading.value = true
+  crepeError.value = ''
+  try {
+    const [{ Crepe }] = await Promise.all([
+      import('@milkdown/crepe'),
+      import('@milkdown/crepe/theme/common/style.css'),
+      import('@milkdown/crepe/theme/frame-dark.css'),
+    ])
+    // Bail out if the user left live mode (or the note closed) while loading.
+    if (viewMode.value !== 'live' || !liveHost.value) return
+    const instance = new Crepe({ root: liveHost.value, defaultValue: body.value })
+    instance.on((listener) => {
+      listener.markdownUpdated((_ctx, markdown) => {
+        if (!crepeReady) return
+        body.value = markdown
+      })
+    })
+    await instance.create()
+    crepe = instance
+    crepeReady = true
+  } catch (err) {
+    crepeError.value = err?.message || String(err)
+  } finally {
+    crepeLoading.value = false
+  }
+}
+
 async function setViewMode(mode) {
+  const previous = viewMode.value
   viewMode.value = mode
+  if (mode === 'live') {
+    await mountCrepe()
+    return
+  }
+  if (previous === 'live') await destroyCrepe()
   if (mode !== 'preview') {
     // The editor was display:none in preview mode; CodeMirror must re-measure
     // once it's visible again or the cursor/scroll geometry is stale.
     await nextTick()
     view?.requestMeasure()
+    // Live mode may have rewritten `body`; push it into the CodeMirror buffer so
+    // the source view shows what was actually authored.
+    if (previous === 'live' && view && view.state.doc.toString() !== body.value) {
+      setEditorDoc(body.value)
+    }
   }
 }
 
@@ -154,6 +222,9 @@ async function load() {
     lastSavedBody.value = body.value
     await nextTick()
     setEditorDoc(body.value)
+    // Crepe is seeded with `defaultValue` at construction, so it can only be built
+    // once the body has actually arrived — not at mount time when it's still empty.
+    if (viewMode.value === 'live') await mountCrepe()
     loadLinks()
   } catch (err) {
     error.value = err?.message || String(err)
@@ -249,6 +320,7 @@ onBeforeUnmount(() => {
   // CodeMirror buffer (and the user's edits) would be silently lost. Fire-and-
   // forget — the IPC call completes even after the component is gone.
   if (dirty.value && !saving.value) void save()
+  void destroyCrepe()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('pointermove', onDividerDrag)
   window.removeEventListener('pointerup', stopDividerDrag)
@@ -309,6 +381,12 @@ const editorTheme = EditorView.theme(
         <div class="note-view-toggle" role="group" :aria-label="ui.viewMode || 'View'">
           <button
             type="button"
+            :class="{ active: viewMode === 'live' }"
+            :title="ui.viewLive || 'Live'"
+            @click="setViewMode('live')"
+          >{{ ui.viewLive || 'Live' }}</button>
+          <button
+            type="button"
             :class="{ active: viewMode === 'edit' }"
             :title="ui.viewEdit || 'Editor'"
             @click="setViewMode('edit')"
@@ -349,8 +427,18 @@ const editorTheme = EditorView.theme(
     <p v-if="error" class="note-error">{{ error }}</p>
 
     <div ref="bodyHost" class="note-editor-body" :class="`mode-${viewMode}`">
+      <!-- Live (Typora-style) WYSIWYG. The host stays mounted (v-show) so it exists
+           when Crepe is built; only one editor instance is ever alive, so Crepe and
+           the CodeMirror view never fight over `body`. -->
+      <div v-show="viewMode === 'live'" class="note-pane note-live-pane">
+        <div ref="liveHost" class="note-crepe-host"></div>
+        <p v-if="crepeLoading" class="note-live-status">{{ ui.liveEditorLoading || 'Loading editor…' }}</p>
+        <p v-else-if="crepeError" class="note-live-status note-live-error">
+          {{ ui.liveEditorFailed || 'Live editor failed to load; use Edit mode.' }}
+        </p>
+      </div>
       <div
-        v-show="viewMode !== 'preview'"
+        v-show="viewMode !== 'preview' && viewMode !== 'live'"
         class="note-pane note-edit-pane"
         :style="editPaneStyle"
       >
@@ -365,7 +453,7 @@ const editorTheme = EditorView.theme(
         @pointerdown="startDividerDrag"
       ></div>
       <div
-        v-show="viewMode !== 'edit'"
+        v-show="viewMode !== 'edit' && viewMode !== 'live'"
         class="note-pane note-preview-pane"
       >
         <div class="note-preview-inner" @click="onPreviewClick">
@@ -554,6 +642,41 @@ const editorTheme = EditorView.theme(
 .note-cm-host {
   height: 100%;
   padding: 0 12px;
+}
+
+/* Live (Crepe) pane. Crepe ships its own theme CSS; these rules only host it —
+   full height, a readable centred column, and the app's own surface behind it. */
+.note-live-pane {
+  position: relative;
+}
+
+.note-crepe-host {
+  height: 100%;
+}
+
+.note-crepe-host :deep(.milkdown) {
+  height: 100%;
+  background: transparent;
+}
+
+.note-crepe-host :deep(.milkdown .ProseMirror) {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 8px 16px 48px;
+}
+
+.note-live-status {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.note-live-error {
+  color: var(--text-danger, #ffb3b3);
 }
 
 .note-preview-pane {
