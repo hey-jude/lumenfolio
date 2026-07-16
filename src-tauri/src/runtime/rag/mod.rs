@@ -421,6 +421,7 @@ enum RagToolName {
     QueryKnowledgeGraph,
     SearchLibraryKnowledge,
     ListTrendingPapers,
+    ReadNoteSource,
     WebSearch,
     WebFetch,
 }
@@ -470,6 +471,7 @@ impl RagToolName {
             Self::QueryKnowledgeGraph => "query_knowledge_graph",
             Self::SearchLibraryKnowledge => "search_library_knowledge",
             Self::ListTrendingPapers => "list_trending_papers",
+            Self::ReadNoteSource => "read_note_source",
             Self::WebSearch => "web_search",
             Self::WebFetch => "web_fetch",
         }
@@ -729,6 +731,20 @@ pub fn rag_tool_specs_for_capabilities(
             }),
         });
     }
+    // Authored sources (notes / markdown / clips) keep their Markdown in body_md, and
+    // the user edits it live. Retrieval tools only ever see the *indexed* chunks, which
+    // lag a save and are split up — useless when the question is about the draft as a
+    // whole ("tidy this up", "what did I miss"). This returns the exact current text.
+    specs.push(RagToolSpec {
+        name: "read_note_source",
+        description: "Read the FULL current Markdown of an authored source (note, markdown file, or web clip) — the exact text as saved, not indexed excerpts. Use this when the user asks about the note they are writing (summarize/improve/continue/check it), or whenever you need its verbatim text rather than a search hit. Returns an error for PDFs and Office files, which have no editable body — use search_chunks / open_pages for those.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "documentId": { "type": "string", "description": "Source id; defaults to the focus document" }
+            }
+        }),
+    });
     if web_enabled {
         specs.push(RagToolSpec {
             name: "web_search",
@@ -1013,6 +1029,7 @@ pub fn execute_rag_tool_call_for_capabilities(
         "search_library_knowledge" => execute_search_library_knowledge_tool(&registry, args),
         "list_trending_papers" => execute_list_trending_papers_tool(&registry, args),
         // Web tools: not document-scoped. The Exa key (if any) lives in app_settings.
+        "read_note_source" => execute_read_note_source_tool(&registry),
         "web_search" => execute_web_search_tool(&registry, args, fallback_query),
         "web_fetch" => execute_web_fetch_tool(&registry, args),
         _ => execute_search_chunks_tool(&registry, args, fallback_query),
@@ -1411,6 +1428,66 @@ fn exa_api_key(conn: &Connection) -> Option<String> {
 /// `web_search`: query the public web (Exa when keyed, else DuckDuckGo). Results
 /// are returned as non-document citations (page 0, no document) carrying
 /// title/URL/snippet — the model cites them as Markdown links in the answer.
+/// Hard cap on the body handed to the model. Notes are normally far smaller than
+/// this; the cap only stops a pathological import from blowing the context budget,
+/// and truncation is stated in the text so the model never assumes it saw the end.
+const MAX_NOTE_SOURCE_CHARS: usize = 24_000;
+
+/// Return the verbatim Markdown of an authored source. File-backed documents (PDF,
+/// Office) carry no body_md — that is reported as an error rather than an empty
+/// result, so the model routes to the retrieval tools instead of retrying this one.
+fn execute_read_note_source_tool(
+    registry: &RagToolRegistry<'_>,
+) -> Result<RagToolExecutionOutput, String> {
+    let row: Option<(String, String, Option<String>)> = registry
+        .conn
+        .query_row(
+            "SELECT title, content_type, body_md FROM documents WHERE id = ?1",
+            params![registry.document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok();
+    let Some((title, content_type, body_md)) = row else {
+        return Err("Document not found".to_string());
+    };
+    let body = body_md.unwrap_or_default();
+    if body.trim().is_empty() {
+        return Err(format!(
+            "'{title}' is a {content_type} source with no editable Markdown body. Use search_chunks / open_pages to read it."
+        ));
+    }
+    let total_chars = body.chars().count();
+    let truncated = total_chars > MAX_NOTE_SOURCE_CHARS;
+    let text: String = if truncated {
+        let head: String = body.chars().take(MAX_NOTE_SOURCE_CHARS).collect();
+        format!("{head}\n\n[truncated: showing the first {MAX_NOTE_SOURCE_CHARS} of {total_chars} characters]")
+    } else {
+        body
+    };
+    let citation = Citation {
+        // Keyed by document so repeated calls in one turn dedupe instead of stacking.
+        id: format!("note-body-{}", registry.document_id),
+        label: "[note]".to_string(),
+        page: 0,
+        block_id: String::new(),
+        section_title: Some(format!("{title} (full source)")),
+        quote: text,
+        bbox_list: serde_json::json!([]),
+        document_id: registry.document_id.to_string(),
+        source: "note_source".to_string(),
+    };
+    Ok(RagToolExecutionOutput {
+        citations: vec![citation],
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::ReadNoteSource,
+            serde_json::json!({ "documentId": registry.document_id }),
+            1,
+        ),
+    })
+}
+
 fn execute_web_search_tool(
     registry: &RagToolRegistry<'_>,
     args: &serde_json::Value,
@@ -7671,6 +7748,44 @@ mod tests {
     }
 
     #[test]
+    fn read_note_source_returns_body_and_rejects_file_backed_documents() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                body_md TEXT
+            );
+             INSERT INTO documents (id, title, content_type, body_md)
+               VALUES ('note-1', 'Draft', 'note', '# Draft\n\nSee [[Other]].');
+             INSERT INTO documents (id, title, content_type, body_md)
+               VALUES ('pdf-1', 'Paper', 'pdf', NULL);",
+        )
+        .expect("schema");
+
+        // An authored source hands back its Markdown verbatim — including wikilink
+        // syntax, which the model needs to see to preserve it.
+        let registry = RagToolRegistry::new(&conn, "note-1", 400);
+        let output = execute_read_note_source_tool(&registry).expect("note body");
+        assert_eq!(output.citations.len(), 1);
+        assert_eq!(output.citations[0].quote, "# Draft\n\nSee [[Other]].");
+        assert_eq!(output.citations[0].document_id, "note-1");
+
+        // A PDF has no body: this must be an error (so the model routes to the
+        // retrieval tools) rather than an empty success it would retry.
+        let registry = RagToolRegistry::new(&conn, "pdf-1", 400);
+        let error = match execute_read_note_source_tool(&registry) {
+            Ok(_) => panic!("a pdf has no body_md and must be rejected"),
+            Err(err) => err,
+        };
+        assert!(error.contains("no editable Markdown body"), "{error}");
+
+        let registry = RagToolRegistry::new(&conn, "missing", 400);
+        assert!(execute_read_note_source_tool(&registry).is_err());
+    }
+
+    #[test]
     fn rag_tool_registry_exposes_supported_tools() {
         let names = rag_tool_specs_for_capabilities(false, false)
             .into_iter()
@@ -7696,7 +7811,10 @@ mod tests {
                 "recall_chat_history",
                 "query_knowledge_graph",
                 "search_library_knowledge",
-                "list_trending_papers"
+                "list_trending_papers",
+                // Always offered: authored sources expose their Markdown body, and the
+                // tool reports a clear error for file-backed documents that have none.
+                "read_note_source"
             ])
         );
         let vision_names = rag_tool_specs_for_capabilities(true, false)

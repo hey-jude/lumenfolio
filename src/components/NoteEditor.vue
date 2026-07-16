@@ -351,6 +351,20 @@ async function save() {
   }
 }
 
+// Write any pending edits out NOW and wait for it. The chat agent reads this note
+// from the database (read_note_source), so without a flush it could answer about a
+// version up to one autosave-debounce stale — i.e. missing the sentence the user
+// just typed and is asking about.
+async function flushSave() {
+  if (autosaveTimer) {
+    clearTimeout(autosaveTimer)
+    autosaveTimer = null
+  }
+  if (dirty.value && !saving.value) await save()
+}
+
+defineExpose({ flushSave })
+
 function flashSaved() {
   savedFlash.value = true
   if (savedFlashTimer) clearTimeout(savedFlashTimer)

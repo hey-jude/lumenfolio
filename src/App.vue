@@ -294,6 +294,9 @@ const providerDeleteConfirmOpen = ref(false)
 const providerDeleteStatus = ref('idle')
 const providerDeleteError = ref('')
 const providerDeleteTarget = ref({ key: '', id: '', name: '' })
+// The mounted NoteEditor (only present while an editable source is open). Used to
+// flush pending edits to the database before the agent reads the note.
+const noteEditorRef = ref(null)
 const workspaceDropActive = ref(false)
 const workspaceDropTargetRootId = ref('')
 // C-d: collection row (or '__unfiled__') an OS-file drag is hovering over.
@@ -2259,6 +2262,11 @@ function handleNoteSaved(payload) {
 }
 
 async function handleSend(payload, selection = null) {
+  // Flush the note editor first. The agent reads a note's Markdown from the database
+  // (read_note_source), and autosave is debounced — so asking "tidy this up" right
+  // after typing would otherwise hand the agent a version missing the last sentence.
+  // No-op unless an editable source is open with unsaved edits.
+  await noteEditorRef.value?.flushSave?.()
   const session = await ensureActiveSession()
   if (!session) return
   // The focus document is the session's default retrieval target; readiness and
@@ -5395,6 +5403,7 @@ onMounted(() => {
 
     <div v-else-if="!showTrending && !showGraph && !conversationCentered && editableSelected" class="reader-column">
       <NoteEditor
+        ref="noteEditorRef"
         :key="selectedDocument.id"
         :document-id="selectedDocument.id"
         :index-status="selectedDocument.indexStatus"
