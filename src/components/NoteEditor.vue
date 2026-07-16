@@ -363,7 +363,31 @@ async function flushSave() {
   if (dirty.value && !saving.value) await save()
 }
 
-defineExpose({ flushSave })
+// Apply an agent-proposed rewrite. This is the ONLY path by which anything other
+// than the user changes the note, and it deliberately goes through the editor rather
+// than the database: the editor is the single writer, so an apply can never race the
+// autosave. In live mode it lands as a ProseMirror transaction (replaceAll), which
+// keeps the undo stack — Cmd+Z reverts the agent's edit like any other change.
+async function applyMarkdown(markdown) {
+  const next = String(markdown ?? '')
+  if (viewMode.value === 'live' && crepe) {
+    try {
+      const { replaceAll } = await import('@milkdown/kit/utils')
+      crepe.editor.action(replaceAll(next))
+      // markdownUpdated syncs `body` back from the editor.
+    } catch {
+      body.value = next
+      setEditorDoc(next)
+    }
+  } else {
+    body.value = next
+    setEditorDoc(next)
+  }
+  await nextTick()
+  await flushSave()
+}
+
+defineExpose({ flushSave, applyMarkdown })
 
 function flashSaved() {
   savedFlash.value = true

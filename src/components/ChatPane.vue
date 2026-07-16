@@ -159,7 +159,41 @@ const emit = defineEmits([
   'new-note',
   'clip-web',
   'open-graph',
+  // An agent-proposed note rewrite the user accepted.
+  'apply-note-edit',
 ])
+
+// The agent proposes note rewrites via the propose_note_edit tool rather than
+// writing them — the proposed Markdown rides on that call's args. Surface it as an
+// explicit accept/reject card so the user, not the model, decides what lands.
+const appliedEditIds = reactive(new Set())
+
+function noteEditProposal(message) {
+  const events = message?.activityEvents || message?.retrievalTrace?.events || []
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const tool = events[index]?.tool
+    if (tool?.name !== 'propose_note_edit') continue
+    const content = tool.args?.content
+    if (typeof content !== 'string' || !content.trim()) continue
+    return {
+      key: `${message.id}:${index}`,
+      documentId: String(tool.args?.documentId || ''),
+      summary: String(tool.args?.summary || ''),
+      content,
+      lineCount: content.split('\n').length,
+    }
+  }
+  return null
+}
+
+function applyNoteEdit(proposal) {
+  if (!proposal || appliedEditIds.has(proposal.key)) return
+  appliedEditIds.add(proposal.key)
+  emit('apply-note-edit', {
+    documentId: proposal.documentId,
+    content: proposal.content,
+  })
+}
 
 // Post-answer recommendations (related papers / prior knowledge) attach to the
 // assistant message as `message.recommendations`. The block auto-expands when the
@@ -2115,6 +2149,34 @@ function evidenceSourceLabel(source) {
             </div>
             <div v-if="message.provider" class="message-provider">{{ message.provider }}</div>
 
+            <!-- Agent-proposed rewrite: nothing is saved until the user accepts. -->
+            <div v-if="noteEditProposal(message)" class="note-edit-card">
+              <div class="note-edit-head">
+                <span class="note-edit-title">{{ ui.proposedEdit || 'Proposed edit' }}</span>
+                <span class="note-edit-meta">
+                  {{ (ui.proposedEditLines || '{n} lines').replace('{n}', noteEditProposal(message).lineCount) }}
+                </span>
+              </div>
+              <div v-if="noteEditProposal(message).summary" class="note-edit-summary">
+                {{ noteEditProposal(message).summary }}
+              </div>
+              <details class="note-edit-details">
+                <summary>{{ ui.proposedEditPreview || 'Preview' }}</summary>
+                <pre class="note-edit-preview">{{ noteEditProposal(message).content }}</pre>
+              </details>
+              <div class="note-edit-actions">
+                <span v-if="appliedEditIds.has(noteEditProposal(message).key)" class="note-edit-applied">
+                  {{ ui.proposedEditApplied || 'Applied' }}
+                </span>
+                <button
+                  v-else
+                  type="button"
+                  class="note-edit-apply"
+                  @click="applyNoteEdit(noteEditProposal(message))"
+                >{{ ui.proposedEditApply || 'Apply to note' }}</button>
+              </div>
+            </div>
+
             <div v-if="actionableEvidenceGroups(message).length" class="evidence-group">
               <div v-if="answerSourceDocs(message).length" class="evidence-sources">
                 <span class="evidence-sources-label">{{ ui.sources }}</span>
@@ -3131,6 +3193,90 @@ function evidenceSourceLabel(source) {
   color: var(--text-primary);
   border-color: rgba(106, 169, 255, 0.4);
   background: rgba(106, 169, 255, 0.08);
+}
+
+/* Proposed-edit card: the agent never writes the note, so this is the gate. */
+.note-edit-card {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(106, 169, 255, 0.32);
+  border-radius: 12px;
+  background: rgba(106, 169, 255, 0.07);
+}
+
+.note-edit-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.note-edit-title {
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.note-edit-meta {
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.note-edit-summary {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.note-edit-details {
+  margin-top: 8px;
+}
+
+.note-edit-details summary {
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.note-edit-preview {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow: auto;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--text-secondary);
+  font-family: 'SF Mono', Menlo, Monaco, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.note-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.note-edit-apply {
+  padding: 5px 12px;
+  border: 1px solid rgba(106, 169, 255, 0.45);
+  border-radius: 8px;
+  background: rgba(106, 169, 255, 0.16);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.note-edit-apply:hover {
+  background: rgba(106, 169, 255, 0.26);
+}
+
+.note-edit-applied {
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .message-role,

@@ -2219,6 +2219,24 @@ async function handleClearUnfiled() {
   }
 }
 
+// The user accepted an agent-proposed rewrite. It is applied through the open editor
+// (the single writer) rather than written to the database, so it can never race the
+// autosave. Requires the proposal's note to be the one on screen: applying to a
+// document the user isn't looking at would be an invisible edit.
+async function handleApplyNoteEdit({ documentId, content } = {}) {
+  if (typeof content !== 'string') return
+  if (documentId && documentId !== selectedDocId.value) {
+    selectDoc(documentId)
+    await nextTick()
+  }
+  const editor = noteEditorRef.value
+  if (!editor?.applyMarkdown) {
+    workspaceError.value = ui.value.proposedEditNeedsNote || 'Open the note to apply this edit.'
+    return
+  }
+  await editor.applyMarkdown(content)
+}
+
 async function handleMoveDocToCollection({ docId, collectionId } = {}) {
   if (!docId) return
   const target = collectionId ?? null
@@ -5527,6 +5545,7 @@ onMounted(() => {
       @new-note="handleCreateNote"
       @clip-web="handleClipWebPage"
       @open-graph="handleOpenGraph"
+      @apply-note-edit="handleApplyNoteEdit"
     />
 
     <Transition name="notes-drawer">

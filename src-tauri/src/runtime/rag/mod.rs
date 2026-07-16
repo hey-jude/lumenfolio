@@ -422,6 +422,7 @@ enum RagToolName {
     SearchLibraryKnowledge,
     ListTrendingPapers,
     ReadNoteSource,
+    ProposeNoteEdit,
     WebSearch,
     WebFetch,
 }
@@ -472,6 +473,7 @@ impl RagToolName {
             Self::SearchLibraryKnowledge => "search_library_knowledge",
             Self::ListTrendingPapers => "list_trending_papers",
             Self::ReadNoteSource => "read_note_source",
+            Self::ProposeNoteEdit => "propose_note_edit",
             Self::WebSearch => "web_search",
             Self::WebFetch => "web_fetch",
         }
@@ -743,6 +745,23 @@ pub fn rag_tool_specs_for_capabilities(
             "properties": {
                 "documentId": { "type": "string", "description": "Source id; defaults to the focus document" }
             }
+        }),
+    });
+    // Editing is a *proposal*, never a write. The user is typing into the same note,
+    // so a direct body_md write would race their autosave and one side would be lost
+    // silently. Instead the proposal rides back on this tool call's args, the UI shows
+    // it, and the editor — the single writer — applies it if the user accepts.
+    specs.push(RagToolSpec {
+        name: "propose_note_edit",
+        description: "Propose a rewrite of the current authored source. Pass the COMPLETE new Markdown (not a diff, not an excerpt) as `content` — it replaces the whole note if the user accepts. This does NOT save: the user reviews your proposal and applies it. Call read_note_source first so you rewrite the real text, and preserve [[wikilinks]] verbatim. After calling, briefly say what you changed; do not repeat the full text in your answer.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": { "type": "string", "description": "The complete new Markdown body of the note" },
+                "summary": { "type": "string", "description": "One short line describing the change" },
+                "documentId": { "type": "string", "description": "Source id; defaults to the focus document" }
+            },
+            "required": ["content"]
         }),
     });
     if web_enabled {
@@ -1030,6 +1049,7 @@ pub fn execute_rag_tool_call_for_capabilities(
         "list_trending_papers" => execute_list_trending_papers_tool(&registry, args),
         // Web tools: not document-scoped. The Exa key (if any) lives in app_settings.
         "read_note_source" => execute_read_note_source_tool(&registry),
+        "propose_note_edit" => execute_propose_note_edit_tool(&registry, args),
         "web_search" => execute_web_search_tool(&registry, args, fallback_query),
         "web_fetch" => execute_web_fetch_tool(&registry, args),
         _ => execute_search_chunks_tool(&registry, args, fallback_query),
@@ -1483,6 +1503,75 @@ fn execute_read_note_source_tool(
         tool_call: tool_success_call(
             RagToolName::ReadNoteSource,
             serde_json::json!({ "documentId": registry.document_id }),
+            1,
+        ),
+    })
+}
+
+/// Record a proposed rewrite of an authored source. Deliberately does NOT write:
+/// the user is editing the same note, and a body_md write here would race the
+/// editor's debounced autosave — whichever landed second would silently erase the
+/// other. The editor stays the single writer; this only validates the proposal and
+/// acknowledges it. The proposed text reaches the UI on this call's own args (the
+/// trace carries them), so it is never duplicated back into the model's context.
+fn execute_propose_note_edit_tool(
+    registry: &RagToolRegistry<'_>,
+    args: &serde_json::Value,
+) -> Result<RagToolExecutionOutput, String> {
+    let content = string_arg(args, "content").unwrap_or_default();
+    if content.trim().is_empty() {
+        return Err("propose_note_edit needs the complete new Markdown in `content`".to_string());
+    }
+    let row: Option<(String, String, Option<String>)> = registry
+        .conn
+        .query_row(
+            "SELECT title, content_type, body_md FROM documents WHERE id = ?1",
+            params![registry.document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok();
+    let Some((title, content_type, body_md)) = row else {
+        return Err("Document not found".to_string());
+    };
+    if body_md.unwrap_or_default().trim().is_empty() {
+        return Err(format!(
+            "'{title}' is a {content_type} source and cannot be edited — only notes, markdown files and web clips have an editable body."
+        ));
+    }
+    let summary = string_arg(args, "summary").unwrap_or_default();
+    let line_count = content.lines().count();
+    // A short ack, not the text: the model already has its own proposal, so echoing
+    // it back as evidence would just burn context.
+    let citation = Citation {
+        id: format!("note-edit-{}", registry.document_id),
+        label: "[edit]".to_string(),
+        page: 0,
+        block_id: String::new(),
+        section_title: Some(format!("{title} (proposed edit)")),
+        quote: format!(
+            "Proposed rewrite recorded for '{title}' ({line_count} lines){}. Awaiting the user's approval — it is not saved yet.",
+            if summary.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", summary.trim())
+            }
+        ),
+        bbox_list: serde_json::json!([]),
+        document_id: registry.document_id.to_string(),
+        source: "note_edit_proposal".to_string(),
+    };
+    Ok(RagToolExecutionOutput {
+        citations: vec![citation],
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::ProposeNoteEdit,
+            // Carries `content` — this is what the UI reads to render the diff card.
+            serde_json::json!({
+                "documentId": registry.document_id,
+                "summary": summary,
+                "content": content,
+            }),
             1,
         ),
     })
@@ -7786,6 +7875,46 @@ mod tests {
     }
 
     #[test]
+    fn propose_note_edit_records_the_proposal_without_writing() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE documents (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                body_md TEXT
+            );
+             INSERT INTO documents (id, title, content_type, body_md)
+               VALUES ('note-1', 'Draft', 'note', 'old body');
+             INSERT INTO documents (id, title, content_type, body_md)
+               VALUES ('pdf-1', 'Paper', 'pdf', NULL);",
+        )
+        .expect("schema");
+
+        let registry = RagToolRegistry::new(&conn, "note-1", 400);
+        let args = serde_json::json!({ "content": "# New\n\nbody", "summary": "tightened" });
+        let output = execute_propose_note_edit_tool(&registry, &args).expect("proposal");
+
+        // The proposal rides on the tool call's args — that is what the UI reads.
+        assert_eq!(output.tool_call.input["content"], "# New\n\nbody");
+        // The citation is a short ack, NOT the text: echoing it would burn context.
+        assert_eq!(output.citations[0].source, "note_edit_proposal");
+        assert!(!output.citations[0].quote.contains("# New"));
+
+        // Crucially: nothing was written. The editor stays the single writer.
+        let body: String = conn
+            .query_row("SELECT body_md FROM documents WHERE id = 'note-1'", [], |r| r.get(0))
+            .expect("body");
+        assert_eq!(body, "old body");
+
+        // Empty content and file-backed sources are rejected.
+        let empty = serde_json::json!({ "content": "   " });
+        assert!(execute_propose_note_edit_tool(&registry, &empty).is_err());
+        let pdf = RagToolRegistry::new(&conn, "pdf-1", 400);
+        assert!(execute_propose_note_edit_tool(&pdf, &args).is_err());
+    }
+
+    #[test]
     fn rag_tool_registry_exposes_supported_tools() {
         let names = rag_tool_specs_for_capabilities(false, false)
             .into_iter()
@@ -7812,9 +7941,10 @@ mod tests {
                 "query_knowledge_graph",
                 "search_library_knowledge",
                 "list_trending_papers",
-                // Always offered: authored sources expose their Markdown body, and the
-                // tool reports a clear error for file-backed documents that have none.
-                "read_note_source"
+                // Always offered: authored sources expose their Markdown body, and both
+                // tools report a clear error for file-backed documents that have none.
+                "read_note_source",
+                "propose_note_edit"
             ])
         );
         let vision_names = rag_tool_specs_for_capabilities(true, false)
