@@ -83,6 +83,8 @@ struct PdfDocument {
     content_type: String,
     /// Logical collection membership (None = unfiled). Decoupled from disk.
     collection_id: Option<String>,
+    /// Manual sibling order within the collection (ascending). Ties break on title.
+    position: i64,
     size: u64,
     modified: u64,
     page_count: u32,
@@ -5932,6 +5934,8 @@ pub fn run() {
             collections::delete_collection,
             collections::move_document_to_collection,
             collections::move_collection,
+            collections::reorder_documents,
+            collections::reorder_collections,
             trending::fetch_trending_papers,
             trending::add_trending_paper,
             runtime::precipitation::enqueue_document_knowledge,

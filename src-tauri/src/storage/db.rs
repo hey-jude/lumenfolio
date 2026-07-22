@@ -697,6 +697,16 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         "collection_id",
         "ALTER TABLE documents ADD COLUMN collection_id TEXT",
     )?;
+    // Knowledge-base pivot (Reorder): manual sibling order within a collection
+    // (mirrors collections.position). Existing rows backfill to 0 and keep their
+    // title order via the ORDER BY tiebreak until the first drag assigns distinct
+    // positions; new/moved documents append at MAX+1.
+    ensure_column(
+        conn,
+        "documents",
+        "position",
+        "ALTER TABLE documents ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+    )?;
     // Recognized text inside figure/chart/image crops (OCR). The crop image
     // itself (image_path) is always preserved as the primary evidence; this
     // only ADDS searchable text alongside it.

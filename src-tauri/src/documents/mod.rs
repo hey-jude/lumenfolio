@@ -90,13 +90,14 @@ pub(crate) fn load_documents_for_root_conn(
                     COALESCE(vij.version, 0) AS visual_index_version,
                     COALESCE(vij.error, '') AS visual_index_error,
                     documents.content_type,
-                    documents.collection_id
+                    documents.collection_id,
+                    documents.position
 	             FROM documents
 	             LEFT JOIN document_index_jobs vij
 	               ON vij.document_id = documents.id
 	              AND vij.job_type = 'visual_tsr'
 	             WHERE documents.workspace_root_id = ?1
-	             ORDER BY lower(documents.short_title)",
+	             ORDER BY documents.position ASC, lower(documents.short_title) ASC",
         )
         .map_err(|err| format!("Failed to load documents: {err}"))?;
 
@@ -121,6 +122,7 @@ pub(crate) fn load_documents_for_root_conn(
                 visual_index_error: row.get(14)?,
                 content_type: row.get(15)?,
                 collection_id: row.get(16)?,
+                position: row.get(17)?,
             })
         })
         .map_err(|err| format!("Failed to load documents: {err}"))?
@@ -405,11 +407,15 @@ pub(crate) fn assign_collection(
     if exists == 0 {
         return Ok(());
     }
+    let base = next_document_position(&conn, Some(target))?;
     let mut stmt = conn
-        .prepare("UPDATE documents SET collection_id = ?2, updated_at = unixepoch() WHERE id = ?1")
+        .prepare(
+            "UPDATE documents SET collection_id = ?2, position = ?3, updated_at = unixepoch()
+             WHERE id = ?1",
+        )
         .map_err(|err| format!("Failed to prepare collection assignment: {err}"))?;
-    for id in document_ids {
-        stmt.execute(params![id, target])
+    for (offset, id) in document_ids.iter().enumerate() {
+        stmt.execute(params![id, target, base + offset as i64])
             .map_err(|err| format!("Failed to assign collection: {err}"))?;
     }
     Ok(())
@@ -466,6 +472,7 @@ pub(crate) fn build_document_for_path(
         title,
         content_type: content_type.to_string(),
         collection_id: None,
+        position: 0,
         path: canonical_path.to_string_lossy().to_string(),
         size: metadata.len(),
         modified: metadata
@@ -675,6 +682,22 @@ fn new_text_document_id(content_type: &str) -> String {
 /// Create a disk-decoupled authored source (note / web clip / imported md/txt)
 /// in the Knowledge Base root. Returns the new document id. The row starts
 /// `index_status = 'pending'`; the caller enqueues a reindex to chunk the body.
+/// Next manual-order slot for a new/moved document inside `collection_id`
+/// (NULL = the root). Mirrors the collections.position scheme so a freshly
+/// created or filed source appends to the bottom of its siblings rather than
+/// jumping into the middle by title. `IS ?1` matches NULL correctly.
+pub(crate) fn next_document_position(
+    conn: &Connection,
+    collection_id: Option<&str>,
+) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM documents WHERE collection_id IS ?1",
+        params![collection_id],
+        |row| row.get(0),
+    )
+    .map_err(|err| format!("Failed to compute document position: {err}"))
+}
+
 pub(crate) fn create_text_document(
     database: &State<'_, AppDatabase>,
     content_type: &str,
@@ -698,12 +721,13 @@ pub(crate) fn create_text_document(
             trimmed.to_string()
         }
     };
+    let position = next_document_position(&conn, collection_id)?;
     conn.execute(
         "INSERT INTO documents
             (id, workspace_root_id, path, title, short_title, file_size, modified,
              page_count, last_page, content_type, body_md, source_url, collection_id,
-             index_status, index_version, created_at, updated_at, last_opened_at)
-         VALUES (?1, ?2, ?3, ?4, ?4, ?5, unixepoch(), 0, 1, ?6, ?7, ?8, ?9,
+             position, index_status, index_version, created_at, updated_at, last_opened_at)
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5, unixepoch(), 0, 1, ?6, ?7, ?8, ?9, ?10,
                  'pending', 0, unixepoch(), unixepoch(), unixepoch())",
         params![
             id,
@@ -715,6 +739,7 @@ pub(crate) fn create_text_document(
             body_md,
             source_url,
             collection_id,
+            position,
         ],
     )
     .map_err(|err| format!("Failed to create text document: {err}"))?;
@@ -832,6 +857,7 @@ mod tests {
               last_page INTEGER NOT NULL DEFAULT 1,
               content_type TEXT NOT NULL DEFAULT 'pdf',
               collection_id TEXT,
+              position INTEGER NOT NULL DEFAULT 0,
               index_status TEXT NOT NULL DEFAULT 'pending',
               index_version INTEGER NOT NULL DEFAULT 0
             );
