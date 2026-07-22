@@ -822,13 +822,13 @@ onBeforeUnmount(() => {
           </button>
           <div v-if="addMenuOpen" class="add-menu collapsed-add-menu" @mousedown.stop>
             <button type="button" class="add-menu-item" @click="chooseAdd('note')">
-              <span class="add-menu-ic" aria-hidden="true">📝</span>{{ ui.newNote }}
+              <span class="add-menu-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V9z" /><path d="M13 3v6h6" /><path d="M8.5 13.5h7M8.5 16.5h4.5" /></svg></span>{{ ui.newNote }}
             </button>
             <button type="button" class="add-menu-item" @click="chooseAdd('files')">
-              <span class="add-menu-ic" aria-hidden="true">📄</span>{{ ui.importFiles || 'Import files…' }}
+              <span class="add-menu-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 15v2.5A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V15" /><path d="M12 4v10" /><path d="M8 10.5l4 4 4-4" /></svg></span>{{ ui.importFiles || 'Import files…' }}
             </button>
             <button type="button" class="add-menu-item" @click="chooseAdd('folder')">
-              <span class="add-menu-ic" aria-hidden="true">📁</span>{{ ui.addFolder }}
+              <span class="add-menu-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5A1.5 1.5 0 0 1 5.5 5h3.8a1.5 1.5 0 0 1 1.06.44l1.2 1.12a1.5 1.5 0 0 0 1.06.44H18.5A1.5 1.5 0 0 1 20 8.5V17a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17z" /></svg></span>{{ ui.addFolder }}
             </button>
           </div>
         </div>
@@ -1120,30 +1120,30 @@ onBeforeUnmount(() => {
            document offers actions for that document instead. -->
       <template v-if="contextMenu.kind !== 'doc'">
         <button type="button" class="ctx-item" @click="ctxNewNote">
-          <span class="ctx-ic" aria-hidden="true">📝</span>{{ ui.newNote }}
+          <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3H6.5A1.5 1.5 0 0 0 5 4.5v15A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5V9z" /><path d="M13 3v6h6" /><path d="M8.5 13.5h7M8.5 16.5h4.5" /></svg></span>{{ ui.newNote }}
         </button>
         <button type="button" class="ctx-item" @click="ctxNewCollection">
-          <span class="ctx-ic" aria-hidden="true">📁</span>{{ contextMenu.kind === 'collection' ? (ui.newSubcollection || 'New sub-collection') : (ui.newCollection || 'New collection') }}
+          <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5A1.5 1.5 0 0 1 5.5 5h3.8a1.5 1.5 0 0 1 1.06.44l1.2 1.12a1.5 1.5 0 0 0 1.06.44H18.5A1.5 1.5 0 0 1 20 8.5V17a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17z" /></svg></span>{{ contextMenu.kind === 'collection' ? (ui.newSubcollection || 'New sub-collection') : (ui.newCollection || 'New collection') }}
         </button>
         <button type="button" class="ctx-item" @click="ctxImportFiles">
-          <span class="ctx-ic" aria-hidden="true">📄</span>{{ ui.importFiles || 'Import files…' }}
+          <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 15v2.5A1.5 1.5 0 0 0 6.5 19h11a1.5 1.5 0 0 0 1.5-1.5V15" /><path d="M12 4v10" /><path d="M8 10.5l4 4 4-4" /></svg></span>{{ ui.importFiles || 'Import files…' }}
         </button>
       </template>
       <template v-if="contextMenu.kind === 'collection'">
         <div class="ctx-sep"></div>
         <button type="button" class="ctx-item" @click="ctxRenameCollection">
-          <span class="ctx-ic" aria-hidden="true">✎</span>{{ ui.renameCollection || 'Rename' }}
+          <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M13.5 6.5l3 3" /></svg></span>{{ ui.renameCollection || 'Rename' }}
         </button>
         <button type="button" class="ctx-item ctx-danger" @click="ctxDeleteCollection">
-          <span class="ctx-ic" aria-hidden="true">×</span>{{ ui.deleteCollection || 'Delete' }}
+          <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M7 7l.8 11a2 2 0 0 0 2 1.9h4.4a2 2 0 0 0 2-1.9L17 7M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7" /></svg></span>{{ ui.deleteCollection || 'Delete' }}
         </button>
       </template>
       <template v-else-if="contextMenu.kind === 'doc'">
         <button type="button" class="ctx-item" @click="ctxReindexDoc">
-          <span class="ctx-ic" aria-hidden="true">⟳</span>{{ ui.reindexDocument }}
+          <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" /><path d="M19.5 4.5V9H15" /></svg></span>{{ ui.reindexDocument }}
         </button>
         <button type="button" class="ctx-item ctx-danger" @click="ctxDeleteDoc">
-          <span class="ctx-ic" aria-hidden="true">×</span>{{ ui.deleteDocument }}
+          <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M7 7l.8 11a2 2 0 0 0 2 1.9h4.4a2 2 0 0 0 2-1.9L17 7M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7" /></svg></span>{{ ui.deleteDocument }}
         </button>
       </template>
     </div>
@@ -1595,8 +1595,16 @@ onBeforeUnmount(() => {
 }
 
 .add-menu-ic {
-  font-size: 14px;
-  line-height: 1;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--text-secondary);
+}
+
+.add-menu-ic svg {
+  display: block;
 }
 
 /* Right-click context menu (fixed to the cursor). */
@@ -1638,11 +1646,23 @@ onBeforeUnmount(() => {
   color: var(--danger, #e06a6a);
 }
 
+/* The icon is dimmer than its label at rest; on the danger row's hover it should
+   follow the label into red rather than stay grey. */
+.ctx-item.ctx-danger:hover .ctx-ic {
+  color: inherit;
+}
+
 .ctx-ic {
-  font-size: 14px;
-  line-height: 1;
+  display: grid;
+  place-items: center;
   width: 16px;
-  text-align: center;
+  height: 16px;
+  flex: 0 0 16px;
+  color: var(--text-secondary);
+}
+
+.ctx-ic svg {
+  display: block;
 }
 
 .ctx-sep {
