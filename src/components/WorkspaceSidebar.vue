@@ -122,55 +122,159 @@ const emit = defineEmits([
   'go-home',
 ])
 
-// ── Internal drag-and-drop ─────────────────────────────────────────────────
-// Three gestures over one set of handlers: refile (drop a doc INTO a folder),
-// reparent (drop a folder INTO a folder), and manual reorder (drop BETWEEN two
-// sibling rows). OS-file drops use a different mime and are handled on the
-// sidebar container, so these handlers no-op for them.
+// ── Internal drag-and-drop (pointer-based) ─────────────────────────────────
+// HTML5 drag-and-drop is unusable here. Tauri's native OS file-drop (needed to
+// import files dropped from Finder) is enabled, and on macOS WKWebView that
+// routes *every* in-webview drag through the native layer too: the `drop` event
+// never lands on the element, the cursor shows the OS "copy (+)" affordance, and
+// the window's file-drop overlay flashes. So the tree's own three gestures —
+// refile (doc INTO a folder), reparent (folder INTO a folder), and reorder
+// (BETWEEN sibling rows) — run on plain mouse events, which the native layer
+// leaves alone. OS file drops keep using the native path, untouched.
 
-// The item being dragged. Captured on dragstart because dataTransfer.getData is
-// unreadable during dragover, where the drop mode is decided.
-const dragging = reactive({ kind: '', id: '' })
+const DRAG_THRESHOLD_PX = 4
 
-// Where the dragged item would land. `key` matches a row's :key; `mode` is
-// 'into' (inside a folder, reuses the drag-over highlight) or 'before'/'after'
+// The active pointer-drag. `label` feeds the floating ghost; `x`/`y` track it.
+const dragging = reactive({ active: false, kind: '', id: '', label: '', x: 0, y: 0 })
+
+// Where the dragged item would land. `key` matches a row's data-row-key; `mode`
+// is 'into' (inside a folder, reuses the drag-over highlight) or 'before'/'after'
 // (an insertion line between sibling rows).
 const dropHint = reactive({ key: '', mode: '' })
+
+// Captured on mousedown; promoted to a real drag only past the move threshold so
+// a plain click still selects.
+let pendingDrag = null
 
 function rowKey(row) {
   return row.type === 'doc' ? `doc-${row.doc.id}` : `col-${row.collection.id}`
 }
 
-function clearDrag() {
+function resetDrag() {
+  pendingDrag = null
+  dragging.active = false
   dragging.kind = ''
   dragging.id = ''
+  dragging.label = ''
   dropHint.key = ''
   dropHint.mode = ''
+  document.body.style.userSelect = ''
+  window.removeEventListener('mousemove', onDragMouseMove)
+  window.removeEventListener('mouseup', onDragMouseUp)
 }
 
-function draggedKind(dataTransfer) {
-  const types = dataTransfer ? Array.from(dataTransfer.types || []) : []
-  if (types.includes('application/x-lumenfolio-doc-id')) return 'doc'
-  if (types.includes('application/x-lumenfolio-collection-id')) return 'collection'
+function onRowMouseDown(event, row) {
+  // Left button only. Ignore presses on the row's own controls (caret, action
+  // buttons, rename input) so those keep clicking; the name / body still drags.
+  if (event.button !== 0) return
+  if (event.target.closest('.collection-caret, .collection-action-btn, .collection-rename-input')) return
+  pendingDrag = {
+    kind: row.type === 'doc' ? 'doc' : 'collection',
+    id: row.type === 'doc' ? row.doc.id : row.collection.id,
+    label: row.type === 'doc' ? (row.doc.shortTitle || row.doc.title || '') : (row.collection.name || ''),
+    startX: event.clientX,
+    startY: event.clientY,
+  }
+  window.addEventListener('mousemove', onDragMouseMove)
+  window.addEventListener('mouseup', onDragMouseUp)
+}
+
+function onDragMouseMove(event) {
+  if (!pendingDrag) return
+  if (!dragging.active) {
+    if (Math.hypot(event.clientX - pendingDrag.startX, event.clientY - pendingDrag.startY) < DRAG_THRESHOLD_PX) {
+      return
+    }
+    dragging.active = true
+    dragging.kind = pendingDrag.kind
+    dragging.id = pendingDrag.id
+    dragging.label = pendingDrag.label
+    document.body.style.userSelect = 'none'
+  }
+  dragging.x = event.clientX
+  dragging.y = event.clientY
+  updateDropHint(event.clientX, event.clientY)
+}
+
+// Hit-test the row under the pointer and decide where the drop would land.
+function updateDropHint(x, y) {
+  const rowEl = document.elementFromPoint(x, y)?.closest('[data-row-key]')
+  const key = rowEl?.getAttribute('data-row-key') || ''
+  const row = key ? treeRows.value.find((candidate) => rowKey(candidate) === key) : null
+  if (!row) {
+    dropHint.key = ''
+    dropHint.mode = ''
+    return
+  }
+  const rect = rowEl.getBoundingClientRect()
+  const offset = rect.height > 0 ? (y - rect.top) / rect.height : 0.5
+  dropHint.key = key
+  dropHint.mode = dropModeFor(row, offset)
+}
+
+function dropModeFor(row, offset) {
+  if (row.type === 'collection') {
+    // A document can only land INSIDE a folder (folders and documents occupy
+    // separate zones, so there's no doc-vs-folder ordering). A folder's top and
+    // bottom edges reorder among sibling folders; its middle reparents into it.
+    return dragging.kind === 'doc' ? 'into' : offset < 0.3 ? 'before' : offset > 0.7 ? 'after' : 'into'
+  }
+  if (row.type === 'doc' && dragging.kind === 'doc') {
+    return offset < 0.5 ? 'before' : 'after'
+  }
   return ''
 }
 
-function handleCollectionDragStart(event, collection) {
-  if (!event?.dataTransfer) return
-  event.dataTransfer.setData('application/x-lumenfolio-collection-id', collection.id)
-  event.dataTransfer.effectAllowed = 'move'
-  dragging.kind = 'collection'
-  dragging.id = collection.id
+function onDragMouseUp() {
+  const wasDragging = dragging.active
+  const kind = dragging.kind
+  const draggedId = dragging.id
+  const key = dropHint.key
+  const mode = dropHint.mode
+  resetDrag()
+  if (!wasDragging) return // a plain click; let it select
+  swallowNextClick()
+  if (!draggedId || !mode || !key) return
+  const row = treeRows.value.find((candidate) => rowKey(candidate) === key)
+  if (row) performDrop(kind, draggedId, row, mode)
 }
 
-function handleDocDragStart(event, doc) {
-  // Any source can be dragged to refile / reorder it — even one still indexing
-  // (readiness gates asking, not organizing).
-  if (!doc?.id || !event?.dataTransfer) return
-  event.dataTransfer.setData('application/x-lumenfolio-doc-id', doc.id)
-  event.dataTransfer.effectAllowed = 'move'
-  dragging.kind = 'doc'
-  dragging.id = doc.id
+// A drag's mouseup synthesizes a click (on the common ancestor of down/up); eat
+// exactly that one so a reorder doesn't also select a row. Self-removing, with a
+// next-frame fallback so it can never swallow a later, unrelated click.
+function swallowNextClick() {
+  const swallow = (event) => {
+    event.stopPropagation()
+    event.preventDefault()
+    window.removeEventListener('click', swallow, true)
+  }
+  window.addEventListener('click', swallow, true)
+  requestAnimationFrame(() => window.removeEventListener('click', swallow, true))
+}
+
+function performDrop(kind, draggedId, row, mode) {
+  if (mode === 'into') {
+    if (row.type !== 'collection') return
+    if (kind === 'doc') {
+      emit('move-doc-to-collection', { docId: draggedId, collectionId: row.collection.id })
+    } else if (draggedId !== row.collection.id && !isCollectionInSubtree(row.collection.id, draggedId)) {
+      emit('move-collection', { id: draggedId, parentId: row.collection.id })
+    }
+    return
+  }
+  if (kind === 'doc' && row.type === 'doc') {
+    reorderDocRelativeTo(draggedId, row.doc, mode)
+  } else if (kind === 'collection' && row.type === 'collection') {
+    reorderCollectionRelativeTo(draggedId, row.collection, mode)
+  }
+}
+
+function onRowClick(row) {
+  if (row.type === 'doc') emit('select-doc', row.doc.id)
+}
+
+function onCollectionNameClick(collection) {
+  emit('select-collection', collection.id)
 }
 
 // Whether `candidateId` is `ancestorId` itself or inside its subtree — used to
@@ -189,66 +293,6 @@ function isCollectionInSubtree(candidateId, ancestorId) {
     stack.push(...(childrenOf.get(node.id) || []))
   }
   return false
-}
-
-// Where a dragged item would land on `row`, from the drag kind and the cursor's
-// vertical position. Shared by dragover (to draw the hint) and drop (to act) so
-// the two can never disagree — the drop decision no longer depends on the hint
-// still being set when the (WKWebView-flaky) drop event finally arrives.
-function computeDropTarget(event, row) {
-  const kind = draggedKind(event.dataTransfer) || dragging.kind
-  if (!kind) return { kind: '', mode: '' }
-  const rect = event.currentTarget.getBoundingClientRect()
-  const offset = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0.5
-  let mode = ''
-  if (row.type === 'collection') {
-    // A document can only land INSIDE a folder (folders and documents occupy
-    // separate zones, so there's no doc-vs-folder ordering). A folder's top and
-    // bottom edges reorder among sibling folders; its middle reparents into it.
-    mode = kind === 'doc' ? 'into' : offset < 0.3 ? 'before' : offset > 0.7 ? 'after' : 'into'
-  } else if (row.type === 'doc' && kind === 'doc') {
-    mode = offset < 0.5 ? 'before' : 'after'
-  }
-  return { kind, mode }
-}
-
-function handleRowDragOver(event, row) {
-  const { mode } = computeDropTarget(event, row)
-  if (!mode) return
-  // preventDefault on dragenter+dragover is what lets the drop event fire.
-  event.preventDefault()
-  event.stopPropagation()
-  event.dataTransfer.dropEffect = 'move'
-  dropHint.key = rowKey(row)
-  dropHint.mode = mode
-}
-
-function handleRowDrop(event, row) {
-  const dt = event.dataTransfer
-  const { kind, mode } = computeDropTarget(event, row)
-  const draggedId =
-    dragging.id ||
-    dt.getData('application/x-lumenfolio-doc-id') ||
-    dt.getData('application/x-lumenfolio-collection-id')
-  clearDrag()
-  if (!kind || !draggedId || !mode) return
-  event.preventDefault()
-  event.stopPropagation()
-  if (mode === 'into') {
-    if (row.type !== 'collection') return
-    if (kind === 'doc') {
-      emit('move-doc-to-collection', { docId: draggedId, collectionId: row.collection.id })
-    } else if (draggedId !== row.collection.id && !isCollectionInSubtree(row.collection.id, draggedId)) {
-      emit('move-collection', { id: draggedId, parentId: row.collection.id })
-    }
-    return
-  }
-  // before / after → reorder among siblings
-  if (kind === 'doc' && row.type === 'doc') {
-    reorderDocRelativeTo(draggedId, row.doc, mode)
-  } else if (kind === 'collection' && row.type === 'collection') {
-    reorderCollectionRelativeTo(draggedId, row.collection, mode)
-  }
 }
 
 // Build the target collection's document id list in its new order and emit it.
@@ -827,6 +871,8 @@ function ctxDeleteCollection() {
 onBeforeUnmount(() => {
   window.removeEventListener('click', onAddMenuOutsideClick)
   window.removeEventListener('click', closeContextMenu)
+  // A drag mid-flight leaves window listeners + a userSelect lock behind.
+  resetDrag()
 })
 
 </script>
@@ -1027,12 +1073,8 @@ onBeforeUnmount(() => {
             :style="rowIndentStyle(row.depth)"
             @contextmenu.stop="openContextMenu($event, 'collection', row.collection)"
             :data-collection-id="row.collection.id"
-            :draggable="renamingCollectionId === row.collection.id ? 'false' : 'true'"
-            @dragstart="handleCollectionDragStart($event, row.collection)"
-            @dragenter.prevent
-            @dragover="handleRowDragOver($event, row)"
-            @drop="handleRowDrop($event, row)"
-            @dragend="clearDrag"
+            :data-row-key="`col-${row.collection.id}`"
+            @mousedown="renamingCollectionId === row.collection.id ? null : onRowMouseDown($event, row)"
           >
             <button
               type="button"
@@ -1060,7 +1102,7 @@ onBeforeUnmount(() => {
                 type="button"
                 class="collection-name-btn"
                 :title="row.collection.name"
-                @click="emit('select-collection', row.collection.id)"
+                @click="onCollectionNameClick(row.collection)"
               >
                 <span class="collection-name">{{ row.collection.name }}</span>
               </button>
@@ -1107,9 +1149,10 @@ onBeforeUnmount(() => {
             </template>
           </div>
 
-          <!-- Document row (indented under its collection). A <div role=button>,
-               not a <button>: WKWebView is unreliable about firing drop on native
-               buttons, which broke drag-reorder. -->
+          <!-- Document row (indented under its collection). A <div role=button>
+               so the whole row is a pointer-drag handle; dragging is mouse-based
+               (see the drag-and-drop block) because HTML5 DnD is intercepted by
+               Tauri's native file-drop on macOS. -->
           <div
             v-else
             class="doc-row"
@@ -1122,14 +1165,10 @@ onBeforeUnmount(() => {
             }"
             :style="rowIndentStyle(row.depth)"
             :title="compactDocTitle(row.doc)"
-            draggable="true"
-            @click="emit('select-doc', row.doc.id)"
+            :data-row-key="`doc-${row.doc.id}`"
+            @mousedown="onRowMouseDown($event, row)"
+            @click="onRowClick(row)"
             @keydown.enter.self="emit('select-doc', row.doc.id)"
-            @dragstart="handleDocDragStart($event, row.doc)"
-            @dragenter.prevent
-            @dragover="handleRowDragOver($event, row)"
-            @drop="handleRowDrop($event, row)"
-            @dragend="clearDrag"
             @contextmenu="openContextMenu($event, 'doc', null, row.doc)"
           >
             <div class="doc-main">
@@ -1212,6 +1251,13 @@ onBeforeUnmount(() => {
         </button>
       </template>
     </div>
+
+    <!-- Floating label following the pointer during an internal drag. -->
+    <div
+      v-if="dragging.active"
+      class="drag-ghost"
+      :style="{ left: `${dragging.x}px`, top: `${dragging.y}px` }"
+    >{{ dragging.label }}</div>
     </template>
   </aside>
 </template>
@@ -1984,6 +2030,25 @@ onBeforeUnmount(() => {
 .collection-row.drop-after::after,
 .doc-row.drop-after::after {
   bottom: 0;
+}
+
+/* Floating label that follows the pointer during a mouse-based drag. */
+.drag-ghost {
+  position: fixed;
+  z-index: 2000;
+  transform: translate(12px, 8px);
+  max-width: 220px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--accent, #6aa9ff);
+  color: #0b1220;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
 .collection-row:hover {
