@@ -187,11 +187,15 @@ pub(crate) fn persist_workspace_scan(
         tx.execute(
             "INSERT INTO documents
                 (id, workspace_root_id, path, title, short_title, file_size, modified,
-                 page_count, last_page, index_status, index_version, created_at, updated_at,
-                 last_opened_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, unixepoch(), unixepoch(),
-                     unixepoch())
+                 page_count, last_page, content_type, index_status, index_version, created_at,
+                 updated_at, last_opened_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?12, ?10, 0, unixepoch(),
+                     unixepoch(), unixepoch())
              ON CONFLICT(id) DO UPDATE SET
+               -- Preserve the source kind: without this an imported docx/xlsx/pptx
+               -- fell back to the column default 'pdf', so it opened in the PDF
+               -- viewer (Invalid PDF structure) and PDF-path indexing failed.
+               content_type = excluded.content_type,
                -- Nested workspace folders share files (e.g. ~/Documents contains
                -- ~/Documents/.../test_pdf). The MORE SPECIFIC (deeper) folder
                -- owns the file: only reassign to the scanning root when its path
@@ -231,6 +235,7 @@ pub(crate) fn persist_workspace_scan(
                 doc.current_page,
                 doc.index_status,
                 CURRENT_INDEX_VERSION,
+                doc.content_type,
             ],
         )
         .map_err(|err| format!("Failed to save document: {err}"))?;
@@ -528,11 +533,15 @@ pub(crate) fn additive_upsert_documents(
         tx.execute(
             "INSERT INTO documents
                 (id, workspace_root_id, path, title, short_title, file_size, modified,
-                 page_count, last_page, index_status, index_version, created_at, updated_at,
-                 last_opened_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, unixepoch(), unixepoch(),
-                     unixepoch())
+                 page_count, last_page, content_type, index_status, index_version, created_at,
+                 updated_at, last_opened_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?12, ?10, 0, unixepoch(),
+                     unixepoch(), unixepoch())
              ON CONFLICT(id) DO UPDATE SET
+               -- Preserve the source kind: without this an imported docx/xlsx/pptx
+               -- fell back to the column default 'pdf', so it opened in the PDF
+               -- viewer (Invalid PDF structure) and PDF-path indexing failed.
+               content_type = excluded.content_type,
                -- Nested workspace folders share files (e.g. ~/Documents contains
                -- ~/Documents/.../test_pdf). The MORE SPECIFIC (deeper) folder
                -- owns the file: only reassign to the scanning root when its path
@@ -572,6 +581,7 @@ pub(crate) fn additive_upsert_documents(
                 doc.current_page,
                 doc.index_status,
                 CURRENT_INDEX_VERSION,
+                doc.content_type,
             ],
         )
         .map_err(|err| format!("Failed to save document: {err}"))?;
