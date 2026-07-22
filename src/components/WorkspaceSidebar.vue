@@ -541,23 +541,17 @@ const treeRows = computed(() => {
     }
   }
 
-  // Unfiled node — only shown when it actually holds un-filed sources, so an
-  // empty inbox doesn't read as mystery clutter. It is not a user collection and
-  // has no delete/rename; sources leave it by being filed into a collection or
-  // deleted.
-  if ((docsByCollection.value.get(UNFILED_ID) || []).length > 0) {
-    rows.push({ type: 'collection', depth: 0, unfiled: true })
-    if (isCollectionExpanded(UNFILED_ID)) {
-      for (const doc of visibleDocs(docsByCollection.value.get(UNFILED_ID) || [])) {
-        rows.push({ type: 'doc', depth: 1, doc })
-      }
-    }
+  // Loose documents (collection_id NULL) render at the tree root, after the
+  // collections — the Obsidian model, where the vault root holds folders and
+  // loose notes side by side. There is no synthetic "Unfiled" folder to nest
+  // them under, so a brand-new note lands at the root ("outside"), not one level
+  // deep. A doc leaves the root by being filed into a collection; it returns by
+  // "Remove from collection".
+  for (const doc of visibleDocs(docsByCollection.value.get(UNFILED_ID) || [])) {
+    rows.push({ type: 'doc', depth: 0, doc, loose: true })
   }
   return rows
 })
-
-// Unfiled starts expanded.
-expandedCollections.add(UNFILED_ID)
 
 function rowIndentStyle(depth) {
   return { paddingLeft: `${depth * 14}px` }
@@ -637,26 +631,6 @@ function cancelDeleteCollection(event = null) {
   confirmDeleteId.value = null
 }
 
-// One-click empty of the Unfiled inbox (two-step confirm; non-destructive to the
-// files on disk — only removes the sources from the knowledge base).
-const confirmClearUnfiled = ref(false)
-
-function requestClearUnfiled(event = null) {
-  if (event) event.stopPropagation()
-  confirmClearUnfiled.value = true
-}
-
-function confirmClearUnfiledAction(event = null) {
-  if (event) event.stopPropagation()
-  confirmClearUnfiled.value = false
-  emit('clear-unfiled')
-}
-
-function cancelClearUnfiled(event = null) {
-  if (event) event.stopPropagation()
-  confirmClearUnfiled.value = false
-}
-
 // Obsidian-style right-click menu. `kind`: 'blank' (empty tree area → top level)
 // or 'collection' (a folder row → scoped to it).
 const contextMenu = reactive({
@@ -700,6 +674,14 @@ function ctxDeleteDoc() {
   const doc = contextMenu.doc
   closeContextMenu()
   if (doc) emit('delete-doc', doc)
+}
+
+// Un-file a document: move it out of its collection back to the tree root
+// (collection_id → null). The inverse of dragging it into a collection.
+function ctxUnfileDoc() {
+  const doc = contextMenu.doc
+  closeContextMenu()
+  if (doc) emit('move-doc-to-collection', { docId: doc.id, collectionId: null })
 }
 
 function ctxNewNote() {
@@ -919,63 +901,14 @@ onBeforeUnmount(() => {
 
     <div class="tree-area" @contextmenu="openContextMenu($event, 'blank')">
       <!-- Knowledge-base pivot: collection tree. Flattened, depth-indented rows
-           mixing collection folders and their documents; an always-present
-           "Unfiled" node at the bottom holds documents with no collection.
-           Right-click (blank area or a folder) opens the create/organize menu. -->
+           mixing collection folders and their documents; loose documents (no
+           collection) sit at the tree root after the folders. Right-click
+           (blank area or a folder) opens the create/organize menu. -->
       <div class="collection-tree">
-        <template v-for="row in treeRows" :key="row.type === 'doc' ? `doc-${row.doc.id}` : (row.unfiled ? 'col-unfiled' : `col-${row.collection.id}`)">
-          <!-- Unfiled node -->
-          <div
-            v-if="row.type === 'collection' && row.unfiled"
-            class="collection-row unfiled-row"
-            :class="{ 'drag-over': dragOverCollectionId === '__unfiled__' || dropTargetCollectionId === '__unfiled__' }"
-            :style="rowIndentStyle(row.depth)"
-            data-collection-id="__unfiled__"
-            @dragover="handleCollectionDragOver($event, '__unfiled__')"
-            @dragleave="handleCollectionDragLeave('__unfiled__')"
-            @drop="handleCollectionDrop($event, '__unfiled__')"
-          >
-            <button
-              type="button"
-              class="collection-caret"
-              :class="{ expanded: isCollectionExpanded('__unfiled__') }"
-              :aria-label="ui.unfiled || 'Unfiled'"
-              @click="toggleCollectionExpanded('__unfiled__')"
-            >
-              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
-            </button>
-            <span class="collection-name">{{ ui.unfiled || 'Unfiled' }}</span>
-            <span class="collection-count">{{ collectionDocCount('__unfiled__') }}</span>
-            <span v-if="confirmClearUnfiled" class="collection-actions collection-confirm">
-              <button
-                type="button"
-                class="collection-action-btn collection-confirm-yes"
-                :title="ui.clearUnfiledConfirm || 'Delete all unfiled sources? Files on disk are kept.'"
-                :aria-label="ui.clearUnfiled || 'Clear Unfiled'"
-                @click.stop="confirmClearUnfiledAction"
-              ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5L19 7" /></svg></button>
-              <button
-                type="button"
-                class="collection-action-btn"
-                :title="ui.cancel || 'Cancel'"
-                :aria-label="ui.cancel || 'Cancel'"
-                @click.stop="cancelClearUnfiled"
-              ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg></button>
-            </span>
-            <span v-else class="collection-actions">
-              <button
-                type="button"
-                class="collection-action-btn collection-delete-btn"
-                :title="ui.clearUnfiled || 'Clear Unfiled'"
-                :aria-label="ui.clearUnfiled || 'Clear Unfiled'"
-                @click.stop="requestClearUnfiled"
-              ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M7 7l.8 11a2 2 0 0 0 2 1.9h4.4a2 2 0 0 0 2-1.9L17 7M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7" /></svg></button>
-            </span>
-          </div>
-
+        <template v-for="row in treeRows" :key="row.type === 'doc' ? `doc-${row.doc.id}` : `col-${row.collection.id}`">
           <!-- Collection node -->
           <div
-            v-else-if="row.type === 'collection'"
+            v-if="row.type === 'collection'"
             class="collection-row"
             :class="{
               active: row.collection.id === selectedCollectionId,
@@ -1141,6 +1074,14 @@ onBeforeUnmount(() => {
       <template v-else-if="contextMenu.kind === 'doc'">
         <button type="button" class="ctx-item" @click="ctxReindexDoc">
           <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" /><path d="M19.5 4.5V9H15" /></svg></span>{{ ui.reindexDocument }}
+        </button>
+        <button
+          v-if="contextMenu.doc && contextMenu.doc.collectionId"
+          type="button"
+          class="ctx-item"
+          @click="ctxUnfileDoc"
+        >
+          <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10" /><path d="M8 7l4-4 4 4" /><path d="M5 15v3a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 18v-3" /></svg></span>{{ ui.removeFromCollection || 'Remove from collection' }}
         </button>
         <button type="button" class="ctx-item ctx-danger" @click="ctxDeleteDoc">
           <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M7 7l.8 11a2 2 0 0 0 2 1.9h4.4a2 2 0 0 0 2-1.9L17 7M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7" /></svg></span>{{ ui.deleteDocument }}
@@ -1956,11 +1897,6 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   font-size: 13px;
   font-weight: 600;
-}
-
-.unfiled-row .collection-name {
-  flex: 1;
-  color: var(--text-muted);
 }
 
 .collection-count {
