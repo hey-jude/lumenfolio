@@ -213,29 +213,171 @@ fn parse_pptx_slide(xml: &str) -> Result<Vec<String>, String> {
 // per non-empty row (cells joined with " | ").
 // ---------------------------------------------------------------------------
 
+/// Extract a spreadsheet into indexable blocks. Each data row becomes ONE block
+/// (= one retrieval chunk) rendered as a header-keyed record, e.g.
+/// "Region: West | Qty: 5 | Revenue: 3140". Two deliberate choices:
+///   * column identity travels *with each value* (the header key), so a row is
+///     self-describing even after chunking and search returns a complete record;
+///   * cells are read positionally — the old code dropped empty cells, which
+///     silently shifted every value left of a gap into the wrong column.
+/// The full aligned grid with A1 coordinates is the `read_sheet` tool's job.
 fn extract_xlsx(path: &Path) -> Result<Vec<(String, String)>, String> {
     let mut workbook: calamine::Xlsx<_> =
         calamine::open_workbook(path).map_err(|err| format!("Failed to open xlsx: {err}"))?;
     let mut blocks = Vec::new();
-    let sheet_names = workbook.sheet_names().to_vec();
-    for name in sheet_names {
+    for name in workbook.sheet_names().to_vec() {
         let Ok(range) = workbook.worksheet_range(&name) else {
             continue;
         };
-        blocks.push((format!("Sheet: {name}"), "heading".to_string()));
-        for row in range.rows() {
-            let cells: Vec<String> = row
-                .iter()
-                .map(cell_to_string)
-                .filter(|cell| !cell.is_empty())
-                .collect();
-            if cells.is_empty() {
-                continue;
+        let (height, width) = (range.height(), range.width());
+        blocks.push((
+            format!("Sheet: {name} ({height} rows × {width} cols)"),
+            "heading".to_string(),
+        ));
+        if width == 0 {
+            continue;
+        }
+        let mut rows = range.rows();
+        // The first row carrying any value is the header; its labels key the data
+        // rows below. A pure title row above the header degrades gracefully (the
+        // full grid is available via read_sheet).
+        let header: Vec<String> = loop {
+            match rows.next() {
+                Some(row) => {
+                    let cells: Vec<String> = row.iter().map(cell_to_string).collect();
+                    if cells.iter().any(|cell| !cell.is_empty()) {
+                        let labels: Vec<&str> = cells
+                            .iter()
+                            .filter(|cell| !cell.is_empty())
+                            .map(String::as_str)
+                            .collect();
+                        blocks.push((format!("Columns: {}", labels.join(" | ")), "body".to_string()));
+                        break cells;
+                    }
+                }
+                None => break Vec::new(),
             }
-            blocks.push((cells.join(" | "), "body".to_string()));
+        };
+        for row in rows {
+            if let Some(record) = xlsx_record(&header, row) {
+                blocks.push((record, "body".to_string()));
+            }
         }
     }
     Ok(blocks)
+}
+
+/// One data row → a header-keyed record ("Region: West | Revenue: 3140"), or None
+/// if the row has no values. Cells are read POSITIONALLY and keyed by the header
+/// at the same index, so an empty cell in the middle can't shift the values right
+/// of it into the wrong column (the bug in the drop-empties approach). Returns
+/// None for an all-empty row.
+fn xlsx_record(header: &[String], row: &[Data]) -> Option<String> {
+    let record: Vec<String> = row
+        .iter()
+        .enumerate()
+        .filter_map(|(col, cell)| {
+            let value = cell_to_string(cell);
+            if value.is_empty() {
+                return None;
+            }
+            match header.get(col).map(String::as_str).filter(|h| !h.is_empty()) {
+                Some(key) => Some(format!("{key}: {value}")),
+                None => Some(value),
+            }
+        })
+        .collect();
+    if record.is_empty() {
+        None
+    } else {
+        Some(record.join(" | "))
+    }
+}
+
+/// Spreadsheet column index (0-based) → letter(s): 0→A, 25→Z, 26→AA. Used to give
+/// the agent real A1 addresses when it reads a sheet.
+fn column_letter(index: u32) -> String {
+    let mut n = index + 1;
+    let mut label = String::new();
+    while n > 0 {
+        let rem = ((n - 1) % 26) as u8;
+        label.insert(0, (b'A' + rem) as char);
+        n = (n - 1) / 26;
+    }
+    label
+}
+
+/// Render a spreadsheet as A1-addressable Markdown tables for the `read_sheet`
+/// tool: a `#` row-number column plus one column per letter, so the agent can
+/// cite "B7". `sheet_filter` selects one sheet by name (case-insensitive); None
+/// renders all. Capped at `max_cells` total so a huge workbook can't blow the
+/// context — truncation is stated in the text.
+pub(crate) fn read_xlsx_markdown(
+    path: &Path,
+    sheet_filter: Option<&str>,
+    max_cells: usize,
+) -> Result<String, String> {
+    let mut workbook: calamine::Xlsx<_> =
+        calamine::open_workbook(path).map_err(|err| format!("Failed to open xlsx: {err}"))?;
+    let all_names = workbook.sheet_names().to_vec();
+    let wanted = sheet_filter.map(str::trim).filter(|s| !s.is_empty());
+    let names: Vec<String> = match wanted {
+        Some(filter) => all_names
+            .iter()
+            .filter(|n| n.eq_ignore_ascii_case(filter))
+            .cloned()
+            .collect(),
+        None => all_names.clone(),
+    };
+    if names.is_empty() {
+        return Err(format!(
+            "No sheet named '{}'. Sheets: {}.",
+            wanted.unwrap_or(""),
+            all_names.join(", ")
+        ));
+    }
+
+    let mut out = String::new();
+    let mut cells_used = 0usize;
+    for name in names {
+        let Ok(range) = workbook.worksheet_range(&name) else {
+            continue;
+        };
+        let (height, width) = (range.height(), range.width());
+        out.push_str(&format!("### Sheet: {name} ({height} rows × {width} cols)\n\n"));
+        if width == 0 || height == 0 {
+            out.push_str("_(empty)_\n\n");
+            continue;
+        }
+        let (start_row, start_col) = range.start().unwrap_or((0, 0));
+        out.push_str("| # |");
+        for col in 0..width as u32 {
+            out.push_str(&format!(" {} |", column_letter(start_col + col)));
+        }
+        out.push('\n');
+        out.push_str("|---|");
+        for _ in 0..width {
+            out.push_str("---|");
+        }
+        out.push('\n');
+        for (index, row) in range.rows().enumerate() {
+            if cells_used + width > max_cells {
+                out.push_str(&format!(
+                    "\n_[truncated: {height} rows total; showing the first {index}]_\n"
+                ));
+                break;
+            }
+            out.push_str(&format!("| {} |", start_row as usize + index + 1));
+            for cell in row {
+                let value = cell_to_string(cell).replace('|', "\\|").replace('\n', " ");
+                out.push_str(&format!(" {value} |"));
+            }
+            out.push('\n');
+            cells_used += width;
+        }
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 fn cell_to_string(cell: &Data) -> String {
@@ -336,6 +478,39 @@ mod tests {
         assert_eq!(cell_to_string(&Data::Float(3.5)), "3.5");
         assert_eq!(cell_to_string(&Data::String("  hi ".to_string())), "hi");
         assert_eq!(cell_to_string(&Data::Empty), "");
+    }
+
+    #[test]
+    fn xlsx_record_keeps_columns_aligned_across_empty_cells() {
+        let header = vec![
+            "Region".to_string(),
+            "Qty".to_string(),
+            "Revenue".to_string(),
+        ];
+        // Qty (middle) is empty. The old drop-empties join produced "West | 3140",
+        // shifting Revenue under Qty; header keys pin each value to its column.
+        let row = [
+            Data::String("West".to_string()),
+            Data::Empty,
+            Data::Float(3140.0),
+        ];
+        let record = xlsx_record(&header, &row).expect("record");
+        assert_eq!(record, "Region: West | Revenue: 3140");
+    }
+
+    #[test]
+    fn xlsx_record_is_none_for_a_blank_row() {
+        let header = vec!["A".to_string()];
+        assert!(xlsx_record(&header, &[Data::Empty, Data::Empty]).is_none());
+    }
+
+    #[test]
+    fn column_letter_maps_indices_to_a1_letters() {
+        assert_eq!(column_letter(0), "A");
+        assert_eq!(column_letter(25), "Z");
+        assert_eq!(column_letter(26), "AA");
+        assert_eq!(column_letter(701), "ZZ");
+        assert_eq!(column_letter(702), "AAA");
     }
 
     #[test]

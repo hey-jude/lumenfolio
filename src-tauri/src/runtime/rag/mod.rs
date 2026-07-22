@@ -423,6 +423,7 @@ enum RagToolName {
     ListTrendingPapers,
     ReadNoteSource,
     ProposeNoteEdit,
+    ReadSheet,
     WebSearch,
     WebFetch,
 }
@@ -474,6 +475,7 @@ impl RagToolName {
             Self::ListTrendingPapers => "list_trending_papers",
             Self::ReadNoteSource => "read_note_source",
             Self::ProposeNoteEdit => "propose_note_edit",
+            Self::ReadSheet => "read_sheet",
             Self::WebSearch => "web_search",
             Self::WebFetch => "web_fetch",
         }
@@ -775,6 +777,20 @@ pub fn rag_tool_specs_for_capabilities(
             }
         }),
     });
+    // Spreadsheets index as one self-describing record per row (good for search),
+    // but questions about layout, totals, or a specific cell need the aligned grid.
+    // This returns it with real A1 addresses so the model can read and cite cells.
+    specs.push(RagToolSpec {
+        name: "read_sheet",
+        description: "Read a spreadsheet (.xlsx) as an A1-addressable Markdown grid — a '#' row-number column plus one column per letter (A, B, C…), so cell B7 is column B of row 7. Use this when the question needs the table's layout, a whole column/row, totals, or a specific cell, rather than a keyword hit from search_chunks. Pass `sheet` to pick one tab (else all are returned). Only works on .xlsx sources; PDFs and other Office files return an error.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "sheet": { "type": "string", "description": "Sheet/tab name to read (case-insensitive); omit to read every sheet" },
+                "documentId": { "type": "string", "description": "Source id; defaults to the focus document" }
+            }
+        }),
+    });
     if web_enabled {
         specs.push(RagToolSpec {
             name: "web_search",
@@ -1061,6 +1077,7 @@ pub fn execute_rag_tool_call_for_capabilities(
         // Web tools: not document-scoped. The Exa key (if any) lives in app_settings.
         "read_note_source" => execute_read_note_source_tool(&registry),
         "propose_note_edit" => execute_propose_note_edit_tool(&registry, args),
+        "read_sheet" => execute_read_sheet_tool(&registry, args),
         "web_search" => execute_web_search_tool(&registry, args, fallback_query),
         "web_fetch" => execute_web_fetch_tool(&registry, args),
         _ => execute_search_chunks_tool(&registry, args, fallback_query),
@@ -1514,6 +1531,66 @@ fn execute_read_note_source_tool(
         tool_call: tool_success_call(
             RagToolName::ReadNoteSource,
             serde_json::json!({ "documentId": registry.document_id }),
+            1,
+        ),
+    })
+}
+
+/// Hard cap on cells rendered for the model, so a large workbook can't blow the
+/// context budget. Truncation past this is stated in the returned text.
+const MAX_SHEET_CELLS: usize = 6_000;
+
+/// Return an .xlsx source as an A1-addressable Markdown grid. Errors (rather than
+/// returning empty) for non-spreadsheet sources so the model routes elsewhere.
+fn execute_read_sheet_tool(
+    registry: &RagToolRegistry<'_>,
+    args: &serde_json::Value,
+) -> Result<RagToolExecutionOutput, String> {
+    let row: Option<(String, String, String)> = registry
+        .conn
+        .query_row(
+            "SELECT title, content_type, path FROM documents WHERE id = ?1",
+            params![registry.document_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok();
+    let Some((title, content_type, path)) = row else {
+        return Err("Document not found".to_string());
+    };
+    if content_type != "xlsx" {
+        return Err(format!(
+            "'{title}' is a {content_type} source, not a spreadsheet. Use read_note_source for notes or search_chunks / open_pages for PDFs and other files."
+        ));
+    }
+    let sheet = args
+        .get("sheet")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let grid = crate::office::read_xlsx_markdown(std::path::Path::new(&path), sheet, MAX_SHEET_CELLS)?;
+    let section_title = match sheet {
+        Some(name) => format!("{title} · {name}"),
+        None => format!("{title} (spreadsheet)"),
+    };
+    let citation = Citation {
+        // Keyed by document + sheet so repeated calls in one turn dedupe.
+        id: format!("sheet-{}-{}", registry.document_id, sheet.unwrap_or("all")),
+        label: "[sheet]".to_string(),
+        page: 0,
+        block_id: String::new(),
+        section_title: Some(section_title),
+        quote: grid,
+        bbox_list: serde_json::json!([]),
+        document_id: registry.document_id.to_string(),
+        source: "sheet_source".to_string(),
+    };
+    Ok(RagToolExecutionOutput {
+        citations: vec![citation],
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::ReadSheet,
+            serde_json::json!({ "documentId": registry.document_id, "sheet": sheet }),
             1,
         ),
     })
@@ -8047,7 +8124,9 @@ mod tests {
                 // Always offered: authored sources expose their Markdown body, and both
                 // tools report a clear error for file-backed documents that have none.
                 "read_note_source",
-                "propose_note_edit"
+                "propose_note_edit",
+                // Always offered: spreadsheets expose their grid; errors for non-xlsx.
+                "read_sheet"
             ])
         );
         let vision_names = rag_tool_specs_for_capabilities(true, false)
