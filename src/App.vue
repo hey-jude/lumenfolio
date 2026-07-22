@@ -2271,6 +2271,42 @@ async function handleMoveCollection({ id, parentId } = {}) {
   }
 }
 
+// Manual drag-reorder: the sidebar sends the full sibling id list in its new
+// order. Apply it locally first (write each row's position = its index so the
+// tree re-sorts instantly), then persist. `parentId`/`collectionId` is the
+// sibling scope (null = the tree root).
+async function handleReorderDocuments({ collectionId = null, orderedIds } = {}) {
+  if (!Array.isArray(orderedIds) || !orderedIds.length) return
+  const scope = collectionId ?? null
+  const rank = new Map(orderedIds.map((id, index) => [id, index]))
+  for (const doc of allDocs.value) {
+    if ((doc.collectionId ?? null) === scope && rank.has(doc.id)) {
+      doc.position = rank.get(doc.id)
+    }
+  }
+  try {
+    await invoke('reorder_documents', { input: { parentId: scope, orderedIds } })
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
+async function handleReorderCollections({ parentId = null, orderedIds } = {}) {
+  if (!Array.isArray(orderedIds) || !orderedIds.length) return
+  const scope = parentId ?? null
+  const rank = new Map(orderedIds.map((id, index) => [id, index]))
+  for (const collection of collections.value) {
+    if ((collection.parentId ?? null) === scope && rank.has(collection.id)) {
+      collection.position = rank.get(collection.id)
+    }
+  }
+  try {
+    await invoke('reorder_collections', { input: { parentId: scope, orderedIds } })
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
 // After a note saves, reflect the new title in the tree. Index status is
 // deliberately NOT written here: the reindex already emits queued → indexing →
 // indexed, and those events drive the status in the right order. This callback runs
@@ -4956,6 +4992,8 @@ function createLocalDocument(pdf) {
     // Knowledge-base pivot: the logical collection this source is filed into
     // (null = unfiled). Drives the sidebar collection tree grouping.
     collectionId: pdf.collection_id ?? null,
+    // Manual sibling order within the collection; drives drag-reorder in the tree.
+    position: Number(pdf.position ?? 0),
     path: pdf.path,
     title,
     shortTitle: pdf.short_title || title,
@@ -5373,6 +5411,8 @@ onMounted(() => {
       @select-collection="handleSelectCollection"
       @move-doc-to-collection="handleMoveDocToCollection"
       @move-collection="handleMoveCollection"
+      @reorder-documents="handleReorderDocuments"
+      @reorder-collections="handleReorderCollections"
       @clear-unfiled="handleClearUnfiled"
       @go-home="goHome"
     />

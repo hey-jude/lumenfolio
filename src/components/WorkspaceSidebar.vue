@@ -116,34 +116,61 @@ const emit = defineEmits([
   'select-collection',
   'move-doc-to-collection',
   'move-collection',
+  'reorder-documents',
+  'reorder-collections',
   'clear-unfiled',
   'go-home',
 ])
 
-// C-d: which collection row an internal (doc/collection) drag is hovering.
-const dragOverCollectionId = ref(null)
+// ── Internal drag-and-drop ─────────────────────────────────────────────────
+// Three gestures over one set of handlers: refile (drop a doc INTO a folder),
+// reparent (drop a folder INTO a folder), and manual reorder (drop BETWEEN two
+// sibling rows). OS-file drops use a different mime and are handled on the
+// sidebar container, so these handlers no-op for them.
+
+// The item being dragged. Captured on dragstart because dataTransfer.getData is
+// unreadable during dragover, where the drop mode is decided.
+const dragging = reactive({ kind: '', id: '' })
+
+// Where the dragged item would land. `key` matches a row's :key; `mode` is
+// 'into' (inside a folder, reuses the drag-over highlight) or 'before'/'after'
+// (an insertion line between sibling rows).
+const dropHint = reactive({ key: '', mode: '' })
+
+function rowKey(row) {
+  return row.type === 'doc' ? `doc-${row.doc.id}` : `col-${row.collection.id}`
+}
+
+function clearDrag() {
+  dragging.kind = ''
+  dragging.id = ''
+  dropHint.key = ''
+  dropHint.mode = ''
+}
+
+function draggedKind(dataTransfer) {
+  const types = dataTransfer ? Array.from(dataTransfer.types || []) : []
+  if (types.includes('application/x-lumenfolio-doc-id')) return 'doc'
+  if (types.includes('application/x-lumenfolio-collection-id')) return 'collection'
+  return ''
+}
 
 function handleCollectionDragStart(event, collection) {
   if (!event?.dataTransfer) return
   event.dataTransfer.setData('application/x-lumenfolio-collection-id', collection.id)
   event.dataTransfer.effectAllowed = 'move'
+  dragging.kind = 'collection'
+  dragging.id = collection.id
 }
 
-function handleCollectionDragOver(event, collectionId) {
-  const dt = event.dataTransfer
-  if (!dt) return
-  const draggingDoc = dt.types.includes('application/x-lumenfolio-doc-id')
-  const draggingCollection = dt.types.includes('application/x-lumenfolio-collection-id')
-  if (!draggingDoc && !draggingCollection) return
-  event.preventDefault()
-  dt.dropEffect = 'move'
-  dragOverCollectionId.value = collectionId
-}
-
-function handleCollectionDragLeave(collectionId) {
-  if (dragOverCollectionId.value === collectionId) {
-    dragOverCollectionId.value = null
-  }
+function handleDocDragStart(event, doc) {
+  // Any source can be dragged to refile / reorder it — even one still indexing
+  // (readiness gates asking, not organizing).
+  if (!doc?.id || !event?.dataTransfer) return
+  event.dataTransfer.setData('application/x-lumenfolio-doc-id', doc.id)
+  event.dataTransfer.effectAllowed = 'move'
+  dragging.kind = 'doc'
+  dragging.id = doc.id
 }
 
 // Whether `candidateId` is `ancestorId` itself or inside its subtree — used to
@@ -164,22 +191,98 @@ function isCollectionInSubtree(candidateId, ancestorId) {
   return false
 }
 
-function handleCollectionDrop(event, collectionId) {
-  const dt = event.dataTransfer
-  dragOverCollectionId.value = null
-  if (!dt) return
-  const docId = dt.getData('application/x-lumenfolio-doc-id')
-  const movedCollectionId = dt.getData('application/x-lumenfolio-collection-id')
-  const target = collectionId === '__unfiled__' ? null : collectionId
-  if (docId) {
-    event.preventDefault()
-    emit('move-doc-to-collection', { docId, collectionId: target })
-  } else if (movedCollectionId && movedCollectionId !== collectionId) {
-    // Reject self / descendant targets here so the backend never has to.
-    if (target !== null && isCollectionInSubtree(collectionId, movedCollectionId)) return
-    event.preventDefault()
-    emit('move-collection', { id: movedCollectionId, parentId: target })
+// Decide the drop mode for the row under the pointer from what's being dragged
+// and where in the row's height the cursor sits.
+function handleRowDragOver(event, row) {
+  const kind = draggedKind(event.dataTransfer) || dragging.kind
+  if (!kind) return
+  const rect = event.currentTarget.getBoundingClientRect()
+  const offset = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0.5
+  let mode = ''
+  if (row.type === 'collection') {
+    // A document can only land INSIDE a folder (folders and documents occupy
+    // separate zones, so there's no doc-vs-folder ordering). A folder's top and
+    // bottom edges reorder among sibling folders; its middle reparents into it.
+    mode = kind === 'doc' ? 'into' : offset < 0.3 ? 'before' : offset > 0.7 ? 'after' : 'into'
+  } else if (row.type === 'doc') {
+    if (kind !== 'doc') return // a folder has no meaningful target on a doc row
+    mode = offset < 0.5 ? 'before' : 'after'
   }
+  if (!mode) return
+  event.preventDefault()
+  event.stopPropagation()
+  event.dataTransfer.dropEffect = 'move'
+  dropHint.key = rowKey(row)
+  dropHint.mode = mode
+}
+
+function handleRowDrop(event, row) {
+  const dt = event.dataTransfer
+  const kind = draggedKind(dt) || dragging.kind
+  const draggedId =
+    dragging.id ||
+    dt.getData('application/x-lumenfolio-doc-id') ||
+    dt.getData('application/x-lumenfolio-collection-id')
+  const mode = dropHint.mode
+  clearDrag()
+  if (!kind || !draggedId || !mode) return
+  event.preventDefault()
+  event.stopPropagation()
+  if (mode === 'into') {
+    if (row.type !== 'collection') return
+    if (kind === 'doc') {
+      emit('move-doc-to-collection', { docId: draggedId, collectionId: row.collection.id })
+    } else if (draggedId !== row.collection.id && !isCollectionInSubtree(row.collection.id, draggedId)) {
+      emit('move-collection', { id: draggedId, parentId: row.collection.id })
+    }
+    return
+  }
+  // before / after → reorder among siblings
+  if (kind === 'doc' && row.type === 'doc') {
+    reorderDocRelativeTo(draggedId, row.doc, mode)
+  } else if (kind === 'collection' && row.type === 'collection') {
+    reorderCollectionRelativeTo(draggedId, row.collection, mode)
+  }
+}
+
+// Build the target collection's document id list in its new order and emit it.
+// A same-collection drop reorders; a cross-collection drop files into the
+// target's collection instead (precise cross-collection index is deferred).
+function reorderDocRelativeTo(draggedId, targetDoc, mode) {
+  const scope = targetDoc.collectionId ?? null
+  const dragged = allDocs.value.find((doc) => doc.id === draggedId)
+  if (!dragged) return
+  if ((dragged.collectionId ?? null) !== scope) {
+    emit('move-doc-to-collection', { docId: draggedId, collectionId: scope })
+    return
+  }
+  const orderedIds = (docsByCollection.value.get(scope ?? UNFILED_ID) || [])
+    .map((doc) => doc.id)
+    .filter((id) => id !== draggedId)
+  const targetIndex = orderedIds.indexOf(targetDoc.id)
+  if (targetIndex < 0) return
+  orderedIds.splice(mode === 'before' ? targetIndex : targetIndex + 1, 0, draggedId)
+  emit('reorder-documents', { collectionId: scope, orderedIds })
+}
+
+function reorderCollectionRelativeTo(draggedId, targetCollection, mode) {
+  const dragged = (props.collections || []).find((collection) => collection.id === draggedId)
+  if (!dragged) return
+  const scope = targetCollection.parentId ?? null
+  if ((dragged.parentId ?? null) !== scope) {
+    // Dropped between siblings of a different parent → reparent there (append),
+    // unless that would nest a folder inside its own subtree.
+    if (scope !== null && isCollectionInSubtree(scope, draggedId)) return
+    emit('move-collection', { id: draggedId, parentId: scope })
+    return
+  }
+  const orderedIds = (collectionChildren.value.get(scope) || [])
+    .map((collection) => collection.id)
+    .filter((id) => id !== draggedId)
+  const targetIndex = orderedIds.indexOf(targetCollection.id)
+  if (targetIndex < 0) return
+  orderedIds.splice(mode === 'before' ? targetIndex : targetIndex + 1, 0, draggedId)
+  emit('reorder-collections', { parentId: scope, orderedIds })
 }
 
 const normalizedFilter = computed(() => String(props.filter || '').trim().toLowerCase())
@@ -310,17 +413,6 @@ function handleDrop(event) {
   dragDepth.value = 0
   if (!paths.length) return
   emit('workspace-drop', paths)
-}
-
-// Drag a chat-ready document onto the Chat composer to @-reference it. Uses a
-// dedicated MIME so the composer can tell it apart from an image-file drop, and
-// so it never collides with the sidebar's own file-drop (which carries files).
-function handleDocDragStart(event, doc) {
-  // Any source can be dragged to refile it — even one still indexing (readiness
-  // gates asking, not organizing).
-  if (!doc?.id || !event?.dataTransfer) return
-  event.dataTransfer.setData('application/x-lumenfolio-doc-id', doc.id)
-  event.dataTransfer.effectAllowed = 'move'
 }
 
 function localized(value) {
@@ -486,6 +578,16 @@ const docsByCollection = computed(() => {
     const key = raw != null && known.has(raw) ? raw : UNFILED_ID
     if (!map.has(key)) map.set(key, [])
     map.get(key).push(doc)
+  }
+  // Within a collection, honor the manual drag order (position), falling back to
+  // title so equal/backfilled positions stay stable and readable.
+  for (const docs of map.values()) {
+    docs.sort((a, b) => {
+      const pa = Number(a.position ?? 0)
+      const pb = Number(b.position ?? 0)
+      if (pa !== pb) return pa - pb
+      return String(a.shortTitle || a.title || '').localeCompare(String(b.shortTitle || b.title || ''))
+    })
   }
   return map
 })
@@ -912,16 +1014,18 @@ onBeforeUnmount(() => {
             class="collection-row"
             :class="{
               active: row.collection.id === selectedCollectionId,
-              'drag-over': dragOverCollectionId === row.collection.id || dropTargetCollectionId === row.collection.id,
+              'drag-over': (dropHint.key === `col-${row.collection.id}` && dropHint.mode === 'into') || dropTargetCollectionId === row.collection.id,
+              'drop-before': dropHint.key === `col-${row.collection.id}` && dropHint.mode === 'before',
+              'drop-after': dropHint.key === `col-${row.collection.id}` && dropHint.mode === 'after',
             }"
             :style="rowIndentStyle(row.depth)"
             @contextmenu.stop="openContextMenu($event, 'collection', row.collection)"
             :data-collection-id="row.collection.id"
             :draggable="renamingCollectionId === row.collection.id ? 'false' : 'true'"
             @dragstart="handleCollectionDragStart($event, row.collection)"
-            @dragover="handleCollectionDragOver($event, row.collection.id)"
-            @dragleave="handleCollectionDragLeave(row.collection.id)"
-            @drop="handleCollectionDrop($event, row.collection.id)"
+            @dragover="handleRowDragOver($event, row)"
+            @drop="handleRowDrop($event, row)"
+            @dragend="clearDrag"
           >
             <button
               type="button"
@@ -1000,12 +1104,19 @@ onBeforeUnmount(() => {
           <button
             v-else
             class="doc-row"
-            :class="{ active: row.doc.id === selectedDocId && !trendingActive }"
+            :class="{
+              active: row.doc.id === selectedDocId && !trendingActive,
+              'drop-before': dropHint.key === `doc-${row.doc.id}` && dropHint.mode === 'before',
+              'drop-after': dropHint.key === `doc-${row.doc.id}` && dropHint.mode === 'after',
+            }"
             :style="rowIndentStyle(row.depth)"
             :title="compactDocTitle(row.doc)"
             draggable="true"
             @click="emit('select-doc', row.doc.id)"
             @dragstart="handleDocDragStart($event, row.doc)"
+            @dragover="handleRowDragOver($event, row)"
+            @drop="handleRowDrop($event, row)"
+            @dragend="clearDrag"
             @contextmenu="openContextMenu($event, 'doc', null, row.doc)"
           >
             <div class="doc-main">
@@ -1822,6 +1933,7 @@ onBeforeUnmount(() => {
 }
 
 .collection-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1830,6 +1942,35 @@ onBeforeUnmount(() => {
   padding: 4px 6px 4px 2px;
   border: 1px solid transparent;
   color: var(--text-secondary);
+}
+
+/* Manual reorder: an accent insertion line at the row edge where a dragged
+   sibling would land. doc-row is already position:relative. */
+.collection-row.drop-before::before,
+.collection-row.drop-after::after,
+.doc-row.drop-before::before,
+.doc-row.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent, #6aa9ff);
+  pointer-events: none;
+}
+
+/* Sit the line on the row's inner edge, not in the inter-row gap: .doc-row clips
+   to its box (overflow:hidden for the WKWebView ellipsis fix), so a negative
+   offset would vanish on documents. */
+.collection-row.drop-before::before,
+.doc-row.drop-before::before {
+  top: 0;
+}
+
+.collection-row.drop-after::after,
+.doc-row.drop-after::after {
+  bottom: 0;
 }
 
 .collection-row:hover {
