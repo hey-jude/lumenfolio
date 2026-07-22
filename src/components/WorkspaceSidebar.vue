@@ -191,11 +191,13 @@ function isCollectionInSubtree(candidateId, ancestorId) {
   return false
 }
 
-// Decide the drop mode for the row under the pointer from what's being dragged
-// and where in the row's height the cursor sits.
-function handleRowDragOver(event, row) {
+// Where a dragged item would land on `row`, from the drag kind and the cursor's
+// vertical position. Shared by dragover (to draw the hint) and drop (to act) so
+// the two can never disagree — the drop decision no longer depends on the hint
+// still being set when the (WKWebView-flaky) drop event finally arrives.
+function computeDropTarget(event, row) {
   const kind = draggedKind(event.dataTransfer) || dragging.kind
-  if (!kind) return
+  if (!kind) return { kind: '', mode: '' }
   const rect = event.currentTarget.getBoundingClientRect()
   const offset = rect.height > 0 ? (event.clientY - rect.top) / rect.height : 0.5
   let mode = ''
@@ -204,11 +206,16 @@ function handleRowDragOver(event, row) {
     // separate zones, so there's no doc-vs-folder ordering). A folder's top and
     // bottom edges reorder among sibling folders; its middle reparents into it.
     mode = kind === 'doc' ? 'into' : offset < 0.3 ? 'before' : offset > 0.7 ? 'after' : 'into'
-  } else if (row.type === 'doc') {
-    if (kind !== 'doc') return // a folder has no meaningful target on a doc row
+  } else if (row.type === 'doc' && kind === 'doc') {
     mode = offset < 0.5 ? 'before' : 'after'
   }
+  return { kind, mode }
+}
+
+function handleRowDragOver(event, row) {
+  const { mode } = computeDropTarget(event, row)
   if (!mode) return
+  // preventDefault on dragenter+dragover is what lets the drop event fire.
   event.preventDefault()
   event.stopPropagation()
   event.dataTransfer.dropEffect = 'move'
@@ -218,12 +225,11 @@ function handleRowDragOver(event, row) {
 
 function handleRowDrop(event, row) {
   const dt = event.dataTransfer
-  const kind = draggedKind(dt) || dragging.kind
+  const { kind, mode } = computeDropTarget(event, row)
   const draggedId =
     dragging.id ||
     dt.getData('application/x-lumenfolio-doc-id') ||
     dt.getData('application/x-lumenfolio-collection-id')
-  const mode = dropHint.mode
   clearDrag()
   if (!kind || !draggedId || !mode) return
   event.preventDefault()
@@ -1023,6 +1029,7 @@ onBeforeUnmount(() => {
             :data-collection-id="row.collection.id"
             :draggable="renamingCollectionId === row.collection.id ? 'false' : 'true'"
             @dragstart="handleCollectionDragStart($event, row.collection)"
+            @dragenter.prevent
             @dragover="handleRowDragOver($event, row)"
             @drop="handleRowDrop($event, row)"
             @dragend="clearDrag"
@@ -1100,10 +1107,14 @@ onBeforeUnmount(() => {
             </template>
           </div>
 
-          <!-- Document row (indented under its collection) -->
-          <button
+          <!-- Document row (indented under its collection). A <div role=button>,
+               not a <button>: WKWebView is unreliable about firing drop on native
+               buttons, which broke drag-reorder. -->
+          <div
             v-else
             class="doc-row"
+            role="button"
+            tabindex="0"
             :class="{
               active: row.doc.id === selectedDocId && !trendingActive,
               'drop-before': dropHint.key === `doc-${row.doc.id}` && dropHint.mode === 'before',
@@ -1113,7 +1124,9 @@ onBeforeUnmount(() => {
             :title="compactDocTitle(row.doc)"
             draggable="true"
             @click="emit('select-doc', row.doc.id)"
+            @keydown.enter.self="emit('select-doc', row.doc.id)"
             @dragstart="handleDocDragStart($event, row.doc)"
+            @dragenter.prevent
             @dragover="handleRowDragOver($event, row)"
             @drop="handleRowDrop($event, row)"
             @dragend="clearDrag"
@@ -1134,7 +1147,7 @@ onBeforeUnmount(() => {
             <div v-if="row.doc.indexStatus === 'indexing'" class="doc-progress" aria-hidden="true">
               <span :style="{ width: `${progressPercent(row.doc)}%` }"></span>
             </div>
-          </button>
+          </div>
         </template>
       </div>
 
