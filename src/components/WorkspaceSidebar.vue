@@ -349,6 +349,14 @@ function treeLabel(doc) {
   return doc?.treeReady ? props.ui.treeReady : props.ui.treeMissing
 }
 
+// Trailing metadata on a document row. The value reuses the PDF byte-size label,
+// which is meaningless for notes (a few bytes rounds to "0 KB") — suppress that
+// so a fresh note reads as a clean tree item, not "hello · 0 KB".
+function docMeta(doc) {
+  const value = localized(doc?.lastOpened)
+  return value && value !== '0 KB' ? value : ''
+}
+
 function docStatusKind(doc) {
   const status = doc?.indexStatus
   if (status === 'indexed') return 'ready'
@@ -930,9 +938,12 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="collection-caret"
+              :class="{ expanded: isCollectionExpanded('__unfiled__') }"
               :aria-label="ui.unfiled || 'Unfiled'"
               @click="toggleCollectionExpanded('__unfiled__')"
-            >{{ isCollectionExpanded('__unfiled__') ? '▾' : '▸' }}</button>
+            >
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
             <span class="collection-name">{{ ui.unfiled || 'Unfiled' }}</span>
             <span class="collection-count">{{ collectionDocCount('__unfiled__') }}</span>
             <span v-if="confirmClearUnfiled" class="collection-actions collection-confirm">
@@ -942,14 +953,14 @@ onBeforeUnmount(() => {
                 :title="ui.clearUnfiledConfirm || 'Delete all unfiled sources? Files on disk are kept.'"
                 :aria-label="ui.clearUnfiled || 'Clear Unfiled'"
                 @click.stop="confirmClearUnfiledAction"
-              >✓</button>
+              ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5L19 7" /></svg></button>
               <button
                 type="button"
                 class="collection-action-btn"
                 :title="ui.cancel || 'Cancel'"
                 :aria-label="ui.cancel || 'Cancel'"
                 @click.stop="cancelClearUnfiled"
-              >✗</button>
+              ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg></button>
             </span>
             <span v-else class="collection-actions">
               <button
@@ -958,7 +969,7 @@ onBeforeUnmount(() => {
                 :title="ui.clearUnfiled || 'Clear Unfiled'"
                 :aria-label="ui.clearUnfiled || 'Clear Unfiled'"
                 @click.stop="requestClearUnfiled"
-              >🗑</button>
+              ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M7 7l.8 11a2 2 0 0 0 2 1.9h4.4a2 2 0 0 0 2-1.9L17 7M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7" /></svg></button>
             </span>
           </div>
 
@@ -982,9 +993,12 @@ onBeforeUnmount(() => {
             <button
               type="button"
               class="collection-caret"
+              :class="{ expanded: isCollectionExpanded(row.collection.id) }"
               :aria-label="isCollectionExpanded(row.collection.id) ? ui.collapse : ui.expand"
               @click.stop="toggleCollectionExpanded(row.collection.id)"
-            >{{ isCollectionExpanded(row.collection.id) ? '▾' : '▸' }}</button>
+            >
+              <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+            </button>
             <template v-if="renamingCollectionId === row.collection.id">
               <input
                 v-model="renameDraft"
@@ -1014,14 +1028,14 @@ onBeforeUnmount(() => {
                   :title="ui.deleteCollectionConfirm || 'Delete? Sources move to Unfiled.'"
                   :aria-label="ui.deleteCollection || 'Delete'"
                   @click.stop="confirmDeleteCollection(row.collection, $event)"
-                >✓</button>
+                ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5L19 7" /></svg></button>
                 <button
                   type="button"
                   class="collection-action-btn"
                   :title="ui.cancel || 'Cancel'"
                   :aria-label="ui.cancel || 'Cancel'"
                   @click.stop="cancelDeleteCollection($event)"
-                >✗</button>
+                ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg></button>
               </span>
               <span v-else class="collection-actions">
                 <button
@@ -1030,21 +1044,21 @@ onBeforeUnmount(() => {
                   :title="ui.newSubcollection || 'New sub-collection'"
                   :aria-label="ui.newSubcollection || 'New sub-collection'"
                   @click.stop="triggerNewSubcollection(row.collection, $event)"
-                >+</button>
+                ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5.5v13M5.5 12h13" /></svg></button>
                 <button
                   type="button"
                   class="collection-action-btn"
                   :title="ui.renameCollection || 'Rename'"
                   :aria-label="ui.renameCollection || 'Rename'"
                   @click.stop="startRenameCollection(row.collection, $event)"
-                >✎</button>
+                ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 20h4L18.5 9.5a2.1 2.1 0 0 0-3-3L5 17v3z" /><path d="M13.5 6.5l3 3" /></svg></button>
                 <button
                   type="button"
                   class="collection-action-btn collection-delete-btn"
                   :title="ui.deleteCollection || 'Delete'"
                   :aria-label="ui.deleteCollection || 'Delete'"
                   @click.stop="requestDeleteCollection(row.collection, $event)"
-                >×</button>
+                ><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M7 7l.8 11a2 2 0 0 0 2 1.9h4.4a2 2 0 0 0 2-1.9L17 7M9 7V5.5A1.5 1.5 0 0 1 10.5 4h3A1.5 1.5 0 0 1 15 5.5V7" /></svg></button>
               </span>
             </template>
           </div>
@@ -1071,7 +1085,7 @@ onBeforeUnmount(() => {
                 ></span>
                 <span class="doc-name">{{ row.doc.shortTitle }}</span>
               </span>
-              <span class="doc-time">{{ localized(row.doc.lastOpened) }}</span>
+              <span v-if="docMeta(row.doc)" class="doc-time">{{ docMeta(row.doc) }}</span>
             </div>
             <div v-if="row.doc.indexStatus === 'indexing'" class="doc-progress" aria-hidden="true">
               <span :style="{ width: `${progressPercent(row.doc)}%` }"></span>
@@ -1867,15 +1881,29 @@ onBeforeUnmount(() => {
 }
 
 .collection-caret {
-  width: 14px;
-  flex: 0 0 14px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  display: grid;
+  place-items: center;
   border: none;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
   padding: 0;
-  font-size: 11px;
   line-height: 1;
+}
+
+.collection-caret svg {
+  transition: transform 120ms ease;
+}
+
+.collection-caret.expanded svg {
+  transform: rotate(90deg);
+}
+
+.collection-row:hover .collection-caret {
+  color: var(--text-secondary);
 }
 
 .collection-name-btn {
@@ -1891,13 +1919,15 @@ onBeforeUnmount(() => {
   text-align: left;
 }
 
+/* Folder rows read as headings (600), documents as leaves (below) — same size,
+   so the tree has one type scale instead of children larger than their parent. */
 .collection-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .unfiled-row .collection-name {
@@ -1932,18 +1962,21 @@ onBeforeUnmount(() => {
 }
 
 .collection-action-btn {
-  width: 18px;
-  height: 18px;
+  width: 20px;
+  height: 20px;
   display: grid;
   place-items: center;
   border: none;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-secondary);
-  font-size: 12px;
+  color: var(--text-muted);
   line-height: 1;
   cursor: pointer;
   transition: background 0.12s ease, color 0.12s ease;
+}
+
+.collection-action-btn svg {
+  display: block;
 }
 
 .collection-action-btn:hover {
@@ -1986,10 +2019,13 @@ onBeforeUnmount(() => {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  margin-bottom: 6px;
+  gap: 5px;
+  /* A document is a leaf of the collection tree, not a floating card: match the
+     collection-row rhythm (tight padding, no inter-row margin, small radius) so
+     parent folders and their documents share one vertical cadence. */
+  padding: 5px 8px;
+  border-radius: 7px;
+  margin-bottom: 0;
   border: 1px solid transparent;
   /* WKWebView (Tauri/Safari) sizes <button> to its min-content width and won't
      honor width:100% shrink, breaking the ellipsis chain. Force shrink + clip. */
@@ -2012,13 +2048,13 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 
 .doc-name-wrap {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: 7px;
   flex: 1;
   min-width: 0;
 }
@@ -2034,12 +2070,12 @@ onBeforeUnmount(() => {
 
 .doc-status-dot.ready {
   background: #3db570;
-  box-shadow: 0 0 0 3px rgba(61, 181, 112, 0.16);
+  box-shadow: 0 0 0 2px rgba(61, 181, 112, 0.14);
 }
 
 .doc-status-dot.failed {
   background: #e06464;
-  box-shadow: 0 0 0 3px rgba(198, 73, 73, 0.16);
+  box-shadow: 0 0 0 2px rgba(198, 73, 73, 0.14);
 }
 
 .doc-status-dot.processing {
