@@ -8,7 +8,7 @@
 use std::io::Read;
 use std::path::Path;
 
-use calamine::{Data, Reader as _};
+use calamine::{Data, DataType as _, Reader as _};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 
@@ -263,6 +263,25 @@ fn extract_xlsx(path: &Path) -> Result<Vec<(String, String)>, String> {
                 blocks.push((record, "body".to_string()));
             }
         }
+        // One block of formulas per sheet, so "how is the total computed?" is
+        // retrievable (the value rows only carry results). Capped to stay a chunk.
+        if let Ok(formula_range) = workbook.worksheet_formula(&name) {
+            let formulas = collect_formulas(&formula_range);
+            if !formulas.is_empty() {
+                const MAX_FORMULAS: usize = 50;
+                let shown: Vec<String> = formulas
+                    .iter()
+                    .take(MAX_FORMULAS)
+                    .map(|(address, formula)| format!("{address}: {formula}"))
+                    .collect();
+                let mut text = format!("Formulas in {name} — {}", shown.join(" | "));
+                let extra = formulas.len().saturating_sub(MAX_FORMULAS);
+                if extra > 0 {
+                    text.push_str(&format!(" | (+{extra} more)"));
+                }
+                blocks.push((text, "body".to_string()));
+            }
+        }
     }
     Ok(blocks)
 }
@@ -305,6 +324,35 @@ fn column_letter(index: u32) -> String {
         n = (n - 1) / 26;
     }
     label
+}
+
+/// The non-empty formulas of a sheet as `(A1 address, formula)` pairs, e.g.
+/// ("B7", "=SUM(B2:B6)"). calamine stores the formula body without the leading
+/// `=`, so we add it. The value grid shows only computed results; this exposes
+/// the logic behind them.
+fn collect_formulas(formulas: &calamine::Range<String>) -> Vec<(String, String)> {
+    let (start_row, start_col) = formulas.start().unwrap_or((0, 0));
+    let mut out = Vec::new();
+    for (r, row) in formulas.rows().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            let body = cell.trim();
+            if body.is_empty() {
+                continue;
+            }
+            let address = format!(
+                "{}{}",
+                column_letter(start_col + c as u32),
+                start_row as usize + r + 1
+            );
+            let formula = if body.starts_with('=') {
+                body.to_string()
+            } else {
+                format!("={body}")
+            };
+            out.push((address, formula));
+        }
+    }
+    out
 }
 
 /// Render a spreadsheet as A1-addressable Markdown tables for the `read_sheet`
@@ -376,6 +424,22 @@ pub(crate) fn read_xlsx_markdown(
             cells_used += width;
         }
         out.push('\n');
+        // The grid shows computed values; list the formulas behind them with their
+        // A1 addresses so the model can explain or verify a number.
+        if let Ok(formula_range) = workbook.worksheet_formula(&name) {
+            let formulas = collect_formulas(&formula_range);
+            if !formulas.is_empty() {
+                const MAX_FORMULAS: usize = 200;
+                out.push_str("**Formulas**\n\n");
+                for (address, formula) in formulas.iter().take(MAX_FORMULAS) {
+                    out.push_str(&format!("- {address}: {formula}\n"));
+                }
+                if formulas.len() > MAX_FORMULAS {
+                    out.push_str(&format!("- _(+{} more)_\n", formulas.len() - MAX_FORMULAS));
+                }
+                out.push('\n');
+            }
+        }
     }
     Ok(out)
 }
@@ -394,7 +458,16 @@ fn cell_to_string(cell: &Data) -> String {
         }
         Data::Int(i) => i.to_string(),
         Data::Bool(b) => b.to_string(),
-        Data::DateTime(dt) => dt.to_string(),
+        // ExcelDateTime's own Display prints the raw serial number (e.g. "44484"),
+        // which is meaningless. Convert to a real calendar date; drop a midnight
+        // time so a plain date reads "2021-10-15", a timestamp "2021-10-15 19:00".
+        Data::DateTime(dt) => cell
+            .as_datetime()
+            .map(|ndt| {
+                let text = ndt.format("%Y-%m-%d %H:%M").to_string();
+                text.strip_suffix(" 00:00").map(str::to_string).unwrap_or(text)
+            })
+            .unwrap_or_else(|| dt.as_f64().to_string()),
         Data::DateTimeIso(s) => s.clone(),
         Data::DurationIso(s) => s.clone(),
         Data::Error(e) => format!("{e:?}"),
@@ -511,6 +584,32 @@ mod tests {
         assert_eq!(column_letter(26), "AA");
         assert_eq!(column_letter(701), "ZZ");
         assert_eq!(column_letter(702), "AAA");
+    }
+
+    #[test]
+    fn xlsx_datetime_renders_a_calendar_date_not_the_serial() {
+        // Serial 44484 in the 1900 date system is 2021-10-15; the old Display path
+        // printed "44484". A midnight time is dropped; a real time is kept.
+        let date = calamine::ExcelDateTime::new(44484.0, calamine::ExcelDateTimeType::DateTime, false);
+        assert_eq!(cell_to_string(&Data::DateTime(date)), "2021-10-15");
+        let stamp = calamine::ExcelDateTime::new(44484.5, calamine::ExcelDateTimeType::DateTime, false);
+        assert_eq!(cell_to_string(&Data::DateTime(stamp)), "2021-10-15 12:00");
+    }
+
+    #[test]
+    fn collect_formulas_addresses_cells_and_adds_the_equals() {
+        let cells = vec![
+            calamine::Cell::new((0, 1), "SUM(B1:B3)".to_string()), // B1, stored without '='
+            calamine::Cell::new((6, 1), "=B1*2".to_string()),      // B7, already has '='
+        ];
+        let range = calamine::Range::from_sparse(cells);
+        assert_eq!(
+            collect_formulas(&range),
+            vec![
+                ("B1".to_string(), "=SUM(B1:B3)".to_string()),
+                ("B7".to_string(), "=B1*2".to_string()),
+            ]
+        );
     }
 
     #[test]
