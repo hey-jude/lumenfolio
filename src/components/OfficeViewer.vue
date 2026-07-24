@@ -37,6 +37,52 @@ async function renderDocx(buffer) {
   })
 }
 
+// A preview, not a spreadsheet app: cap the grid so a 50k-row sheet can't spend
+// the UI thread building DOM. Anything beyond is reported under the table.
+const MAX_PREVIEW_ROWS = 500
+const MAX_PREVIEW_COLS = 60
+
+// exceljs indexes rows/columns from 1. These mirror the A1 addresses the agent's
+// read_sheet tool cites, so the user can match "B7" against what it says.
+function columnLetter(index) {
+  let n = index
+  let label = ''
+  while (n > 0) {
+    label = String.fromCharCode(65 + ((n - 1) % 26)) + label
+    n = Math.floor((n - 1) / 26)
+  }
+  return label
+}
+
+function columnIndex(letters) {
+  let n = 0
+  for (const char of letters) n = n * 26 + (char.charCodeAt(0) - 64)
+  return n
+}
+
+// Merged ranges ("B2:D3") → the span to place on the top-left cell, plus every
+// cell the merge swallows. The swallowed ones must NOT be emitted, or the row
+// shifts right; skipping them is what makes multi-level headers line up.
+function parseMerges(worksheet) {
+  const spans = new Map()
+  const covered = new Set()
+  for (const range of worksheet.model?.merges ?? []) {
+    const match = /^([A-Z]+)(\d+):([A-Z]+)(\d+)$/.exec(String(range).toUpperCase())
+    if (!match) continue
+    const top = Number(match[2])
+    const bottom = Number(match[4])
+    const left = columnIndex(match[1])
+    const right = columnIndex(match[3])
+    spans.set(`${top},${left}`, { rowspan: bottom - top + 1, colspan: right - left + 1 })
+    for (let r = top; r <= bottom; r += 1) {
+      for (let c = left; c <= right; c += 1) {
+        if (r !== top || c !== left) covered.add(`${r},${c}`)
+      }
+    }
+  }
+  return { spans, covered }
+}
+
 async function renderXlsx(buffer) {
   const mod = await import('exceljs')
   const ExcelJS = mod.default ?? mod
@@ -44,28 +90,62 @@ async function renderXlsx(buffer) {
   await workbook.xlsx.load(buffer)
   const parsed = []
   workbook.eachSheet((worksheet) => {
+    const { spans, covered } = parseMerges(worksheet)
+    const totalCols = Math.max(worksheet.columnCount || 0, 1)
+    const totalRows = worksheet.rowCount || 0
+    const columnCount = Math.min(totalCols, MAX_PREVIEW_COLS)
+    const rowCount = Math.min(totalRows, MAX_PREVIEW_ROWS)
+    const columns = Array.from({ length: columnCount }, (_, i) => columnLetter(i + 1))
     const rows = []
-    worksheet.eachRow({ includeEmpty: false }, (row) => {
+    // Walk the grid positionally instead of exceljs's eachRow/eachCell: those stop
+    // at the last populated cell of each row, so every row got a different <td>
+    // count and the columns drifted out of alignment.
+    for (let r = 1; r <= rowCount; r += 1) {
+      const row = worksheet.getRow(r)
       const cells = []
-      row.eachCell({ includeEmpty: true }, (cell) => {
-        cells.push(formatCell(cell.value))
-      })
-      rows.push(cells)
+      for (let c = 1; c <= columnCount; c += 1) {
+        if (covered.has(`${r},${c}`)) continue
+        const cell = row.getCell(c)
+        const span = spans.get(`${r},${c}`)
+        cells.push({
+          key: `${r},${c}`,
+          text: formatCell(cell),
+          // Clamp so a merge running past the preview cap can't overflow the grid.
+          colspan: Math.min(span?.colspan ?? 1, columnCount - c + 1),
+          rowspan: Math.min(span?.rowspan ?? 1, rowCount - r + 1),
+          bold: Boolean(cell.font?.bold),
+          align: cell.alignment?.horizontal || '',
+        })
+      }
+      rows.push({ number: r, cells })
+    }
+    parsed.push({
+      name: worksheet.name,
+      columns,
+      rows,
+      hiddenRows: Math.max(totalRows - rowCount, 0),
+      hiddenCols: Math.max(totalCols - columnCount, 0),
     })
-    parsed.push({ name: worksheet.name, rows })
   })
   sheets.value = parsed
 }
 
-function formatCell(value) {
+function formatCell(cell) {
+  const value = cell?.value
   if (value == null) return ''
+  if (value instanceof Date) return value.toISOString().slice(0, 10)
   if (typeof value === 'object') {
-    // exceljs rich text / formula / hyperlink shapes.
-    if (value.text != null) return String(value.text)
-    if (value.result != null) return String(value.result)
     if (Array.isArray(value.richText)) return value.richText.map((part) => part.text).join('')
-    if (value instanceof Date) return value.toLocaleDateString()
+    // Formula cells carry their cached result; hyperlinks carry display text.
+    if (value.result != null) return String(value.result)
+    if (value.text != null) return String(value.text)
     return ''
+  }
+  // exceljs hands back a percentage as its raw fraction, so 0.85 rendered as
+  // "0.85". Apply the format's own precision to show "85%".
+  if (typeof value === 'number' && typeof cell.numFmt === 'string' && cell.numFmt.includes('%')) {
+    const decimals = (cell.numFmt.split('.')[1] || '').replace(/[^0#]/g, '').length
+    return `${(value * 100).toFixed(decimals)}%`
   }
   return String(value)
 }
@@ -117,17 +197,36 @@ watch(() => props.documentId, load)
       <div ref="docxHost" class="office-docx-host"></div>
     </div>
 
-    <!-- xlsx: simple per-sheet HTML tables. -->
+    <!-- xlsx: per-sheet grid with A1 row/column headers and honored merges. -->
     <div v-else-if="contentType === 'xlsx'" class="office-xlsx-scroll">
       <section v-for="sheet in sheets" :key="sheet.name" class="office-sheet">
         <h3 class="office-sheet-name">{{ sheet.name }}</h3>
         <table class="office-table">
+          <thead>
+            <tr>
+              <th class="office-corner"></th>
+              <th v-for="col in sheet.columns" :key="col" class="office-colhead">{{ col }}</th>
+            </tr>
+          </thead>
           <tbody>
-            <tr v-for="(row, rIndex) in sheet.rows" :key="rIndex">
-              <td v-for="(cell, cIndex) in row" :key="cIndex">{{ cell }}</td>
+            <tr v-for="row in sheet.rows" :key="row.number">
+              <th class="office-rowhead">{{ row.number }}</th>
+              <td
+                v-for="cell in row.cells"
+                :key="cell.key"
+                :colspan="cell.colspan"
+                :rowspan="cell.rowspan"
+                :class="{ 'is-bold': cell.bold }"
+                :style="cell.align ? { textAlign: cell.align } : null"
+              >{{ cell.text }}</td>
             </tr>
           </tbody>
         </table>
+        <p v-if="sheet.hiddenRows || sheet.hiddenCols" class="office-sheet-note">
+          {{ ui.sheetPreviewTruncated || 'Preview truncated' }}
+          <template v-if="sheet.hiddenRows">· +{{ sheet.hiddenRows }} rows</template>
+          <template v-if="sheet.hiddenCols">· +{{ sheet.hiddenCols }} cols</template>
+        </p>
       </section>
     </div>
   </div>
@@ -216,6 +315,7 @@ watch(() => props.documentId, load)
   color: var(--text-primary);
 }
 
+.office-table th,
 .office-table td {
   border: 1px solid var(--line-soft);
   padding: 4px 8px;
@@ -223,5 +323,53 @@ watch(() => props.documentId, load)
   max-width: 320px;
   overflow: hidden;
   text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+/* Row numbers / column letters mirror the A1 addresses read_sheet reports, so a
+   cell the agent cites ("B7") can be found by eye. They stay pinned while the
+   grid scrolls. */
+.office-corner,
+.office-colhead,
+.office-rowhead {
+  position: sticky;
+  background: var(--bg-panel, #1f1f24);
+  color: var(--text-muted, var(--text-secondary));
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.office-corner,
+.office-colhead {
+  top: 0;
+}
+
+.office-corner,
+.office-rowhead {
+  left: 0;
+}
+
+.office-corner {
+  z-index: 3;
+}
+
+.office-colhead {
+  z-index: 2;
+}
+
+.office-rowhead {
+  z-index: 1;
+}
+
+.office-table .is-bold {
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.office-sheet-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--text-muted, var(--text-secondary));
 }
 </style>
