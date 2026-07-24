@@ -9,6 +9,9 @@ const props = defineProps({
   documentId: { type: String, required: true },
   contentType: { type: String, required: true },
   title: { type: String, default: '' },
+  // The citation the user clicked in chat, if any. Office sources carry no PDF
+  // geometry, so evidence is anchored by content instead — see applyCitation().
+  citation: { type: Object, default: null },
   ui: { type: Object, required: true },
 })
 
@@ -150,6 +153,86 @@ function formatCell(cell) {
   return String(value)
 }
 
+// ── Citation anchoring ──────────────────────────────────────────────────────
+// A PDF citation carries page + bbox; an Office one carries neither (the block
+// index writes page 0 and an empty bbox). So evidence is located by content:
+//   * xlsx — the indexed row record is deliberately unlike the rendered cells
+//     ("Region: West | Revenue: 3140" vs three columns), so text search could
+//     never find it. Extraction prefixes each record with `Sheet!row`, which is
+//     parsed back out here and matched against the rendered row.
+//   * docx — the indexed block IS the paragraph text, so a normalized text match
+//     against the rendered DOM is both simpler and sturdier than counting
+//     paragraphs (headings, tables and lists desynchronize any ordinal).
+
+// `${sheetIndex}:${rowNumber}` of the row to highlight, or '' for none.
+const citedRow = ref('')
+
+// Keep in sync with extract_xlsx in src-tauri/src/office.rs, which emits
+// "<sheet>!<row> · <record>". Greedy up to the last '!' so a sheet name
+// containing '!' still parses.
+const SHEET_ROW_RE = /^(.*)!(\d+)\s+·\s/
+
+function normalizeText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim()
+}
+
+function applyXlsxCitation(quote) {
+  citedRow.value = ''
+  const match = SHEET_ROW_RE.exec(quote)
+  if (!match) return
+  const [, sheetName, rowText] = match
+  const wanted = normalizeText(sheetName).toLowerCase()
+  let index = sheets.value.findIndex((sheet) => normalizeText(sheet.name).toLowerCase() === wanted)
+  // A single-sheet workbook stays useful even if the name drifted (renamed after
+  // indexing); with several sheets, guessing the wrong one would be worse.
+  if (index < 0 && sheets.value.length === 1) index = 0
+  if (index < 0) return
+  const key = `${index}:${Number(rowText)}`
+  // Only claim a hit if that row is actually rendered (it may be past the cap).
+  if (!sheets.value[index].rows.some((row) => `${index}:${row.number}` === key)) return
+  citedRow.value = key
+}
+
+function applyDocxCitation(quote) {
+  const host = docxHost.value
+  if (!host) return
+  host.querySelectorAll('.office-cite-hit').forEach((el) => el.classList.remove('office-cite-hit'))
+  // Long quotes are truncated head-first with a trailing "..." (truncate_chars in
+  // the RAG layer); that marker is not in the rendered text, so drop it or the
+  // prefix match below can never succeed.
+  const needle = normalizeText(quote).replace(/(\.{3}|…)$/, '').trim()
+  if (needle.length < 4) return
+  const nodes = Array.from(host.querySelectorAll('p, li, td, th, h1, h2, h3, h4, h5, h6'))
+  const scored = nodes
+    .map((el) => ({ el, text: normalizeText(el.textContent) }))
+    .filter((entry) => entry.text.length > 0)
+  const hit =
+    scored.find((entry) => entry.text === needle)
+    // The quote may be truncated by the retrieval quote cap, so a prefix counts.
+    || scored.find((entry) => entry.text.includes(needle))
+    // Or the block may have merged runs the renderer splits across elements.
+    || scored.find((entry) => entry.text.length > 24 && needle.includes(entry.text))
+  if (!hit) return
+  hit.el.classList.add('office-cite-hit')
+  hit.el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
+
+async function applyCitation() {
+  const quote = props.citation?.quote
+  if (!quote || props.citation?.documentId !== props.documentId) {
+    citedRow.value = ''
+    return
+  }
+  if (props.contentType === 'xlsx') {
+    applyXlsxCitation(quote)
+    await nextTick()
+    const el = document.querySelector(`[data-cited-row="${citedRow.value}"]`)
+    el?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  } else if (props.contentType === 'docx') {
+    applyDocxCitation(quote)
+  }
+}
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -169,6 +252,9 @@ async function load() {
     } else if (props.contentType === 'xlsx') {
       await renderXlsx(buffer)
     }
+    // A cross-document citation click switches tabs, so this component often
+    // mounts with a citation already pending — anchor once the render exists.
+    await applyCitation()
   } catch (err) {
     error.value = err?.message || String(err)
   } finally {
@@ -178,6 +264,8 @@ async function load() {
 
 onMounted(load)
 watch(() => props.documentId, load)
+// Clicking another citation in the same open document re-anchors without reload.
+watch(() => props.citation, applyCitation)
 </script>
 
 <template>
@@ -199,7 +287,7 @@ watch(() => props.documentId, load)
 
     <!-- xlsx: per-sheet grid with A1 row/column headers and honored merges. -->
     <div v-else-if="contentType === 'xlsx'" class="office-xlsx-scroll">
-      <section v-for="sheet in sheets" :key="sheet.name" class="office-sheet">
+      <section v-for="(sheet, sheetIndex) in sheets" :key="sheet.name" class="office-sheet">
         <h3 class="office-sheet-name">{{ sheet.name }}</h3>
         <table class="office-table">
           <thead>
@@ -209,7 +297,12 @@ watch(() => props.documentId, load)
             </tr>
           </thead>
           <tbody>
-            <tr v-for="row in sheet.rows" :key="row.number">
+            <tr
+              v-for="row in sheet.rows"
+              :key="row.number"
+              :data-cited-row="`${sheetIndex}:${row.number}`"
+              :class="{ 'is-cited': citedRow === `${sheetIndex}:${row.number}` }"
+            >
               <th class="office-rowhead">{{ row.number }}</th>
               <td
                 v-for="cell in row.cells"
@@ -371,5 +464,41 @@ watch(() => props.documentId, load)
   margin: 6px 0 0;
   font-size: 11px;
   color: var(--text-muted, var(--text-secondary));
+}
+
+/* Evidence anchoring: the row (xlsx) or paragraph (docx) a chat citation points
+   at. Sustained tint so it stays findable after the scroll, plus a one-shot
+   pulse to catch the eye on arrival. */
+.office-table tr.is-cited td {
+  background: rgba(240, 181, 74, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(240, 181, 74, 0.4);
+}
+
+.office-table tr.is-cited th {
+  color: var(--text-primary);
+}
+
+.office-docx-host :deep(.office-cite-hit) {
+  background: rgba(240, 181, 74, 0.28);
+  border-radius: 3px;
+  box-shadow: 0 0 0 3px rgba(240, 181, 74, 0.28);
+}
+
+.office-table tr.is-cited td,
+.office-docx-host :deep(.office-cite-hit) {
+  animation: office-cite-pulse 1.1s ease-out 1;
+}
+
+@keyframes office-cite-pulse {
+  0% {
+    background: rgba(240, 181, 74, 0.55);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .office-table tr.is-cited td,
+  .office-docx-host :deep(.office-cite-hit) {
+    animation: none;
+  }
 }
 </style>

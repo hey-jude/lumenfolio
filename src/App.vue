@@ -154,6 +154,9 @@ const activePage = ref(1)
 const activeBlockId = ref('')
 const activeCitationId = ref('')
 const activeHighlight = ref(null)
+// The citation last clicked, for viewers that anchor on text rather than on PDF
+// geometry (the Office preview).
+const activeCitation = ref(null)
 const hoveredLinkedBlock = ref(null)
 const lastSelection = ref(null)
 const activeTranslation = ref(null)
@@ -2075,6 +2078,11 @@ function applyCitationJump(citation) {
   activeBlockId.value = citation.blockId
   activeCitationId.value = citation.id
   activeHighlight.value = createHighlight(citation)
+  // Office sources have no PDF geometry (page 0, empty bbox), so the reader's
+  // page/highlight props mean nothing to them. Hand the whole citation to the
+  // Office viewer instead — it anchors on the quote's text (docx) or its
+  // `Sheet!row` reference (xlsx).
+  activeCitation.value = citation
 }
 
 function nextLocalId(prefix) {
@@ -5463,6 +5471,7 @@ onMounted(() => {
         :document-id="selectedDocument.id"
         :content-type="selectedDocument.contentType"
         :title="selectedDocument.shortTitle || selectedDocument.title || ''"
+        :citation="activeCitation"
         :ui="ui"
       />
     </div>

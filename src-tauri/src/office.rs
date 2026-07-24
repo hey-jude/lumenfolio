@@ -237,30 +237,36 @@ fn extract_xlsx(path: &Path) -> Result<Vec<(String, String)>, String> {
         if width == 0 {
             continue;
         }
-        let mut rows = range.rows();
         // The first row carrying any value is the header; its labels key the data
         // rows below. A pure title row above the header degrades gracefully (the
         // full grid is available via read_sheet).
-        let header: Vec<String> = loop {
-            match rows.next() {
-                Some(row) => {
-                    let cells: Vec<String> = row.iter().map(cell_to_string).collect();
-                    if cells.iter().any(|cell| !cell.is_empty()) {
-                        let labels: Vec<&str> = cells
-                            .iter()
-                            .filter(|cell| !cell.is_empty())
-                            .map(String::as_str)
-                            .collect();
-                        blocks.push((format!("Columns: {}", labels.join(" | ")), "body".to_string()));
-                        break cells;
-                    }
+        let (start_row, _) = range.start().unwrap_or((0, 0));
+        let mut header: Vec<String> = Vec::new();
+        let mut header_seen = false;
+        for (offset, row) in range.rows().enumerate() {
+            // Real 1-based worksheet row, honoring a used range that starts below A1.
+            let row_no = start_row as usize + offset + 1;
+            if !header_seen {
+                let cells: Vec<String> = row.iter().map(cell_to_string).collect();
+                if cells.iter().any(|cell| !cell.is_empty()) {
+                    let labels: Vec<&str> = cells
+                        .iter()
+                        .filter(|cell| !cell.is_empty())
+                        .map(String::as_str)
+                        .collect();
+                    blocks.push((format!("Columns: {}", labels.join(" | ")), "body".to_string()));
+                    header = cells;
+                    header_seen = true;
                 }
-                None => break Vec::new(),
+                continue;
             }
-        };
-        for row in rows {
             if let Some(record) = xlsx_record(&header, row) {
-                blocks.push((record, "body".to_string()));
+                // Lead with an Excel-style `Sheet!row` reference. It lets the model
+                // cite a row precisely, and it is what the viewer parses back out of
+                // a citation to scroll to and highlight that row — the indexed text
+                // ("Region: West | …") deliberately does not match the rendered
+                // cells, so a text search could never find it.
+                blocks.push((format!("{name}!{row_no} · {record}"), "body".to_string()));
             }
         }
         // One block of formulas per sheet, so "how is the total computed?" is
