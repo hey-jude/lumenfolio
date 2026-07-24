@@ -28,6 +28,7 @@ mod pdf_index;
 mod pdf_layout_dump;
 mod providers;
 mod runtime;
+mod search_text;
 mod storage;
 mod translation;
 mod trending;

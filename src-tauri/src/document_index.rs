@@ -350,7 +350,11 @@ fn upsert_document_index_job_with_progress(
             tx.execute(
                 "INSERT INTO document_chunks_fts (chunk_id, document_id, text)
                  VALUES (?1, ?2, ?3)",
-                params![chunk_id.as_str(), document_id.as_str(), block.text.as_str()],
+                params![
+                    chunk_id.as_str(),
+                    document_id.as_str(),
+                    crate::search_text::index_text(&block.text)
+                ],
             )
             .map_err(|err| format!("Failed to insert FTS row: {err}"))?;
         }
@@ -1268,7 +1272,7 @@ fn upsert_block_document_index(
         tx.execute(
             "INSERT INTO document_chunks_fts (chunk_id, document_id, text)
              VALUES (?1, ?2, ?3)",
-            params![chunk_id, document_id, text],
+            params![chunk_id, document_id, crate::search_text::index_text(text)],
         )
         .map_err(|err| format!("Failed to insert note FTS row: {err}"))?;
 

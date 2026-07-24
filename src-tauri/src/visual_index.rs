@@ -785,7 +785,12 @@ pub(super) fn insert_tsr_table_result(
         tx.execute(
             "INSERT INTO document_table_facts_fts (fact_id, document_id, table_id, text)
              VALUES (?1, ?2, ?3, ?4)",
-            params![fact_id, document_id, table_id, fact_text],
+            params![
+                fact_id,
+                document_id,
+                table_id,
+                crate::search_text::index_text(&fact_text)
+            ],
         )
         .map_err(|err| format!("Failed to insert Rust TSR table fact FTS row: {err}"))?;
     }

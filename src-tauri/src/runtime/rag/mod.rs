@@ -5097,7 +5097,12 @@ fn insert_reconstructed_table(
             tx.execute(
                 "INSERT INTO document_table_facts_fts (fact_id, document_id, table_id, text)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![fact_id, document_id, table_id, fact_text],
+                params![
+                    fact_id,
+                    document_id,
+                    table_id,
+                    crate::search_text::index_text(&fact_text)
+                ],
             )
             .map_err(|err| format!("Failed to insert table fact FTS row: {err}"))?;
         }
@@ -6873,11 +6878,9 @@ fn visual_anchor_asset_type_matches(requested: &str, actual: &str) -> bool {
 }
 
 fn escape_fts_query(query: &str) -> String {
-    query
-        .split_whitespace()
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" OR ")
+    // CJK needs per-character tokens to be findable at all; English is passed
+    // through with the same quote-and-OR shape as before. See search_text.
+    crate::search_text::match_query(query)
 }
 
 fn normalize_for_dedupe(value: &str) -> String {

@@ -1,6 +1,6 @@
 use std::{path::Path, time::Duration};
 
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 /// Shared pragmas for every connection to the database. `busy_timeout` is opt-in:
 /// the app connection deliberately leaves it at 0 (fail fast) so that a write which
@@ -854,8 +854,98 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
     .map_err(|err| format!("Failed to create visual evidence indexes: {err}"))?;
 
     migrate_workspace_roots_to_collections(conn)?;
+    migrate_fts_cjk_segmentation(conn)?;
 
     Ok(())
+}
+
+/// Re-index the FTS mirrors so CJK is stored one character per token.
+///
+/// SAFETY: `document_chunks_fts` / `document_table_facts_fts` are *derived*
+/// mirrors of `document_chunks` / `document_table_facts`. Rebuilding them re-reads
+/// those tables and re-parses nothing, so every document's blocks, pages,
+/// structure tree, visual assets, citations and chat history are untouched — the
+/// only thing that changes is what the search index tokenizes.
+///
+/// Runs once, guarded by a marker in `app_settings`, and only writes the marker
+/// after both rebuilds commit — a failure part-way leaves the marker unset so the
+/// next launch retries rather than leaving search half-migrated.
+fn migrate_fts_cjk_segmentation(conn: &Connection) -> Result<(), String> {
+    const MARKER: &str = "fts_cjk_segmented_v1";
+    let already: Option<String> = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![MARKER],
+            |row| row.get(0),
+        )
+        .ok();
+    if already.is_some() {
+        return Ok(());
+    }
+
+    let chunks: Vec<(String, String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, document_id, text FROM document_chunks")
+            .map_err(|err| format!("Failed to read chunks for FTS rebuild: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|err| format!("Failed to read chunks for FTS rebuild: {err}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("Failed to read chunks for FTS rebuild: {err}"))?
+    };
+    let facts: Vec<(String, String, String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT id, document_id, table_id, fact_text FROM document_table_facts")
+            .map_err(|err| format!("Failed to read table facts for FTS rebuild: {err}"))?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(|err| format!("Failed to read table facts for FTS rebuild: {err}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("Failed to read table facts for FTS rebuild: {err}"))?
+    };
+
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|err| format!("Failed to start FTS rebuild: {err}"))?;
+    let rebuild = (|| -> Result<(), String> {
+        conn.execute("DELETE FROM document_chunks_fts", [])
+            .map_err(|err| format!("Failed to clear chunk FTS: {err}"))?;
+        for (id, document_id, text) in &chunks {
+            conn.execute(
+                "INSERT INTO document_chunks_fts (chunk_id, document_id, text)
+                 VALUES (?1, ?2, ?3)",
+                params![id, document_id, crate::search_text::index_text(text)],
+            )
+            .map_err(|err| format!("Failed to rebuild chunk FTS: {err}"))?;
+        }
+        conn.execute("DELETE FROM document_table_facts_fts", [])
+            .map_err(|err| format!("Failed to clear table-fact FTS: {err}"))?;
+        for (id, document_id, table_id, text) in &facts {
+            conn.execute(
+                "INSERT INTO document_table_facts_fts (fact_id, document_id, table_id, text)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![id, document_id, table_id, crate::search_text::index_text(text)],
+            )
+            .map_err(|err| format!("Failed to rebuild table-fact FTS: {err}"))?;
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value, updated_at)
+             VALUES (?1, '1', unixepoch())",
+            params![MARKER],
+        )
+        .map_err(|err| format!("Failed to mark FTS rebuild: {err}"))?;
+        Ok(())
+    })();
+    match rebuild {
+        Ok(()) => conn
+            .execute_batch("COMMIT")
+            .map_err(|err| format!("Failed to commit FTS rebuild: {err}")),
+        Err(err) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(err)
+        }
+    }
 }
 
 /// Knowledge-base pivot (Collections): one-time seed of the logical folder tree
@@ -1549,6 +1639,53 @@ mod tests {
             )
             .expect("failed translation job count");
         assert_eq!(failed_translation_jobs, 1);
+    }
+
+    #[test]
+    /// Simulates an existing install: chunks already indexed with the old,
+    /// unsegmented CJK text. The migration must make a mid-run term findable
+    /// without touching the source rows, and must not run twice.
+    #[test]
+    fn migrate_fts_cjk_segmentation_reindexes_existing_chunks_once() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        migrate_database(&conn).expect("schema");
+        // The migration only reads document_chunks / document_table_facts, so skip
+        // the owning rows rather than chase every NOT NULL column on `documents`.
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO document_chunks (id, document_id, page_no, block_ids_json, text, bbox_refs_json)
+             VALUES ('c1', 'd1', 0, '[]', '企业知识库升级建设方案', '[]');
+             -- The pre-migration state: raw text, one Han token.
+             INSERT INTO document_chunks_fts (chunk_id, document_id, text)
+             VALUES ('c1', 'd1', '企业知识库升级建设方案');
+             DELETE FROM app_settings WHERE key = 'fts_cjk_segmented_v1';",
+        )
+        .expect("seed");
+
+        let hits = |conn: &Connection, query: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM document_chunks_fts WHERE document_chunks_fts MATCH ?1",
+                params![crate::search_text::match_query(query)],
+                |row| row.get(0),
+            )
+            .expect("match")
+        };
+        assert_eq!(hits(&conn, "知识库"), 0, "the old index cannot find a mid-run term");
+
+        migrate_fts_cjk_segmentation(&conn).expect("migrate");
+        assert_eq!(hits(&conn, "知识库"), 1, "after the rebuild it must match");
+
+        // The source row is untouched — quotes shown to the user keep their spacing.
+        let source: String = conn
+            .query_row("SELECT text FROM document_chunks WHERE id = 'c1'", [], |r| {
+                r.get(0)
+            })
+            .expect("source");
+        assert_eq!(source, "企业知识库升级建设方案");
+
+        // Idempotent: a second call is a no-op, not a duplicate row.
+        migrate_fts_cjk_segmentation(&conn).expect("migrate twice");
+        assert_eq!(hits(&conn, "知识库"), 1);
     }
 
     #[test]
