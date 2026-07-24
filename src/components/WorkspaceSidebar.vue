@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch, onBeforeUnmount } from 'vue'
 import lumenfolioLogo from '../assets/lumenfolio-logo-transparent.png'
 import { startWindowDrag } from '../windowDrag'
+import { beginDocDrag, deliverDocDrop, endDocDrag } from '../docDrag'
 
 const props = defineProps({
   roots: {
@@ -158,6 +159,7 @@ function resetDrag() {
   dragging.label = ''
   dropHint.key = ''
   dropHint.mode = ''
+  endDocDrag()
   document.body.style.userSelect = ''
   window.removeEventListener('mousemove', onDragMouseMove)
   window.removeEventListener('mouseup', onDragMouseUp)
@@ -189,6 +191,9 @@ function onDragMouseMove(event) {
     dragging.kind = pendingDrag.kind
     dragging.id = pendingDrag.id
     dragging.label = pendingDrag.label
+    // Publish document drags so drop zones outside this component (the chat
+    // composer) can light up as targets.
+    if (dragging.kind === 'doc') beginDocDrag(dragging.id, dragging.label)
     document.body.style.userSelect = 'none'
   }
   dragging.x = event.clientX
@@ -225,16 +230,23 @@ function dropModeFor(row, offset) {
   return ''
 }
 
-function onDragMouseUp() {
+function onDragMouseUp(event) {
   const wasDragging = dragging.active
   const kind = dragging.kind
   const draggedId = dragging.id
   const key = dropHint.key
   const mode = dropHint.mode
+  const x = event?.clientX ?? dragging.x
+  const y = event?.clientY ?? dragging.y
   resetDrag()
   if (!wasDragging) return // a plain click; let it select
   swallowNextClick()
-  if (!draggedId || !mode || !key) return
+  if (!draggedId) return
+  // A document released over a registered zone outside the tree (the chat
+  // composer) goes there. Mutually exclusive with a tree drop: no row is under
+  // the pointer out there, so dropHint is empty anyway.
+  if (kind === 'doc' && deliverDocDrop(x, y, draggedId)) return
+  if (!mode || !key) return
   const row = treeRows.value.find((candidate) => rowKey(candidate) === key)
   if (row) performDrop(kind, draggedId, row, mode)
 }
@@ -1252,12 +1264,17 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
-    <!-- Floating label following the pointer during an internal drag. -->
-    <div
-      v-if="dragging.active"
-      class="drag-ghost"
-      :style="{ left: `${dragging.x}px`, top: `${dragging.y}px` }"
-    >{{ dragging.label }}</div>
+    <!-- Floating label following the pointer during an internal drag. Teleported
+         to <body>: the sidebar creates a stacking context (z-index 6) that panes
+         at 8/20/40/60 paint over, so an in-place ghost vanished the moment it
+         crossed into the reader or chat column. -->
+    <Teleport to="body">
+      <div
+        v-if="dragging.active"
+        class="drag-ghost"
+        :style="{ left: `${dragging.x}px`, top: `${dragging.y}px` }"
+      >{{ dragging.label }}</div>
+    </Teleport>
     </template>
   </aside>
 </template>

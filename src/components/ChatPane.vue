@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import MarkdownText from './MarkdownText.vue'
 import { startWindowDrag } from '../windowDrag'
 import { testAttrs } from '../testAttrs'
+import { docDrag, registerDocDropZone } from '../docDrag'
 
 const props = defineProps({
   // The active agent session (conversation). Messages live here, not on the
@@ -885,11 +886,19 @@ watch(() => props.collapsed, (collapsed) => {
   if (!collapsed && props.focusRequest) focusComposer()
 })
 
+// Accept a document dragged out of the sidebar as an @-reference. The drag is
+// pointer-based (see docDrag.js — HTML5 DnD is swallowed by Tauri's native
+// file-drop), so the composer registers a named zone instead of using @drop.
+let unregisterDocDropZone = null
+
 onMounted(() => {
   if (props.focusRequest) focusComposer()
   autoFollowMessages.value = true
   userScrolledMessages.value = false
   scrollMessagesToBottom({ force: true, settle: true })
+  unregisterDocDropZone = registerDocDropZone('chat', (docId) => {
+    if (chatInputEnabled.value) addMention(docId)
+  })
 })
 
 onBeforeUnmount(() => {
@@ -897,6 +906,7 @@ onBeforeUnmount(() => {
   if (messageScrollbarTimer) window.clearTimeout(messageScrollbarTimer)
   messageScrollSettleTimers.forEach((timer) => window.clearTimeout(timer))
   messageScrollSettleTimers.clear()
+  unregisterDocDropZone?.()
 })
 
 defineExpose({
@@ -2394,6 +2404,8 @@ function evidenceSourceLabel(source) {
 
       <form
         class="chat-composer"
+        :class="{ 'is-doc-target': docDrag.active }"
+        data-doc-drop="chat"
         @submit.prevent="handleSubmit"
         @paste="handleComposerPaste"
         @dragover.prevent
@@ -4502,6 +4514,13 @@ button.agent-process-head:disabled {
 
 .chat-composer:focus-within {
   border-color: rgba(106, 169, 255, 0.4);
+}
+
+/* A document is being dragged out of the sidebar: show the composer is a target. */
+.chat-composer.is-doc-target {
+  border-color: rgba(106, 169, 255, 0.75);
+  border-style: dashed;
+  background: rgba(106, 169, 255, 0.1);
 }
 
 .composer-file-input {
