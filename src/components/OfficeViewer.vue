@@ -1,5 +1,5 @@
 <script setup>
-import { ref, shallowRef, watch, onMounted, nextTick } from 'vue'
+import { ref, shallowRef, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
 // Knowledge-base pivot (P3): client-side Office preview. docx → docx-preview
@@ -18,6 +18,11 @@ const props = defineProps({
 const loading = ref(false)
 const error = ref('')
 const docxHost = ref(null)
+const pptxHost = ref(null)
+// True when the deck could not be rendered; falls back to the "text is indexed,
+// ask in chat" note rather than showing an empty pane.
+const pptxFailed = ref(false)
+let pptxViewer = null
 // xlsx: [{ name, rows: [[cell, …], …] }]
 const sheets = shallowRef([])
 
@@ -25,6 +30,42 @@ async function fetchBytes() {
   const bytes = await invoke('read_document_bytes', { docId: props.documentId })
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
   return u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength)
+}
+
+// pptx renders through @aiden0z/pptx-renderer (Apache-2.0): OOXML → HTML/SVG DOM,
+// checked against PowerPoint output by visual regression. Fidelity was the goal
+// here, so we take the real layout engine rather than an outline approximation.
+// Windowed + lazy so a 200-slide deck doesn't build every slide up front, and
+// RECOMMENDED_ZIP_LIMITS guards against a zip bomb — these are user files.
+async function renderPptx(buffer) {
+  const { PptxViewer, RECOMMENDED_ZIP_LIMITS } = await import('@aiden0z/pptx-renderer')
+  await nextTick()
+  if (!pptxHost.value) return
+  destroyPptxViewer()
+  pptxViewer = await PptxViewer.open(buffer, pptxHost.value, {
+    zipLimits: RECOMMENDED_ZIP_LIMITS,
+    lazySlides: true,
+    lazyMedia: true,
+    listOptions: { windowed: true, initialSlides: 4, batchSize: 4 },
+    // PowerPoint stores SmartArt / pasted vector art as EMF with an embedded PDF
+    // preview. pdfjs-dist is already a dependency for the PDF reader, so wiring
+    // it in costs nothing and recovers those slides instead of dropping them.
+    pdfjs: {
+      moduleUrl: new URL('pdfjs-dist/build/pdf.min.mjs', import.meta.url).toString(),
+      workerUrl: new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString(),
+    },
+  })
+}
+
+function destroyPptxViewer() {
+  // Releases blob URLs, observers and DOM — without this every reopen leaks the
+  // deck's decoded media.
+  try {
+    pptxViewer?.destroy?.()
+  } catch {
+    // A half-initialized viewer can throw here; nothing useful to do.
+  }
+  pptxViewer = null
 }
 
 async function renderDocx(buffer) {
@@ -237,12 +278,24 @@ async function load() {
   loading.value = true
   error.value = ''
   sheets.value = []
+  pptxFailed.value = false
+  destroyPptxViewer()
   try {
+    const buffer = await fetchBytes()
     if (props.contentType === 'pptx') {
+      // Same ordering reason as docx: the host is behind the `v-if="loading"`
+      // chain, so drop the flag first to mount it, then render into it.
       loading.value = false
+      try {
+        await renderPptx(buffer)
+      } catch (err) {
+        // A deck we can't lay out is still fully indexed and askable — degrade to
+        // the notice instead of an error page.
+        console.warn('pptx render failed', err)
+        pptxFailed.value = true
+      }
       return
     }
-    const buffer = await fetchBytes()
     if (props.contentType === 'docx') {
       // The docx host sits behind the `v-if="loading"` chain, so it is NOT in the
       // DOM while loading. Drop the flag first so the host mounts, then render into
@@ -266,6 +319,7 @@ onMounted(load)
 watch(() => props.documentId, load)
 // Clicking another citation in the same open document re-anchors without reload.
 watch(() => props.citation, applyCitation)
+onBeforeUnmount(destroyPptxViewer)
 </script>
 
 <template>
@@ -273,11 +327,16 @@ watch(() => props.citation, applyCitation)
     <p v-if="loading" class="office-status">{{ ui.loading || 'Loading…' }}</p>
     <p v-else-if="error" class="office-status office-error">{{ error }}</p>
 
-    <!-- pptx: no fidelity renderer yet; the deck's text is still indexed/askable. -->
-    <div v-else-if="contentType === 'pptx'" class="office-placeholder">
+    <!-- pptx: rendered to HTML/SVG by pptx-renderer; the notice is the fallback
+         for a deck it cannot lay out (still indexed and askable). -->
+    <div v-else-if="contentType === 'pptx' && pptxFailed" class="office-placeholder">
       <div class="office-placeholder-icon" aria-hidden="true">📊</div>
       <p class="office-placeholder-title">{{ title || ui.slidesPreviewUnavailable }}</p>
       <p class="office-placeholder-note">{{ ui.pptxPreviewNote }}</p>
+    </div>
+
+    <div v-else-if="contentType === 'pptx'" class="office-pptx-scroll">
+      <div ref="pptxHost" class="office-pptx-host"></div>
     </div>
 
     <!-- docx: rendered by docx-preview into this host. -->
@@ -373,11 +432,27 @@ watch(() => props.citation, applyCitation)
 }
 
 .office-docx-scroll,
-.office-xlsx-scroll {
+.office-xlsx-scroll,
+.office-pptx-scroll {
   flex: 1;
   min-height: 0;
   overflow: auto;
   padding: 16px;
+}
+
+/* Slides carry their own (usually light) backgrounds; centre them on the app's
+   surface and let each scale down to the pane instead of forcing a sideways
+   scroll on a narrow window. */
+.office-pptx-host {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.office-pptx-host :deep(svg),
+.office-pptx-host :deep(img) {
+  max-width: 100%;
 }
 
 /* docx-preview emits its own light-themed page; keep it on a neutral surface. */

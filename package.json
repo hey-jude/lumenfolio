@@ -30,6 +30,7 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@aiden0z/pptx-renderer": "^1.2.4",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/lang-markdown": "^6.5.0",
     "@codemirror/language": "^6.12.4",
