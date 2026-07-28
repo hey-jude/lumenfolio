@@ -15,10 +15,33 @@ use quick_xml::reader::Reader;
 /// Cap to keep a runaway spreadsheet/deck from flooding the index.
 const MAX_BLOCKS: usize = 5000;
 
+/// One indexable unit of an Office file.
+///
+/// `page` is the 1-based slide number for pptx, and 0 for formats with no
+/// pagination (docx flows, xlsx grids). A real slide number is what lets a deck
+/// reuse the PDF-side page tools — `open_pages` and page-anchored citations —
+/// instead of needing a pptx-specific reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExtractedBlock {
+    pub text: String,
+    pub role: String,
+    pub page: u32,
+}
+
+impl ExtractedBlock {
+    fn new(text: impl Into<String>, role: &str, page: u32) -> Self {
+        Self {
+            text: text.into(),
+            role: role.to_string(),
+            page,
+        }
+    }
+}
+
 pub(crate) fn extract_office_blocks(
     path: &Path,
     content_type: &str,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<Vec<ExtractedBlock>, String> {
     let blocks = match content_type {
         "docx" => extract_docx(path)?,
         "pptx" => extract_pptx(path)?,
@@ -69,7 +92,7 @@ fn zip_entry_names(path: &Path) -> Result<Vec<String>, String> {
 // <w:pStyle w:val="Heading…">.
 // ---------------------------------------------------------------------------
 
-fn extract_docx(path: &Path) -> Result<Vec<(String, String)>, String> {
+fn extract_docx(path: &Path) -> Result<Vec<ExtractedBlock>, String> {
     let Some(xml) = read_zip_entry(path, "word/document.xml")? else {
         return Err("docx is missing word/document.xml".to_string());
     };
@@ -115,7 +138,7 @@ fn extract_docx(path: &Path) -> Result<Vec<(String, String)>, String> {
                 b"w:p" => {
                     let trimmed = paragraph.trim();
                     if !trimmed.is_empty() {
-                        blocks.push((trimmed.to_string(), role.clone()));
+                        blocks.push(ExtractedBlock::new(trimmed, &role, 0));
                     }
                 }
                 _ => {}
@@ -129,35 +152,199 @@ fn extract_docx(path: &Path) -> Result<Vec<(String, String)>, String> {
 }
 
 // ---------------------------------------------------------------------------
-// PPTX — ppt/slides/slideN.xml: <a:p> paragraphs, <a:t> text runs. One heading
-// per slide ("Slide N") followed by its paragraph blocks.
+// PPTX — one block per slide, carrying the real slide number.
+//
+// Previously every <a:p> paragraph became its own block, which for a real deck
+// meant ~380 blocks averaging 7 characters ("01", "展示风格"): useless as
+// retrieval units, and all pinned to page 0 so nothing could say which slide an
+// answer came from. Now a slide is one block on `page = N`, which also lets a
+// deck reuse the PDF-side page tooling (open_pages, page-anchored citations)
+// rather than needing a pptx-specific reader.
+//
+// Text is gathered from everything the deck actually carries, not just the
+// shapes: speaker notes (often the fullest narration — this deck averages ~100
+// characters of shape text per slide but has 23 notes pages), SmartArt diagrams
+// and chart labels. All three hang off the slide's .rels, which is the only
+// reliable link — notesSlideN does NOT always belong to slideN.
 // ---------------------------------------------------------------------------
 
-fn extract_pptx(path: &Path) -> Result<Vec<(String, String)>, String> {
+/// Speaker notes repeat the slide number as a standalone run; drop that noise.
+fn is_slide_number_noise(text: &str, page: u32) -> bool {
+    text.trim().parse::<u32>() == Ok(page)
+}
+
+fn extract_pptx(path: &Path) -> Result<Vec<ExtractedBlock>, String> {
     let mut slide_names: Vec<String> = zip_entry_names(path)?
         .into_iter()
-        .filter(|name| {
-            name.starts_with("ppt/slides/slide") && name.ends_with(".xml")
-        })
+        .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
         .collect();
     // Sort by the numeric suffix so slides come out in deck order (slide2 < slide10).
     slide_names.sort_by_key(|name| slide_number(name));
 
     let mut blocks = Vec::new();
     for (index, name) in slide_names.iter().enumerate() {
+        let page = (index + 1) as u32;
         let Some(xml) = read_zip_entry(path, name)? else {
             continue;
         };
-        let paragraphs = parse_pptx_slide(&xml)?;
-        blocks.push((format!("Slide {}", index + 1), "heading".to_string()));
-        for paragraph in paragraphs {
-            let trimmed = paragraph.trim();
-            if !trimmed.is_empty() {
-                blocks.push((trimmed.to_string(), "body".to_string()));
+
+        let mut parts: Vec<String> = parse_pptx_slide(&xml)?
+            .into_iter()
+            .map(|paragraph| paragraph.trim().to_string())
+            .filter(|paragraph| !paragraph.is_empty())
+            .collect();
+
+        // Follow this slide's relationships to its notes, diagrams and charts.
+        let rels_name = name.replace("ppt/slides/", "ppt/slides/_rels/") + ".rels";
+        let rel_targets = match read_zip_entry(path, &rels_name)? {
+            Some(rels) => parse_rel_targets(&rels),
+            None => Vec::new(),
+        };
+        let mut notes = String::new();
+        for target in rel_targets {
+            let entry = resolve_rel_target("ppt/slides", &target);
+            let Some(part_xml) = read_zip_entry(path, &entry)? else {
+                continue;
+            };
+            if entry.contains("/notesSlides/") {
+                notes = collect_xml_text(&part_xml, false)
+                    .into_iter()
+                    .filter(|line| !is_slide_number_noise(line, page))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            } else if entry.contains("/diagrams/data") || entry.contains("/charts/chart") {
+                // SmartArt labels and chart titles/series are content the shapes
+                // themselves never spell out.
+                parts.extend(collect_xml_text(&part_xml, entry.contains("/charts/chart")));
             }
+        }
+
+        let body = parts.join(" · ");
+        if !body.trim().is_empty() {
+            // Lead with the slide reference so the model can cite it in prose,
+            // the same shape as the xlsx `Sheet!row` prefix.
+            blocks.push(ExtractedBlock::new(
+                format!("Slide {page} · {body}"),
+                "heading",
+                page,
+            ));
+        }
+        if !notes.trim().is_empty() {
+            // A separate block: notes are narration rather than what is on screen,
+            // and keeping them apart lets retrieval surface either one alone.
+            blocks.push(ExtractedBlock::new(
+                format!("Slide {page} notes · {}", notes.trim()),
+                "body",
+                page,
+            ));
         }
     }
     Ok(blocks)
+}
+
+/// `Target="…"` values from a `.rels` part, in document order.
+fn parse_rel_targets(xml: &str) -> Vec<String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut targets = Vec::new();
+    loop {
+        match reader.read_event() {
+            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
+                if e.name().as_ref() == b"Relationship" {
+                    if let Some(target) = attr_value(&e, b"Target") {
+                        targets.push(target);
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    targets
+}
+
+/// Resolve a relationship target against the part's directory, collapsing the
+/// leading `../` segments OOXML uses ("../notesSlides/x.xml" from "ppt/slides"
+/// → "ppt/notesSlides/x.xml").
+fn resolve_rel_target(base_dir: &str, target: &str) -> String {
+    if let Some(absolute) = target.strip_prefix('/') {
+        return absolute.to_string();
+    }
+    let mut segments: Vec<&str> = base_dir.split('/').filter(|s| !s.is_empty()).collect();
+    for segment in target.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            other => segments.push(other),
+        }
+    }
+    segments.join("/")
+}
+
+/// Readable text from an arbitrary OOXML part: `<a:t>` runs, plus `<c:v>` chart
+/// values when `include_chart_values`. Blank and duplicate-adjacent runs are
+/// dropped; chart values are capped since a data series can be huge.
+fn collect_xml_text(xml: &str, include_chart_values: bool) -> Vec<String> {
+    const MAX_CHART_VALUES: usize = 60;
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(false);
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut capture = false;
+    let mut is_chart_value = false;
+    let mut chart_values = 0usize;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => match e.name().as_ref() {
+                b"a:t" => {
+                    capture = true;
+                    is_chart_value = false;
+                    current.clear();
+                }
+                b"c:v" if include_chart_values => {
+                    capture = true;
+                    is_chart_value = true;
+                    current.clear();
+                }
+                _ => {}
+            },
+            Ok(Event::Text(e)) if capture => {
+                if let Ok(text) = e.xml_content(quick_xml::XmlVersion::Implicit1_0) {
+                    current.push_str(&text);
+                }
+            }
+            Ok(Event::GeneralRef(e)) if capture => {
+                if let Some(text) = resolve_entity(&e) {
+                    current.push_str(&text);
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name();
+                if (name.as_ref() == b"a:t") || (include_chart_values && name.as_ref() == b"c:v") {
+                    capture = false;
+                    let trimmed = current.trim();
+                    if !trimmed.is_empty() {
+                        if is_chart_value {
+                            if chart_values < MAX_CHART_VALUES {
+                                chart_values += 1;
+                                out.push(trimmed.to_string());
+                            }
+                        } else {
+                            out.push(trimmed.to_string());
+                        }
+                    }
+                    current.clear();
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    out.dedup();
+    out
 }
 
 fn slide_number(name: &str) -> u32 {
@@ -221,7 +408,7 @@ fn parse_pptx_slide(xml: &str) -> Result<Vec<String>, String> {
 ///   * cells are read positionally — the old code dropped empty cells, which
 ///     silently shifted every value left of a gap into the wrong column.
 /// The full aligned grid with A1 coordinates is the `read_sheet` tool's job.
-fn extract_xlsx(path: &Path) -> Result<Vec<(String, String)>, String> {
+fn extract_xlsx(path: &Path) -> Result<Vec<ExtractedBlock>, String> {
     let mut workbook: calamine::Xlsx<_> =
         calamine::open_workbook(path).map_err(|err| format!("Failed to open xlsx: {err}"))?;
     let mut blocks = Vec::new();
@@ -230,9 +417,10 @@ fn extract_xlsx(path: &Path) -> Result<Vec<(String, String)>, String> {
             continue;
         };
         let (height, width) = (range.height(), range.width());
-        blocks.push((
+        blocks.push(ExtractedBlock::new(
             format!("Sheet: {name} ({height} rows × {width} cols)"),
-            "heading".to_string(),
+            "heading",
+            0,
         ));
         if width == 0 {
             continue;
@@ -254,7 +442,11 @@ fn extract_xlsx(path: &Path) -> Result<Vec<(String, String)>, String> {
                         .filter(|cell| !cell.is_empty())
                         .map(String::as_str)
                         .collect();
-                    blocks.push((format!("Columns: {}", labels.join(" | ")), "body".to_string()));
+                    blocks.push(ExtractedBlock::new(
+                        format!("Columns: {}", labels.join(" | ")),
+                        "body",
+                        0,
+                    ));
                     header = cells;
                     header_seen = true;
                 }
@@ -266,7 +458,7 @@ fn extract_xlsx(path: &Path) -> Result<Vec<(String, String)>, String> {
                 // a citation to scroll to and highlight that row — the indexed text
                 // ("Region: West | …") deliberately does not match the rendered
                 // cells, so a text search could never find it.
-                blocks.push((format!("{name}!{row_no} · {record}"), "body".to_string()));
+                blocks.push(ExtractedBlock::new(format!("{name}!{row_no} · {record}"), "body", 0));
             }
         }
         // One block of formulas per sheet, so "how is the total computed?" is
@@ -285,7 +477,7 @@ fn extract_xlsx(path: &Path) -> Result<Vec<(String, String)>, String> {
                 if extra > 0 {
                     text.push_str(&format!(" | (+{extra} more)"));
                 }
-                blocks.push((text, "body".to_string()));
+                blocks.push(ExtractedBlock::new(text, "body", 0));
             }
         }
     }
@@ -542,10 +734,10 @@ mod tests {
         assert_eq!(
             blocks,
             vec![
-                ("My Title".to_string(), "heading".to_string()),
+                ExtractedBlock::new("My Title", "heading", 0),
                 // Runs concatenate within a paragraph; entity is unescaped; the
                 // whitespace-only paragraph is dropped.
-                ("Hello world & more.".to_string(), "body".to_string()),
+                ExtractedBlock::new("Hello world & more.", "body", 0),
             ]
         );
         let _ = std::fs::remove_file(&path);
@@ -621,6 +813,94 @@ mod tests {
     #[test]
     fn slide_number_sorts_numerically() {
         assert!(slide_number("ppt/slides/slide2.xml") < slide_number("ppt/slides/slide10.xml"));
+    }
+
+    #[test]
+    fn resolve_rel_target_collapses_parent_segments() {
+        assert_eq!(
+            resolve_rel_target("ppt/slides", "../notesSlides/notesSlide3.xml"),
+            "ppt/notesSlides/notesSlide3.xml"
+        );
+        assert_eq!(
+            resolve_rel_target("ppt/slides", "../diagrams/data1.xml"),
+            "ppt/diagrams/data1.xml"
+        );
+        // Same-directory and absolute forms both appear in the wild.
+        assert_eq!(
+            resolve_rel_target("ppt/slides", "slide2.xml"),
+            "ppt/slides/slide2.xml"
+        );
+        assert_eq!(
+            resolve_rel_target("ppt/slides", "/ppt/media/image1.png"),
+            "ppt/media/image1.png"
+        );
+    }
+
+    #[test]
+    fn collect_xml_text_reads_runs_and_gates_chart_values() {
+        let xml = r#"<r xmlns:a="x" xmlns:c="y"><a:t>Revenue</a:t><c:v>42</c:v><a:t>  </a:t></r>"#;
+        // Chart values are opt-in: a diagram part must not pull in numeric noise.
+        assert_eq!(collect_xml_text(xml, false), vec!["Revenue".to_string()]);
+        assert_eq!(
+            collect_xml_text(xml, true),
+            vec!["Revenue".to_string(), "42".to_string()]
+        );
+    }
+
+    /// The P2/P3 contract end to end: one block per slide carrying the real slide
+    /// number, notes pulled in through the slide's .rels as their own block.
+    #[test]
+    fn extract_pptx_emits_one_block_per_slide_with_notes() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "lumenfolio-pptx-{}-{suffix}.pptx",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).expect("create");
+        let mut writer = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        let mut put = |name: &str, body: &str| {
+            writer.start_file(name, opts).expect("entry");
+            writer.write_all(body.as_bytes()).expect("write");
+        };
+        put(
+            "ppt/slides/slide1.xml",
+            r#"<p:sld xmlns:a="x"><a:p><a:r><a:t>企业知识库</a:t></a:r></a:p><a:p><a:t>升级方案</a:t></a:p></p:sld>"#,
+        );
+        // Deliberately notesSlide7 for slide1: the numbers do NOT have to line up,
+        // which is why the link is resolved through the .rels part.
+        put(
+            "ppt/slides/_rels/slide1.xml.rels",
+            r#"<Relationships><Relationship Id="rId1" Target="../notesSlides/notesSlide7.xml"/></Relationships>"#,
+        );
+        put(
+            "ppt/notesSlides/notesSlide7.xml",
+            r#"<p:notes xmlns:a="x"><a:p><a:t>各位来宾上午好</a:t></a:p><a:p><a:t>1</a:t></a:p></p:notes>"#,
+        );
+        put(
+            "ppt/slides/slide2.xml",
+            r#"<p:sld xmlns:a="x"><a:p><a:t>第二页</a:t></a:p></p:sld>"#,
+        );
+        writer.finish().expect("finish");
+
+        let blocks = extract_office_blocks(&path, "pptx").expect("extract");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            blocks,
+            vec![
+                // Paragraphs are joined into ONE block per slide (was one block per
+                // paragraph, averaging 7 characters), prefixed for prose citation.
+                ExtractedBlock::new("Slide 1 · 企业知识库 · 升级方案", "heading", 1),
+                // Notes ride on the same page but stay a separate block. The bare
+                // "1" run is slide-number noise and is dropped.
+                ExtractedBlock::new("Slide 1 notes · 各位来宾上午好", "body", 1),
+                ExtractedBlock::new("Slide 2 · 第二页", "heading", 2),
+            ]
+        );
     }
 
     #[test]

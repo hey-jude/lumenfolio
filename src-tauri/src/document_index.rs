@@ -1186,19 +1186,30 @@ fn upsert_text_document_index(
     body_md: &str,
     database: &AppDatabase,
 ) -> Result<DocumentIndexResult, String> {
-    let blocks = split_markdown_blocks(body_md);
+    let blocks: Vec<crate::office::ExtractedBlock> = split_markdown_blocks(body_md)
+        .into_iter()
+        .map(|(text, role)| crate::office::ExtractedBlock {
+            text,
+            role,
+            page: 0,
+        })
+        .collect();
     upsert_block_document_index(document_id, &blocks, Some(body_md), database)
 }
 
-/// Write the chunk/block/structure rows for a non-paged source from pre-built
-/// `(text, role)` blocks — shared by authored markdown (P2) and Office text
-/// extraction (P3). Geometry is empty (`[]`) and the single logical page is
-/// `page_no = 0` so citations resolve to the Reference anchor rather than a
-/// non-existent PDF page. `wikilink_source` (the raw markdown) rebuilds
-/// `[[links]]`; pass None for sources without wikilink syntax (Office).
+/// Write the chunk/block/structure rows for a geometry-free source — shared by
+/// authored markdown (P2) and Office text extraction (P3). Bboxes are empty
+/// (`[]`).
+///
+/// Blocks carry their own page: 0 for unpaginated sources (markdown, docx, xlsx),
+/// where citations resolve to the Reference anchor rather than a non-existent PDF
+/// page; a real 1-based slide number for pptx, so a deck answers with "slide 7"
+/// and works with the page-oriented tools. One document_pages row is written per
+/// distinct page. `wikilink_source` (the raw markdown) rebuilds `[[links]]`; pass
+/// None for sources without wikilink syntax (Office).
 fn upsert_block_document_index(
     document_id: &str,
-    blocks: &[(String, String)],
+    blocks: &[crate::office::ExtractedBlock],
     wikilink_source: Option<&str>,
     database: &AppDatabase,
 ) -> Result<DocumentIndexResult, String> {
@@ -1228,24 +1239,35 @@ fn upsert_block_document_index(
         .map_err(|err| format!("Failed to clear {table}: {err}"))?;
     }
 
-    let page_no: u32 = 0;
     let empty_bbox = "[]";
-    let page_text = blocks
-        .iter()
-        .map(|(text, _)| text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    tx.execute(
-        "INSERT INTO document_pages (document_id, page_no, width, height, text)
-         VALUES (?1, ?2, 0, 0, ?3)",
-        params![document_id, page_no, page_text],
-    )
-    .map_err(|err| format!("Failed to insert note page: {err}"))?;
+    // One page row per distinct block page, in page order — a slide deck yields
+    // one per slide, an unpaginated source the single page 0.
+    let mut pages: Vec<u32> = blocks.iter().map(|block| block.page).collect();
+    pages.sort_unstable();
+    pages.dedup();
+    if pages.is_empty() {
+        pages.push(0);
+    }
+    for page in &pages {
+        let page_text = blocks
+            .iter()
+            .filter(|block| block.page == *page)
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        tx.execute(
+            "INSERT INTO document_pages (document_id, page_no, width, height, text)
+             VALUES (?1, ?2, 0, 0, ?3)",
+            params![document_id, page, page_text],
+        )
+        .map_err(|err| format!("Failed to insert note page: {err}"))?;
+    }
 
     let mut structure_blocks = Vec::new();
-    for (index, (text, role)) in blocks.iter().enumerate() {
+    for (index, block) in blocks.iter().enumerate() {
+        let (text, role, page_no) = (&block.text, &block.role, block.page);
         let block_index = (index + 1) as u32;
-        let block_id = format!("{document_id}-p0-b{block_index}");
+        let block_id = format!("{document_id}-p{page_no}-b{block_index}");
         tx.execute(
             "INSERT INTO document_blocks
                 (id, document_id, page_no, block_index, text, bbox_json, block_role, region_index, region_id)
@@ -1287,7 +1309,8 @@ fn upsert_block_document_index(
         });
     }
 
-    let page_count: u32 = 1;
+    // A deck reports its real slide count; unpaginated sources stay at 1.
+    let page_count: u32 = pages.len() as u32;
     let updated = tx
         .execute(
             "UPDATE documents
