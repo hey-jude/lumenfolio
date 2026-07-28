@@ -242,6 +242,123 @@ fn extract_pptx(path: &Path) -> Result<Vec<ExtractedBlock>, String> {
     Ok(blocks)
 }
 
+/// A picture pulled out of a deck, ready to register as a visual asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PptxImage {
+    /// 1-based slide the picture appears on.
+    pub page: u32,
+    /// Where the bytes were written on disk.
+    pub image_path: String,
+}
+
+/// Below this a picture is a bullet glyph, divider or icon — registering those
+/// would bury the real figures in noise.
+const MIN_IMAGE_BYTES: usize = 16 * 1024;
+
+fn is_image_entry(entry: &str) -> bool {
+    let lower = entry.to_ascii_lowercase();
+    // Only what a vision model can actually read; decks also carry emf/wmf/video.
+    [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
+}
+
+/// Export a deck's slide pictures to `out_dir` and report which slide each one
+/// belongs to.
+///
+/// Slide text alone misses most of what a deck communicates — this one carries
+/// 129 pictures and averages ~100 characters of text per slide, so the
+/// architecture diagrams and screenshots are simply absent from the index.
+/// Registering them as visual assets lets the existing vision tools read them,
+/// with no pptx-specific plumbing.
+///
+/// Two kinds of noise are filtered: anything tiny (icons, rules) and anything
+/// that appears on more than half the slides (logos, template furniture).
+pub(crate) fn extract_pptx_media(
+    path: &Path,
+    out_dir: &Path,
+) -> Result<Vec<PptxImage>, String> {
+    let mut slide_names: Vec<String> = zip_entry_names(path)?
+        .into_iter()
+        .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
+        .collect();
+    slide_names.sort_by_key(|name| slide_number(name));
+    let slide_count = slide_names.len();
+    if slide_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    // (slide, media entry) pairs, plus how many distinct slides use each entry.
+    let mut usages: Vec<(u32, String)> = Vec::new();
+    let mut slides_per_entry: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (index, name) in slide_names.iter().enumerate() {
+        let page = (index + 1) as u32;
+        let rels_name = name.replace("ppt/slides/", "ppt/slides/_rels/") + ".rels";
+        let Some(rels) = read_zip_entry(path, &rels_name)? else {
+            continue;
+        };
+        let mut seen_on_this_slide = std::collections::HashSet::new();
+        for target in parse_rel_targets(&rels) {
+            let entry = resolve_rel_target("ppt/slides", &target);
+            if !entry.contains("/media/") || !is_image_entry(&entry) {
+                continue;
+            }
+            if !seen_on_this_slide.insert(entry.clone()) {
+                continue;
+            }
+            *slides_per_entry.entry(entry.clone()).or_insert(0) += 1;
+            usages.push((page, entry));
+        }
+    }
+
+    let template_threshold = (slide_count / 2).max(1);
+    let file = std::fs::File::open(path).map_err(|err| format!("Failed to open file: {err}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|err| format!("Not a valid Office (ZIP) file: {err}"))?;
+    let mut written: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut images = Vec::new();
+    for (page, entry) in usages {
+        if slides_per_entry.get(&entry).copied().unwrap_or(0) > template_threshold {
+            continue;
+        }
+        // One file on disk even when a picture is reused across slides.
+        let image_path = match written.get(&entry) {
+            Some(existing) => existing.clone(),
+            None => {
+                let mut zf = match archive.by_name(&entry) {
+                    Ok(zf) => zf,
+                    Err(_) => continue,
+                };
+                let mut bytes = Vec::new();
+                if zf.read_to_end(&mut bytes).is_err() || bytes.len() < MIN_IMAGE_BYTES {
+                    continue;
+                }
+                let file_name = entry.rsplit('/').next().unwrap_or("image");
+                let out_path = out_dir.join(sanitize_media_name(file_name));
+                if let Some(parent) = out_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|err| {
+                        format!("Failed to create media directory {}: {err}", parent.display())
+                    })?;
+                }
+                std::fs::write(&out_path, &bytes)
+                    .map_err(|err| format!("Failed to write {}: {err}", out_path.display()))?;
+                let as_string = out_path.to_string_lossy().to_string();
+                written.insert(entry.clone(), as_string.clone());
+                as_string
+            }
+        };
+        images.push(PptxImage { page, image_path });
+    }
+    Ok(images)
+}
+
+fn sanitize_media_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
 /// `Target="…"` values from a `.rels` part, in document order.
 fn parse_rel_targets(xml: &str) -> Vec<String> {
     let mut reader = Reader::from_str(xml);
@@ -901,6 +1018,69 @@ mod tests {
                 ExtractedBlock::new("Slide 2 · 第二页", "heading", 2),
             ]
         );
+    }
+
+    /// Pictures are exported per slide, with the two noise classes filtered: a
+    /// tiny icon and a logo repeated across the deck.
+    #[test]
+    fn extract_pptx_media_filters_icons_and_template_logos() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "lumenfolio-pptxmedia-{}-{suffix}.pptx",
+            std::process::id()
+        ));
+        let out_dir = std::env::temp_dir().join(format!("lumenfolio-pptxmedia-out-{suffix}"));
+        let file = std::fs::File::create(&path).expect("create");
+        let mut writer = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        let big = vec![b'x'; MIN_IMAGE_BYTES + 1];
+        let small = vec![b'x'; 128];
+        {
+            let mut put = |name: &str, body: &[u8]| {
+                writer.start_file(name, opts).expect("entry");
+                writer.write_all(body).expect("write");
+            };
+            for slide in 1..=4 {
+                put(
+                    &format!("ppt/slides/slide{slide}.xml"),
+                    br#"<p:sld xmlns:a="x"><a:p><a:t>t</a:t></a:p></p:sld>"#,
+                );
+                // Every slide carries the logo; only slide 1 has a real figure.
+                let extra = if slide == 1 {
+                    r#"<Relationship Id="rId2" Target="../media/figure.png"/>
+                       <Relationship Id="rId3" Target="../media/icon.png"/>
+                       <Relationship Id="rId4" Target="../media/movie.mp4"/>"#
+                } else {
+                    ""
+                };
+                put(
+                    &format!("ppt/slides/_rels/slide{slide}.xml.rels"),
+                    format!(
+                        r#"<Relationships><Relationship Id="rId1" Target="../media/logo.png"/>{extra}</Relationships>"#
+                    )
+                    .as_bytes(),
+                );
+            }
+            put("ppt/media/figure.png", &big);
+            put("ppt/media/logo.png", &big);
+            put("ppt/media/icon.png", &small);
+            put("ppt/media/movie.mp4", &big);
+        }
+        writer.finish().expect("finish");
+
+        let images = extract_pptx_media(&path, &out_dir).expect("media");
+        let _ = std::fs::remove_file(&path);
+
+        // figure.png only: the logo is on every slide (template furniture), the
+        // icon is under the size floor, and the video is not a readable image.
+        assert_eq!(images.len(), 1, "unexpected: {images:?}");
+        assert_eq!(images[0].page, 1);
+        assert!(images[0].image_path.ends_with("figure.png"), "{images:?}");
+        assert!(std::path::Path::new(&images[0].image_path).exists());
+        let _ = std::fs::remove_dir_all(&out_dir);
     }
 
     #[test]
