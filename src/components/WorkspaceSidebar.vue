@@ -170,6 +170,10 @@ function onRowMouseDown(event, row) {
   // buttons, rename input) so those keep clicking; the name / body still drags.
   if (event.button !== 0) return
   if (event.target.closest('.collection-caret, .collection-action-btn, .collection-rename-input')) return
+  // Stop WebKit from starting a native text selection on this press. Setting
+  // user-select once the drag passes the threshold is far too late — the
+  // selection has already begun and grows across every pane the pointer crosses.
+  event.preventDefault()
   pendingDrag = {
     kind: row.type === 'doc' ? 'doc' : 'collection',
     id: row.type === 'doc' ? row.doc.id : row.collection.id,
@@ -2006,6 +2010,11 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Tree rows are controls, not prose: never let a press start a text selection
+     (belt-and-braces with preventDefault on mousedown, which also covers the
+     press landing on a child span). */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .collection-row {
