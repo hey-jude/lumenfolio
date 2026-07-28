@@ -175,6 +175,74 @@ const activeNoteId = ref('')
 // Opt-out for the local-first audience: when off, nothing is fetched and the
 // discovery entry/feed are hidden.
 const trendingEnabled = usePersistedRef('trendingEnabled', true)
+// Notes vault: the folder notes are mirrored to as plain .md. Lives in the
+// backend settings table (not localStorage) because the Rust side writes the
+// files. Empty string = mirroring off.
+const vaultDir = ref('')
+const vaultBusy = ref(false)
+const vaultStatus = ref('')
+
+async function loadVaultSettings() {
+  try {
+    const settings = await invoke('load_vault_settings')
+    vaultDir.value = settings?.dir || ''
+  } catch (err) {
+    console.warn('load_vault_settings failed', err)
+  }
+}
+
+async function saveVaultDir() {
+  vaultBusy.value = true
+  vaultStatus.value = ''
+  try {
+    const written = await invoke('set_vault_dir', { dir: vaultDir.value || '' })
+    // Changing the folder re-exports everything, so the new location is complete
+    // immediately rather than only holding notes saved from now on.
+    vaultStatus.value = vaultDir.value
+      ? `${ui.value.notesVaultExported || 'Exported'} ${written}`
+      : ''
+  } catch (err) {
+    vaultStatus.value = err?.message || String(err)
+  } finally {
+    vaultBusy.value = false
+  }
+}
+
+async function chooseVaultDir() {
+  try {
+    const picked = await invoke('choose_vault_dir')
+    if (!picked) return
+    vaultDir.value = picked
+    await saveVaultDir()
+  } catch (err) {
+    vaultStatus.value = err?.message || String(err)
+  }
+}
+
+async function exportVault() {
+  vaultBusy.value = true
+  try {
+    const written = await invoke('export_notes_to_vault')
+    vaultStatus.value = `${ui.value.notesVaultExported || 'Exported'} ${written}`
+  } catch (err) {
+    vaultStatus.value = err?.message || String(err)
+  } finally {
+    vaultBusy.value = false
+  }
+}
+
+async function importVault() {
+  vaultBusy.value = true
+  try {
+    const result = await invoke('import_notes_from_vault')
+    vaultStatus.value = `${ui.value.notesVaultImported || 'Recovered'} ${result?.imported ?? 0}`
+    if (result?.snapshot) upsertWorkspaceRootSnapshot(result.snapshot)
+  } catch (err) {
+    vaultStatus.value = err?.message || String(err)
+  } finally {
+    vaultBusy.value = false
+  }
+}
 // Knowledge precipitation (Stream 1 LLM extraction). Default on; when off, no
 // per-document LLM extraction is triggered. Turning it on triggers a backfill.
 const knowledgeEnabled = usePersistedRef('knowledgeEnabled', true)
@@ -1620,6 +1688,7 @@ async function openSettings() {
   modelFetchMessage.value = ''
   await loadWebSearchSettings()
   await loadProxySettings()
+  await loadVaultSettings()
   await loadTranslationSettings()
   initializeEditableProviders()
 }
@@ -5921,6 +5990,36 @@ onMounted(() => {
               <span>{{ ui.knowledgePrecipitation }}</span>
             </label>
             <div class="settings-note full">{{ ui.knowledgePrecipitationHint }}</div>
+
+            <!-- Notes are mirrored to plain .md files so they survive the
+                 database and so any sync client can carry them. -->
+            <div class="settings-field full">
+              <span class="settings-label">{{ ui.notesVault }}</span>
+              <div class="vault-row">
+                <input
+                  v-model="vaultDir"
+                  type="text"
+                  class="vault-input"
+                  :placeholder="ui.notesVaultPlaceholder"
+                  @change="saveVaultDir"
+                />
+                <button type="button" class="settings-btn" :disabled="vaultBusy" @click="chooseVaultDir">
+                  {{ ui.browse }}
+                </button>
+              </div>
+            </div>
+            <div class="settings-note full">{{ ui.notesVaultHint }}</div>
+            <div class="settings-field full">
+              <div class="vault-row">
+                <button type="button" class="settings-btn" :disabled="vaultBusy" @click="exportVault">
+                  {{ ui.notesVaultExport }}
+                </button>
+                <button type="button" class="settings-btn" :disabled="vaultBusy" @click="importVault">
+                  {{ ui.notesVaultImport }}
+                </button>
+                <span v-if="vaultStatus" class="vault-status">{{ vaultStatus }}</span>
+              </div>
+            </div>
           </div>
 
           <div v-if="settingsSection === 'chat'" class="settings-panel provider-settings-panel">
@@ -7346,6 +7445,38 @@ onMounted(() => {
   color: var(--text-secondary);
   cursor: pointer;
   padding: 0 14px;
+}
+
+/* Notes vault: path field beside its buttons, wrapping on a narrow panel. */
+.vault-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  min-width: 0;
+}
+
+.vault-input {
+  flex: 1 1 240px;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+  outline: none;
+  font-size: 13px;
+}
+
+.vault-input:focus {
+  border-color: rgba(106, 169, 255, 0.4);
+}
+
+.vault-status {
+  font-size: 12px;
+  color: var(--text-muted, var(--text-secondary));
 }
 
 .settings-btn.primary {

@@ -31,6 +31,7 @@ mod runtime;
 mod search_text;
 mod storage;
 mod translation;
+mod vault;
 mod trending;
 mod update_check;
 mod vision;
@@ -1364,6 +1365,145 @@ fn update_note_source(
     document_index::enqueue_document_reindex(document_id, app)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultSettings {
+    /// Where notes are mirrored; empty when the user has turned mirroring off.
+    dir: String,
+    /// True when the path came from the setting rather than the built-in default.
+    customized: bool,
+}
+
+/// Native folder picker for the notes vault. Separate from `choose_workspace`
+/// only so the dialog title names what is being chosen.
+#[tauri::command]
+fn choose_vault_dir() -> Result<Option<String>, String> {
+    Ok(rfd::FileDialog::new()
+        .set_title("Choose the folder to keep notes in")
+        .pick_folder()
+        .map(|path| path.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+fn load_vault_settings(database: State<'_, AppDatabase>) -> Result<VaultSettings, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    Ok(VaultSettings {
+        dir: vault::vault_dir(&conn)
+            .map(|dir| dir.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        customized: load_app_setting(&conn, vault::VAULT_DIR_SETTING)?.is_some(),
+    })
+}
+
+/// Point the Markdown mirror at a folder — typically one the user already syncs
+/// (iCloud / Dropbox / Syncthing / a WebDAV mount). An empty string turns
+/// mirroring off. Existing notes are re-exported so the folder is complete
+/// immediately rather than only holding notes saved from now on.
+#[tauri::command]
+fn set_vault_dir(dir: String, database: State<'_, AppDatabase>) -> Result<u32, String> {
+    let dir = dir.trim().to_string();
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    save_app_setting(&conn, vault::VAULT_DIR_SETTING, &dir)?;
+    if dir.is_empty() {
+        return Ok(0);
+    }
+    export_all_notes(&conn)
+}
+
+/// Write every authored source to the vault. Used when the folder changes and as
+/// a manual "make sure everything is on disk" action.
+#[tauri::command]
+fn export_notes_to_vault(database: State<'_, AppDatabase>) -> Result<u32, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    export_all_notes(&conn)
+}
+
+fn export_all_notes(conn: &Connection) -> Result<u32, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, title, COALESCE(body_md, '') FROM documents
+             WHERE content_type IN ('note', 'markdown', 'text', 'web')",
+        )
+        .map_err(|err| format!("Failed to list notes: {err}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|err| format!("Failed to list notes: {err}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| format!("Failed to list notes: {err}"))?;
+    let mut written = 0u32;
+    for (id, title, body) in rows {
+        match vault::write_note(conn, &id, &title, &body) {
+            Ok(()) => written += 1,
+            Err(err) => log::warn!("Failed to export note {id}: {err}"),
+        }
+    }
+    Ok(written)
+}
+
+/// Recover notes present in the vault but missing from the database — the path
+/// back after a lost or reset database. Additive only: a file whose id still has
+/// a row is skipped, so this can never overwrite current work with a stale copy.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportVaultOutput {
+    imported: u32,
+    /// Same shape the note-create path returns, so the sidebar refreshes without
+    /// a second round trip.
+    snapshot: WorkspaceRootSnapshot,
+}
+
+#[tauri::command]
+fn import_notes_from_vault(
+    database: State<'_, AppDatabase>,
+    app: tauri::AppHandle,
+) -> Result<ImportVaultOutput, String> {
+    let orphans = {
+        let conn = database
+            .conn
+            .lock()
+            .map_err(|_| "SQLite lock was poisoned".to_string())?;
+        vault::import_orphans(&conn)?
+    };
+    let mut imported = 0u32;
+    for orphan in orphans {
+        // Goes through the normal create path, so the note is mirrored back with
+        // a fresh id and indexed like any other.
+        match documents::create_text_document(
+            &database,
+            "note",
+            &orphan.title,
+            &orphan.body_md,
+            None,
+            None,
+        ) {
+            Ok(document_id) => {
+                imported += 1;
+                let _ = document_index::enqueue_document_reindex(document_id, app.clone());
+            }
+            Err(err) => log::warn!("Failed to import vault note '{}': {err}", orphan.title),
+        }
+    }
+    Ok(ImportVaultOutput {
+        imported,
+        snapshot: knowledge_root_snapshot(&database)?,
+    })
+}
+
 #[tauri::command]
 fn load_note_source(
     document_id: String,
@@ -1641,6 +1781,9 @@ fn delete_document(
     }
     tx.commit()
         .map_err(|err| format!("Failed to commit document deletion: {err}"))?;
+    // Remove the note's Markdown mirror too, or the next vault import would
+    // resurrect a source the user just deleted.
+    vault::delete_note(&conn, &document_id);
     drop(conn);
     // Drop the registry path mapping (a no-op for synthetic note: paths).
     if let Ok(mut paths) = registry.paths.lock() {
@@ -5935,6 +6078,11 @@ pub fn run() {
             collections::delete_collection,
             collections::move_document_to_collection,
             collections::move_collection,
+            choose_vault_dir,
+            load_vault_settings,
+            set_vault_dir,
+            export_notes_to_vault,
+            import_notes_from_vault,
             collections::reorder_documents,
             collections::reorder_collections,
             trending::fetch_trending_papers,

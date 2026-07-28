@@ -753,7 +753,17 @@ pub(crate) fn create_text_document(
         ],
     )
     .map_err(|err| format!("Failed to create text document: {err}"))?;
+    mirror_to_vault(&conn, &id, &title, body_md);
     Ok(id)
+}
+
+/// Write an authored source through to its Markdown file. Best-effort: the row
+/// is already committed, and a vault problem (read-only volume, a sync client
+/// holding the file) must never turn into a failed save for the user.
+fn mirror_to_vault(conn: &Connection, document_id: &str, title: &str, body_md: &str) {
+    if let Err(err) = crate::vault::write_note(conn, document_id, title, body_md) {
+        log::warn!("Failed to mirror note {document_id} to the vault: {err}");
+    }
 }
 
 /// Update an editable source's title + body and mark it stale so the next
@@ -791,6 +801,7 @@ pub(crate) fn update_text_document_body(
     if affected == 0 {
         return Err("Note not found or is not an editable source".to_string());
     }
+    mirror_to_vault(&conn, document_id, &title, body_md);
     Ok(())
 }
 

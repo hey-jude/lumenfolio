@@ -25,8 +25,41 @@ pub(crate) fn open_database(path: &Path) -> Result<Connection, String> {
     // frees the shared mutex rather than blocking reads (reads never contend — WAL).
     configure_connection(&conn, None)?;
     migrate_database(&conn)?;
+    reclaim_free_space(&conn);
     reset_interrupted_index_jobs(&conn)?;
     Ok(conn)
+}
+
+/// VACUUM when the file is mostly free pages.
+///
+/// SQLite never returns deleted pages to the filesystem, so removing a document
+/// library leaves the space behind: this user's database measured 332 MB with
+/// 97% free pages and only 11 MB of live data. That is wasted disk, and it is
+/// what a backup or sync would have to carry.
+///
+/// Guarded on a high free ratio AND an absolute floor, so a small or healthy
+/// database never pays the rewrite cost. Best-effort: a VACUUM that cannot get
+/// its lock is logged and skipped, never fatal — this runs before the index
+/// writer opens, so in practice it has the file to itself.
+fn reclaim_free_space(conn: &Connection) {
+    let page_count: i64 = conn
+        .query_row("PRAGMA page_count", [], |row| row.get(0))
+        .unwrap_or(0);
+    let free_count: i64 = conn
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .unwrap_or(0);
+    // ~40 MB of slack at the default 4 KiB page size, and at least half the file.
+    const MIN_FREE_PAGES: i64 = 10_000;
+    if free_count < MIN_FREE_PAGES || page_count <= 0 || free_count * 2 < page_count {
+        return;
+    }
+    match conn.execute_batch("VACUUM") {
+        Ok(()) => log::info!(
+            "Vacuumed SQLite database: reclaimed ~{} free pages of {page_count}",
+            free_count
+        ),
+        Err(err) => log::warn!("Skipping SQLite VACUUM: {err}"),
+    }
 }
 
 /// A second connection to the same on-disk database used for the long-running
