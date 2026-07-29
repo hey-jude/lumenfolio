@@ -904,6 +904,73 @@ fn open_path_in_file_manager(path: String) -> Result<(), String> {
     open_file_manager_target(&target)
 }
 
+/// Reveal a source's file in Finder / Explorer.
+///
+/// Importing references a file where it already lives rather than copying it, so
+/// the library shows a title with no hint of where the bytes are. This answers
+/// "where did that file go?" directly, and surfaces the one real failure mode of
+/// referencing in place: a source whose file was later moved or deleted reports
+/// that plainly instead of silently doing nothing.
+#[tauri::command]
+fn reveal_document_in_file_manager(
+    document_id: String,
+    database: State<'_, AppDatabase>,
+) -> Result<(), String> {
+    let document_id = document_id.trim().to_string();
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let path: Option<String> = conn
+        .query_row(
+            "SELECT path FROM documents WHERE id = ?1",
+            params![document_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| format!("Failed to look up document: {err}"))?;
+    let Some(path) = path else {
+        return Err("Document no longer exists".to_string());
+    };
+    // Authored sources are rows, not files: their `path` is a synthetic
+    // "note:<id>" marker. Point at the Markdown mirror when there is one.
+    let is_authored = ["note:", "markdown:", "text:", "web:"]
+        .iter()
+        .any(|scheme| path.starts_with(scheme));
+    if is_authored {
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM documents WHERE id = ?1",
+                params![document_id],
+                |row| row.get(0),
+            )
+            .map_err(|err| format!("Failed to look up note: {err}"))?;
+        let Some(dir) = vault::vault_dir(&conn) else {
+            return Err("This note has no file on disk. Set a notes folder in Settings to keep notes as .md files.".to_string());
+        };
+        let file = dir.join(format!(
+            "{}.md",
+            vault::file_stem_for_title(&title, &document_id)
+        ));
+        if !file.exists() {
+            return Err("This note has not been written to the notes folder yet.".to_string());
+        }
+        drop(conn);
+        return open_file_manager_target(&file);
+    }
+    drop(conn);
+    let target = PathBuf::from(&path);
+    if !target.exists() {
+        return Err(format!(
+            "The file is no longer at {path} — it was moved or deleted outside Lumenfolio."
+        ));
+    }
+    let target = target
+        .canonicalize()
+        .map_err(|err| format!("Failed to resolve {path}: {err}"))?;
+    open_file_manager_target(&target)
+}
+
 /// Open an http(s) URL in the user's default browser (e.g. a Trending paper's
 /// Hugging Face page). Restricted to http/https so it can't launch arbitrary
 /// commands or local files.
@@ -6078,6 +6145,7 @@ pub fn run() {
             collections::delete_collection,
             collections::move_document_to_collection,
             collections::move_collection,
+            reveal_document_in_file_manager,
             choose_vault_dir,
             load_vault_settings,
             set_vault_dir,

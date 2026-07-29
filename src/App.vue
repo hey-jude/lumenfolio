@@ -2322,6 +2322,19 @@ async function handleApplyNoteEdit(proposal = {}) {
   }
 }
 
+// Show a source's file in Finder / Explorer. Imports reference files in place
+// rather than copying them, so this is how the user answers "where is it?" — and
+// it reports a file that was moved or deleted outside the app instead of failing
+// silently.
+async function handleRevealDoc(doc) {
+  if (!doc?.id) return
+  try {
+    await invoke('reveal_document_in_file_manager', { documentId: doc.id })
+  } catch (err) {
+    workspaceError.value = err?.message || String(err)
+  }
+}
+
 async function handleMoveDocToCollection({ docId, collectionId } = {}) {
   if (!docId) return
   const target = collectionId ?? null
@@ -5474,6 +5487,7 @@ onMounted(() => {
       @add-pdfs="addPdfsToRoot"
       @rescan="rescanWorkspace"
       @reindex-doc="handleReindexDoc"
+      @reveal-doc="handleRevealDoc"
       @delete-doc="openDeleteDocumentConfirm"
       @open-workspace="openWorkspaceInFileManager"
       @delete-root="openRemoveWorkspaceRootConfirm"

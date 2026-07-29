@@ -104,6 +104,7 @@ const emit = defineEmits([
   'rescan',
   'reindex-doc',
   'delete-doc',
+  'reveal-doc',
   'open-settings',
   'open-workspace',
   'delete-root',
@@ -844,6 +845,14 @@ function ctxDeleteDoc() {
   if (doc) emit('delete-doc', doc)
 }
 
+// Reveal the source's file in Finder / Explorer — imports reference a file
+// where it already lives, so this is how the user finds it again.
+function ctxRevealDoc() {
+  const doc = contextMenu.doc
+  closeContextMenu()
+  if (doc) emit('reveal-doc', doc)
+}
+
 // Un-file a document: move it out of its collection back to the tree root
 // (collection_id → null). The inverse of dragging it into a collection.
 function ctxUnfileDoc() {
@@ -1253,6 +1262,9 @@ onBeforeUnmount(() => {
       <template v-else-if="contextMenu.kind === 'doc'">
         <button type="button" class="ctx-item" @click="ctxReindexDoc">
           <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" /><path d="M19.5 4.5V9H15" /></svg></span>{{ ui.reindexDocument }}
+        </button>
+        <button type="button" class="ctx-item" @click="ctxRevealDoc">
+          <span class="ctx-ic" aria-hidden="true"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.5A1.5 1.5 0 0 1 5.5 5h3.8a1.5 1.5 0 0 1 1.06.44l1.2 1.12a1.5 1.5 0 0 0 1.06.44H18.5A1.5 1.5 0 0 1 20 8.5V17a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17z" /><circle cx="12" cy="12.5" r="2.2" /><path d="M13.7 14.2 15.5 16" /></svg></span>{{ ui.revealInFileManager }}
         </button>
         <button
           v-if="contextMenu.doc && contextMenu.doc.collectionId"
