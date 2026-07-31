@@ -6,8 +6,6 @@
   <p>
     <a href="https://github.com/tanghui315/lumenfolio/releases/latest"><strong>Download</strong></a>
     ·
-    <a href="./resources/screenshot/lumenfolio-demo-cut-speed-compact.gif"><strong>Watch 30s Demo</strong></a>
-    ·
     <a href="https://github.com/tanghui315/lumenfolio/stargazers"><strong>Star on GitHub</strong></a>
     ·
     <a href="https://github.com/tanghui315/lumenfolio/issues"><strong>Give Feedback</strong></a>
@@ -21,8 +19,6 @@ Lumenfolio is a local-first desktop knowledge base with an AI agent that can act
 The default loop is **ask your whole knowledge base**. Focusing on a single source is the option, not the requirement.
 
 It is not "chat over a file". Answers are grounded in a local evidence layer — pages, blocks, chunks, structure, tables, visual regions, citations and bounding boxes — that points back at the exact place a claim came from. That same evidence layer can be exposed through local MCP tools, so a signed-in Codex / Claude Code CLI can gather evidence and answer inside your library.
-
-![Lumenfolio demo](./resources/screenshot/lumenfolio-demo-cut-speed-compact.gif)
 
 If Lumenfolio is useful to you, a star helps other people find it.
 
@@ -54,8 +50,6 @@ Sources are organised into **collections** (nestable folders), and both collecti
 ## Ask Your Whole Knowledge Base
 
 With no source selected, the centre of the app is the conversation — ask across everything you have collected.
-
-![Lumenfolio agentic RAG chat with evidence trace](./docs/assets/lumenfolio-rag-chat.png)
 
 - The agent searches the whole indexed library by topic, then routes retrieval into the right documents; large libraries are discovered on demand instead of being stuffed into the prompt.
 - Type `@` — or drag a source from the sidebar into the composer — to pin specific sources to a question (up to 4 alongside the current one).
@@ -125,10 +119,6 @@ Lumenfolio can turn locally installed Codex and Claude Code CLIs into chat model
 
 Paste or attach a screenshot, figure, table, diagram or equation crop and ask a vision-capable model about it in the context of your current session.
 
-![Lumenfolio multimodal image question composer](./docs/assets/lumenfolio-multimodal-image-composer.png)
-
-![Lumenfolio multimodal image answer](./docs/assets/lumenfolio-multimodal-image-answer.png)
-
 ## Agent Sessions
 
 The agent area is an independent multi-session workspace, not a chat box bolted onto one file.
@@ -140,8 +130,6 @@ The agent area is an independent multi-session workspace, not a chat box bolted 
 ## Knowledge Precipitation and Cross-Document Graph
 
 Lumenfolio turns a growing library into a connected knowledge base instead of a folder of isolated files.
-
-![Lumenfolio cross-document knowledge graph](./docs/assets/lumenfolio-knowledge-graph.png)
 
 - **Knowledge precipitation** distills each source into a summary, entities, concepts and keywords — one sampled LLM pass after indexing, plus a near-zero-cost stream that reuses the structured output of each chat turn. Cached and local.
 - A **Knowledge tab** shows the current source as a concept-bridge graph: the source in the centre, its salient concepts around it, related sources on the outer ring, and the shared concepts drawn as the bridge.
@@ -159,8 +147,6 @@ Release builds ship the visual/table evidence workflow. Local OCR for scanned/im
 ## Translation
 
 For PDFs, Lumenfolio supports both quick selection translation and document-level translation through a bundled PDFMathTranslate sidecar, aiming to preserve layout — formulas, figures, tables, double-column structure, pagination and bilingual output.
-
-![Lumenfolio side-by-side PDF translation](./docs/assets/lumenfolio-translation-split.png)
 
 - selected-text translation while reading
 - page/document translation jobs with progress and cancellation

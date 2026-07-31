@@ -6,8 +6,6 @@
   <p>
     <a href="https://github.com/tanghui315/lumenfolio/releases/latest"><strong>下载应用</strong></a>
     ·
-    <a href="./resources/screenshot/lumenfolio-demo-cut-speed-compact.gif"><strong>观看 30 秒演示</strong></a>
-    ·
     <a href="https://github.com/tanghui315/lumenfolio/stargazers"><strong>给项目 Star</strong></a>
     ·
     <a href="https://github.com/tanghui315/lumenfolio/issues"><strong>反馈问题</strong></a>
@@ -21,8 +19,6 @@ Lumenfolio 是一个本地优先的桌面知识库，并配备一个真正读得
 默认主循环是**向整个知识库提问**。聚焦到单个来源是可选项，而不是前提。
 
 它不是「对着一个文件聊天」。答案建立在本地证据层之上——页面、文本块、切片、结构、表格、视觉区域、引用与坐标框——能指回一句话的确切出处。同一套证据层还能通过本地 MCP 工具暴露出去，让你已经登录的 Codex / Claude Code CLI 在你的知识库里多步取证并作答。
-
-![Lumenfolio 演示](./resources/screenshot/lumenfolio-demo-cut-speed-compact.gif)
 
 如果 Lumenfolio 对你有用，点个 Star 能帮到更多人发现它。
 
@@ -54,8 +50,6 @@ Lumenfolio 是一个本地优先的桌面知识库，并配备一个真正读得
 ## 向整个知识库提问
 
 没有选中任何来源时，应用中央就是对话——面向你收集的全部内容提问。
-
-![Lumenfolio 带证据轨迹的 agentic RAG 对话](./docs/assets/lumenfolio-rag-chat.png)
 
 - Agent 先按主题检索整个知识库，再把检索路由到正确的文档；库很大时按需发现，而不是把全部塞进 prompt。
 - 输入 `@`——或**把来源从侧栏拖进输入框**——即可为这个问题钉住特定来源（除当前来源外最多 4 个）。
@@ -125,10 +119,6 @@ Lumenfolio 可以把本机安装的 Codex 与 Claude Code CLI 变成聊天模型
 
 粘贴或附加截图、图表、表格、示意图或公式截图，让支持视觉的模型结合当前会话上下文解读它。
 
-![Lumenfolio 多模态图片提问](./docs/assets/lumenfolio-multimodal-image-composer.png)
-
-![Lumenfolio 多模态图片回答](./docs/assets/lumenfolio-multimodal-image-answer.png)
-
 ## Agent 会话
 
 右侧是独立的多会话工作区，而不是挂在某个文件上的聊天框。
@@ -140,8 +130,6 @@ Lumenfolio 可以把本机安装的 Codex 与 Claude Code CLI 变成聊天模型
 ## 知识沉淀与跨文档图谱
 
 Lumenfolio 让不断增长的资料变成互相连接的知识库，而不是一堆孤立文件。
-
-![Lumenfolio 跨文档知识图谱](./docs/assets/lumenfolio-knowledge-graph.png)
 
 - **知识沉淀**把每个来源析出摘要、实体、概念与关键词——索引后一次采样的 LLM 调用，加上一条几乎零成本的流（复用每轮对话的结构化输出）。带缓存，全本地。
 - **Knowledge 标签页**把当前来源画成概念桥接图：来源居中、显著概念环绕、相关来源在外圈，共享概念作为「桥」画出来，一眼看出「为什么相关」。
@@ -159,8 +147,6 @@ Lumenfolio 会识别视觉资产、渲染裁剪图，并把它们作为有出处
 ## 翻译
 
 针对 PDF，Lumenfolio 同时支持划词快速翻译与整篇文档翻译（内置 PDFMathTranslate sidecar），目标是尽可能保留版式——公式、图表、双栏结构、分页与双语输出。
-
-![Lumenfolio 双栏对照翻译](./docs/assets/lumenfolio-translation-split.png)
 
 - 阅读中的划词翻译
 - 按页/整篇的翻译任务，带进度与取消
