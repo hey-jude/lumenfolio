@@ -1451,7 +1451,77 @@ struct DatabasePath(PathBuf);
 struct BackupSettings {
     dir: String,
     keep: u32,
+    /// Hours between automatic snapshots; 0 = manual only.
+    interval_hours: u32,
+    last_at: Option<i64>,
     entries: Vec<backup::BackupEntry>,
+}
+
+fn backup_settings_snapshot(conn: &Connection) -> Result<BackupSettings, String> {
+    let dir = resolved_backup_dir(conn)?;
+    Ok(BackupSettings {
+        dir: dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        keep: resolved_keep(conn),
+        interval_hours: load_app_setting(conn, backup::BACKUP_INTERVAL_SETTING)?
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(0),
+        last_at: load_app_setting(conn, backup::BACKUP_LAST_AT_SETTING)?
+            .and_then(|value| value.trim().parse::<i64>().ok()),
+        entries: dir.map(|path| backup::list_snapshots(&path)).unwrap_or_default(),
+    })
+}
+
+/// Take a snapshot into the configured folder, prune, and stamp the time.
+/// Shared by the manual command and the scheduled check so both behave alike —
+/// notably, a manual backup postpones the next automatic one.
+fn run_backup(conn: &Connection) -> Result<PathBuf, String> {
+    let Some(dir) = resolved_backup_dir(conn)? else {
+        return Err("Choose a backup folder first.".to_string());
+    };
+    let dest = dir.join(backup::snapshot_name(chrono::Local::now()));
+    backup::write_snapshot(conn, &dest)?;
+    backup::prune_snapshots(&dir, resolved_keep(conn) as usize);
+    save_app_setting(
+        conn,
+        backup::BACKUP_LAST_AT_SETTING,
+        &chrono::Local::now().timestamp().to_string(),
+    )?;
+    Ok(dest)
+}
+
+/// Run a scheduled snapshot if one is due. Called once at startup, off the
+/// critical path: a backup that fails (folder on an unmounted volume, no space)
+/// is logged and forgotten, never surfaced as a startup error.
+fn maybe_auto_backup(database: &AppDatabase) {
+    let Ok(conn) = database.conn.lock() else {
+        return;
+    };
+    let due = (|| -> Result<bool, String> {
+        if resolved_backup_dir(&conn)?.is_none() {
+            return Ok(false);
+        }
+        let interval = load_app_setting(&conn, backup::BACKUP_INTERVAL_SETTING)?
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .unwrap_or(0);
+        let last_at = load_app_setting(&conn, backup::BACKUP_LAST_AT_SETTING)?
+            .and_then(|value| value.trim().parse::<i64>().ok());
+        Ok(backup::auto_backup_due(
+            last_at,
+            interval,
+            chrono::Local::now().timestamp(),
+        ))
+    })()
+    .unwrap_or(false);
+    if !due {
+        return;
+    }
+    match run_backup(&conn) {
+        Ok(path) => log::info!("Scheduled backup written to {}", path.display()),
+        Err(err) => log::warn!("Scheduled backup skipped: {err}"),
+    }
 }
 
 fn resolved_backup_dir(conn: &Connection) -> Result<Option<PathBuf>, String> {
@@ -1476,21 +1546,14 @@ fn load_backup_settings(database: State<'_, AppDatabase>) -> Result<BackupSettin
         .conn
         .lock()
         .map_err(|_| "SQLite lock was poisoned".to_string())?;
-    let dir = resolved_backup_dir(&conn)?;
-    Ok(BackupSettings {
-        dir: dir
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_default(),
-        keep: resolved_keep(&conn),
-        entries: dir.map(|path| backup::list_snapshots(&path)).unwrap_or_default(),
-    })
+    backup_settings_snapshot(&conn)
 }
 
 #[tauri::command]
 fn save_backup_settings(
     dir: String,
     keep: u32,
+    interval_hours: u32,
     database: State<'_, AppDatabase>,
 ) -> Result<(), String> {
     let conn = database
@@ -1498,7 +1561,12 @@ fn save_backup_settings(
         .lock()
         .map_err(|_| "SQLite lock was poisoned".to_string())?;
     save_app_setting(&conn, backup::BACKUP_DIR_SETTING, dir.trim())?;
-    save_app_setting(&conn, backup::BACKUP_KEEP_SETTING, &keep.max(1).to_string())
+    save_app_setting(&conn, backup::BACKUP_KEEP_SETTING, &keep.max(1).to_string())?;
+    save_app_setting(
+        &conn,
+        backup::BACKUP_INTERVAL_SETTING,
+        &interval_hours.to_string(),
+    )
 }
 
 #[tauri::command]
@@ -1516,18 +1584,8 @@ fn create_backup_now(database: State<'_, AppDatabase>) -> Result<BackupSettings,
         .conn
         .lock()
         .map_err(|_| "SQLite lock was poisoned".to_string())?;
-    let Some(dir) = resolved_backup_dir(&conn)? else {
-        return Err("Choose a backup folder first.".to_string());
-    };
-    let keep = resolved_keep(&conn);
-    let dest = dir.join(backup::snapshot_name(chrono::Local::now()));
-    backup::write_snapshot(&conn, &dest)?;
-    backup::prune_snapshots(&dir, keep as usize);
-    Ok(BackupSettings {
-        dir: dir.to_string_lossy().to_string(),
-        keep,
-        entries: backup::list_snapshots(&dir),
-    })
+    run_backup(&conn)?;
+    backup_settings_snapshot(&conn)
 }
 
 /// Stage a snapshot to be swapped in at the next launch. Returns nothing —
@@ -6370,6 +6428,15 @@ pub fn run() {
             app.manage(AppDatabase {
                 conn: Mutex::new(conn),
             });
+            // Scheduled snapshot, if one is due. Off the startup path: it takes
+            // the database lock, and on a large library VACUUM INTO is long
+            // enough to be felt as a slow launch.
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    maybe_auto_backup(&handle.state::<AppDatabase>());
+                });
+            }
 
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()

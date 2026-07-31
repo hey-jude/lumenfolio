@@ -186,6 +186,8 @@ const vaultStatus = ref('')
 // collections, chat history, settings — none of which can be regenerated.
 const backupDir = ref('')
 const backupKeep = ref(10)
+// Hours between automatic snapshots; 0 = manual only (the default).
+const backupIntervalHours = ref(0)
 const backupEntries = ref([])
 const backupBusy = ref(false)
 const backupStatus = ref('')
@@ -193,6 +195,7 @@ const backupStatus = ref('')
 function applyBackupSettings(settings) {
   backupDir.value = settings?.dir || ''
   backupKeep.value = settings?.keep || 10
+  backupIntervalHours.value = settings?.intervalHours || 0
   backupEntries.value = settings?.entries || []
 }
 
@@ -209,6 +212,7 @@ async function saveBackupSettings() {
     await invoke('save_backup_settings', {
       dir: backupDir.value || '',
       keep: Number(backupKeep.value) || 10,
+      intervalHours: Number(backupIntervalHours.value) || 0,
     })
     await loadBackupSettings()
   } catch (err) {
@@ -6134,6 +6138,15 @@ onMounted(() => {
                   {{ ui.backupNow }}
                 </button>
                 <label class="backup-keep">
+                  {{ ui.backupSchedule }}
+                  <select v-model.number="backupIntervalHours" @change="saveBackupSettings">
+                    <option :value="0">{{ ui.backupScheduleManual }}</option>
+                    <option :value="24">{{ ui.backupScheduleDaily }}</option>
+                    <option :value="168">{{ ui.backupScheduleWeekly }}</option>
+                    <option :value="720">{{ ui.backupScheduleMonthly }}</option>
+                  </select>
+                </label>
+                <label class="backup-keep">
                   {{ ui.backupKeep }}
                   <input v-model.number="backupKeep" type="number" min="1" max="99" @change="saveBackupSettings" />
                 </label>
@@ -7614,6 +7627,16 @@ onMounted(() => {
   gap: 6px;
   font-size: 12px;
   color: var(--text-muted, var(--text-secondary));
+}
+
+.backup-keep select {
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+  outline: none;
 }
 
 .backup-keep input {

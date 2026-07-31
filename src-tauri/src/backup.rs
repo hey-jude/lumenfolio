@@ -21,6 +21,33 @@ use rusqlite::Connection;
 
 pub(crate) const BACKUP_DIR_SETTING: &str = "backup_dir";
 pub(crate) const BACKUP_KEEP_SETTING: &str = "backup_keep";
+/// Hours between automatic snapshots; 0 (the default) means manual only.
+pub(crate) const BACKUP_INTERVAL_SETTING: &str = "backup_interval_hours";
+/// Unix seconds of the last successful snapshot, automatic or manual.
+pub(crate) const BACKUP_LAST_AT_SETTING: &str = "backup_last_at";
+
+/// Whether an automatic snapshot is due.
+///
+/// A manual backup also stamps `last_at`, so taking one by hand postpones the
+/// next automatic one rather than being ignored by it. An unknown `last_at`
+/// (never backed up) is due immediately, which is the useful default: the user
+/// has just switched the schedule on.
+pub(crate) fn auto_backup_due(last_at: Option<i64>, interval_hours: u32, now: i64) -> bool {
+    if interval_hours == 0 {
+        return false;
+    }
+    match last_at {
+        Some(last) => {
+            // A clock that jumped backwards would otherwise wedge this off
+            // forever, so treat any future stamp as due.
+            if last > now {
+                return true;
+            }
+            now - last >= i64::from(interval_hours) * 3600
+        }
+        None => true,
+    }
+}
 /// Suffix of a snapshot staged for the next launch to swap in.
 const RESTORE_SUFFIX: &str = ".restore";
 /// Snapshots older than the keep count are pruned; a floor stops a bad setting
@@ -202,6 +229,25 @@ mod tests {
         )
         .expect("seed");
         conn
+    }
+
+    #[test]
+    fn auto_backup_is_due_only_after_the_configured_interval() {
+        const DAY: i64 = 24 * 3600;
+        // Off by default: no schedule, never due, whatever the history.
+        assert!(!auto_backup_due(None, 0, DAY));
+        assert!(!auto_backup_due(Some(0), 0, DAY * 10));
+        // Never backed up but scheduled → due now.
+        assert!(auto_backup_due(None, 24, DAY));
+        // Inside the window → not yet; at/after it → due.
+        assert!(!auto_backup_due(Some(DAY), 24, DAY + 3600));
+        assert!(auto_backup_due(Some(DAY), 24, DAY * 2));
+        assert!(auto_backup_due(Some(DAY), 24, DAY * 3));
+        // Weekly honors its own interval.
+        assert!(!auto_backup_due(Some(DAY), 24 * 7, DAY * 4));
+        assert!(auto_backup_due(Some(DAY), 24 * 7, DAY * 8));
+        // A backwards clock jump must not wedge the schedule off forever.
+        assert!(auto_backup_due(Some(DAY * 10), 24, DAY));
     }
 
     #[test]
