@@ -132,7 +132,7 @@ const filter = ref('')
 const selectedDocId = ref('')
 // IDE-style document tabs: an ordered working set of opened documents, layered on
 // top of selectedDocId (the active tab). Restored (filtered to still-existing docs)
-// in loadLastWorkspace. See docs/lumenfolio_chat_cross_document_mention_plan.md §13.
+// in loadLastWorkspace.
 const openTabs = ref([])
 // Carries a citation across a cross-document jump: openTab() changes selectedDocId,
 // which triggers watch(selectedDocument) that resets activePage to the doc's saved

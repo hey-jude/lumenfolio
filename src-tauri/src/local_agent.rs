@@ -1,9 +1,8 @@
 //! Detection of locally-installed agent CLIs (Codex, Claude Code) so they can be
 //! offered as zero-config "local agent" chat providers.
 //!
-//! This file is P0: detection + status only. The chat dispatch (driving the CLI,
-//! exposing tools over MCP) lands in later phases. See the design doc at
-//! docs/lumenfolio_local_agent_provider_plan.md.
+//! Detection and status live here; driving the CLI and exposing tools over MCP
+//! live in `local_agent/mcp_server.rs` and the chat dispatch path.
 
 use std::{
     io::{BufRead, BufReader, Read},

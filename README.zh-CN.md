@@ -221,7 +221,7 @@ Lumenfolio 是一个 Tauri 2 + Vue 3 桌面应用。
 - `src-tauri/src/runtime/agent/`：轮次执行器、策略门、会话记忆、账本、轨迹
 - `src-tauri/src/runtime/note_edit.rs`：笔记精准修改的匹配
 - `src-tauri/src/local_agent/mcp_server.rs`：面向本地 agent 的回环 MCP 工具服务
-- `docs/`：产品、架构与运行时方案
+- `docs/knowledge_base_pivot_plan.md`：知识库转型的历史规划文档，并附「本方案之后的演进」摘要
 
 ## 环境要求
 

@@ -53,7 +53,6 @@ docs/
 docs/*
 !docs/assets/
 docs/assets/*
-!docs/assets/lumenfolio-demo.gif
 !docs/assets/lumenfolio-translation-split.png
 !docs/assets/lumenfolio-rag-chat.png
 !docs/assets/lumenfolio-technical-architecture.png
