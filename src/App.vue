@@ -182,6 +182,80 @@ const vaultDir = ref('')
 const vaultBusy = ref(false)
 const vaultStatus = ref('')
 
+// Database snapshots. Notes are already safe as .md; this covers what is left —
+// collections, chat history, settings — none of which can be regenerated.
+const backupDir = ref('')
+const backupKeep = ref(10)
+const backupEntries = ref([])
+const backupBusy = ref(false)
+const backupStatus = ref('')
+
+function applyBackupSettings(settings) {
+  backupDir.value = settings?.dir || ''
+  backupKeep.value = settings?.keep || 10
+  backupEntries.value = settings?.entries || []
+}
+
+async function loadBackupSettings() {
+  try {
+    applyBackupSettings(await invoke('load_backup_settings'))
+  } catch (err) {
+    console.warn('load_backup_settings failed', err)
+  }
+}
+
+async function saveBackupSettings() {
+  try {
+    await invoke('save_backup_settings', {
+      dir: backupDir.value || '',
+      keep: Number(backupKeep.value) || 10,
+    })
+    await loadBackupSettings()
+  } catch (err) {
+    backupStatus.value = err?.message || String(err)
+  }
+}
+
+async function chooseBackupDir() {
+  try {
+    const picked = await invoke('choose_backup_dir')
+    if (!picked) return
+    backupDir.value = picked
+    await saveBackupSettings()
+  } catch (err) {
+    backupStatus.value = err?.message || String(err)
+  }
+}
+
+async function backupNow() {
+  backupBusy.value = true
+  backupStatus.value = ''
+  try {
+    applyBackupSettings(await invoke('create_backup_now'))
+    backupStatus.value = ui.value.backupDone || 'Backed up'
+  } catch (err) {
+    backupStatus.value = err?.message || String(err)
+  } finally {
+    backupBusy.value = false
+  }
+}
+
+async function restoreBackup(entry) {
+  if (!entry?.path) return
+  backupBusy.value = true
+  backupStatus.value = ''
+  try {
+    // Staged, not applied: swapping a database the app has open is the very
+    // corruption this feature exists to avoid, so it lands on next launch.
+    await invoke('restore_backup', { path: entry.path })
+    backupStatus.value = ui.value.backupRestoreStaged || 'Restart to finish restoring'
+  } catch (err) {
+    backupStatus.value = err?.message || String(err)
+  } finally {
+    backupBusy.value = false
+  }
+}
+
 async function loadVaultSettings() {
   try {
     const settings = await invoke('load_vault_settings')
@@ -1689,6 +1763,7 @@ async function openSettings() {
   await loadWebSearchSettings()
   await loadProxySettings()
   await loadVaultSettings()
+  await loadBackupSettings()
   await loadTranslationSettings()
   initializeEditableProviders()
 }
@@ -6034,6 +6109,46 @@ onMounted(() => {
                 <span v-if="vaultStatus" class="vault-status">{{ vaultStatus }}</span>
               </div>
             </div>
+
+            <!-- Collections and chat history live only in the database; notes are
+                 already safe as .md. This snapshots the rest. -->
+            <div class="settings-field full">
+              <span class="settings-label">{{ ui.backupFolder }}</span>
+              <div class="vault-row">
+                <input
+                  v-model="backupDir"
+                  type="text"
+                  class="vault-input"
+                  :placeholder="ui.backupFolderPlaceholder"
+                  @change="saveBackupSettings"
+                />
+                <button type="button" class="settings-btn" :disabled="backupBusy" @click="chooseBackupDir">
+                  {{ ui.browse }}
+                </button>
+              </div>
+            </div>
+            <div class="settings-note full">{{ ui.backupHint }}</div>
+            <div class="settings-field full">
+              <div class="vault-row">
+                <button type="button" class="settings-btn" :disabled="backupBusy || !backupDir" @click="backupNow">
+                  {{ ui.backupNow }}
+                </button>
+                <label class="backup-keep">
+                  {{ ui.backupKeep }}
+                  <input v-model.number="backupKeep" type="number" min="1" max="99" @change="saveBackupSettings" />
+                </label>
+                <span v-if="backupStatus" class="vault-status">{{ backupStatus }}</span>
+              </div>
+            </div>
+            <ul v-if="backupEntries.length" class="backup-list">
+              <li v-for="entry in backupEntries" :key="entry.path">
+                <span class="backup-name">{{ entry.name }}</span>
+                <span class="backup-size">{{ formatFileSize(entry.size) }}</span>
+                <button type="button" class="settings-btn" :disabled="backupBusy" @click="restoreBackup(entry)">
+                  {{ ui.backupRestore }}
+                </button>
+              </li>
+            </ul>
           </div>
 
           <div v-if="settingsSection === 'chat'" class="settings-panel provider-settings-panel">
@@ -7489,6 +7604,59 @@ onMounted(() => {
 }
 
 .vault-status {
+  font-size: 12px;
+  color: var(--text-muted, var(--text-secondary));
+}
+
+.backup-keep {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted, var(--text-secondary));
+}
+
+.backup-keep input {
+  width: 56px;
+  min-height: 32px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.backup-list {
+  grid-column: 1 / -1;
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.backup-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.backup-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.backup-size {
+  flex: 0 0 auto;
   font-size: 12px;
   color: var(--text-muted, var(--text-secondary));
 }

@@ -11,6 +11,7 @@ use std::{
 use tauri::{Emitter, Manager, State};
 
 mod agent_judge;
+mod backup;
 mod collections;
 pub mod debug_probe;
 mod diagnostics;
@@ -1439,6 +1440,115 @@ struct VaultSettings {
     dir: String,
     /// True when the path came from the setting rather than the built-in default.
     customized: bool,
+}
+
+/// Where the live database lives, so backup commands can stage a restore next
+/// to it without re-deriving the path.
+struct DatabasePath(PathBuf);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BackupSettings {
+    dir: String,
+    keep: u32,
+    entries: Vec<backup::BackupEntry>,
+}
+
+fn resolved_backup_dir(conn: &Connection) -> Result<Option<PathBuf>, String> {
+    let configured = load_app_setting(conn, backup::BACKUP_DIR_SETTING)?
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    Ok(configured.map(PathBuf::from))
+}
+
+fn resolved_keep(conn: &Connection) -> u32 {
+    load_app_setting(conn, backup::BACKUP_KEEP_SETTING)
+        .ok()
+        .flatten()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(backup::DEFAULT_KEEP as u32)
+}
+
+#[tauri::command]
+fn load_backup_settings(database: State<'_, AppDatabase>) -> Result<BackupSettings, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let dir = resolved_backup_dir(&conn)?;
+    Ok(BackupSettings {
+        dir: dir
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        keep: resolved_keep(&conn),
+        entries: dir.map(|path| backup::list_snapshots(&path)).unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
+fn save_backup_settings(
+    dir: String,
+    keep: u32,
+    database: State<'_, AppDatabase>,
+) -> Result<(), String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    save_app_setting(&conn, backup::BACKUP_DIR_SETTING, dir.trim())?;
+    save_app_setting(&conn, backup::BACKUP_KEEP_SETTING, &keep.max(1).to_string())
+}
+
+#[tauri::command]
+fn choose_backup_dir() -> Result<Option<String>, String> {
+    Ok(rfd::FileDialog::new()
+        .set_title("Choose a folder for database backups")
+        .pick_folder()
+        .map(|path| path.to_string_lossy().to_string()))
+}
+
+/// Take a snapshot now and prune older ones past the keep count.
+#[tauri::command]
+fn create_backup_now(database: State<'_, AppDatabase>) -> Result<BackupSettings, String> {
+    let conn = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    let Some(dir) = resolved_backup_dir(&conn)? else {
+        return Err("Choose a backup folder first.".to_string());
+    };
+    let keep = resolved_keep(&conn);
+    let dest = dir.join(backup::snapshot_name(chrono::Local::now()));
+    backup::write_snapshot(&conn, &dest)?;
+    backup::prune_snapshots(&dir, keep as usize);
+    Ok(BackupSettings {
+        dir: dir.to_string_lossy().to_string(),
+        keep,
+        entries: backup::list_snapshots(&dir),
+    })
+}
+
+/// Stage a snapshot to be swapped in at the next launch. Returns nothing —
+/// the frontend tells the user to restart, which is when it actually applies.
+#[tauri::command]
+fn restore_backup(
+    path: String,
+    database: State<'_, AppDatabase>,
+    db_path: State<'_, DatabasePath>,
+) -> Result<(), String> {
+    let snapshot = PathBuf::from(path.trim());
+    if !snapshot.exists() {
+        return Err("That backup file no longer exists.".to_string());
+    }
+    // Take the lock only to prove the app is not mid-write; staging itself never
+    // touches the live database.
+    let _guard = database
+        .conn
+        .lock()
+        .map_err(|_| "SQLite lock was poisoned".to_string())?;
+    backup::stage_restore(&snapshot, &db_path.0)
 }
 
 /// Native folder picker for the notes vault. Separate from `choose_workspace`
@@ -6145,6 +6255,11 @@ pub fn run() {
             collections::delete_collection,
             collections::move_document_to_collection,
             collections::move_collection,
+            load_backup_settings,
+            save_backup_settings,
+            choose_backup_dir,
+            create_backup_now,
+            restore_backup,
             reveal_document_in_file_manager,
             choose_vault_dir,
             load_vault_settings,
@@ -6241,7 +6356,12 @@ pub fn run() {
             fs::create_dir_all(&app_data_dir)
                 .map_err(|err| format!("Failed to create app data dir: {err}"))?;
             let db_path = app_data_dir.join("lumenfolio.sqlite");
+            // A restore staged in a previous session is swapped in here — before
+            // any connection exists, since replacing an open database is exactly
+            // the corruption this feature is meant to protect against.
+            backup::apply_staged_restore(&db_path);
             let conn = storage::open_database(&db_path)?;
+            app.manage(DatabasePath(db_path.clone()));
             // Seed the outbound proxy from settings before any HTTP client is
             // built (GUI apps don't inherit the shell's HTTPS_PROXY).
             if let Ok(Some(proxy)) = load_app_setting(&conn, "proxy_url") {
