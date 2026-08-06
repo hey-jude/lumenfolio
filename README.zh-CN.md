@@ -119,6 +119,26 @@ Lumenfolio 可以把本机安装的 Codex 与 Claude Code CLI 变成聊天模型
 - **实时工具轨迹**，在对话的活动流中可见。
 - **受限的安全边界** —— MCP 服务按轮次启动于 `127.0.0.1`，使用随机 bearer token，且只暴露只读工具。
 
+## 面向外部工具的知识库 API
+
+你的知识库不必只能从这个应用内部访问。在设置里开启 **知识库 API**，Lumenfolio 就会在本机运行一个只读的 MCP 端点，任何 MCP 客户端——Claude Code、Codex、你自己的 harness——都能查询它。
+
+```bash
+claude mcp add --transport http lumenfolio http://127.0.0.1:37650/mcp \
+  --header "Authorization: Bearer <令牌>"
+```
+
+设置页提供 Claude Code 与 Codex 的一键复制命令（令牌已填好），接入就是复制粘贴。
+
+外部客户端拿到的是应用内 agent 同一套检索工具：用 `list_sources` 看库里有什么，用 `search_library_knowledge` 按主题找来源，再用 `search_chunks`、`open_pages`、`read_sheet`、`inspect_tables` 等精读某一个——返回的引文都带着来源、页码与坐标框。
+
+与应用内路径有两处**刻意的**差异：
+
+- **未知的来源 id 会报错，而不是被替换。** 应用内，模型编造一个 id 会得到当前打开的文档，这在对话中途是合理的降级；但一个程序指名要某个来源时，必须被告知它不存在，而不是拿到另一个来源的内容却无从察觉。
+- **联网工具关闭。** 外部 harness 自带联网能力；替它转发请求等于把本应用的代理与 API Key 借作它的出口。
+
+**这条边界意味着什么。** 默认关闭。开启后仅监听回环地址、绝不对外网开放——但**本机任何持有该令牌的进程，都能绕过应用界面读取你的整个知识库**。令牌可随时轮换，轮换会重启端点，仍在使用旧令牌的工具立即失效。它是只读的：通过它无法新建、修改或删除任何内容。
+
 ## 多模态对话
 
 粘贴或附加截图、图表、表格、示意图或公式截图，让支持视觉的模型结合当前会话上下文解读它。
@@ -174,6 +194,7 @@ Lumenfolio 会识别视觉资产、渲染裁剪图，并把它们作为有出处
 - 强模型走原生工具调用循环，弱模型/本地模型回落到规则驱动路径
 - 本地 agent 提供商：自动探测 Codex / Claude Code，无需另配 API Key
 - 本地 agent 的 MCP 模式，只读证据工具 + 实时轨迹
+- 知识库 API：可选的本地 MCP 端点，供外部 harness 查询你的知识库；默认关闭、只读
 - 多模态对话：图、表、示意图与截图
 - 知识沉淀与跨文档知识图谱
 - 视觉/表格感知检索，含裁剪图与 TSR 表格证据
@@ -210,7 +231,8 @@ Lumenfolio 是一个 Tauri 2 + Vue 3 桌面应用。
 - `src-tauri/src/runtime/rag/`：检索与证据组装
 - `src-tauri/src/runtime/agent/`：轮次执行器、策略门、会话记忆、账本、轨迹
 - `src-tauri/src/runtime/note_edit.rs`：笔记精准修改的匹配
-- `src-tauri/src/local_agent/mcp_server.rs`：面向本地 agent 的回环 MCP 工具服务
+- `src-tauri/src/local_agent/mcp_server.rs`：回环 MCP 工具服务，按轮次或全库两种作用域
+- `src-tauri/src/knowledge_api.rs`：常驻的知识库 API 服务与其设置
 
 ## 环境要求
 

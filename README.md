@@ -119,6 +119,43 @@ Lumenfolio can turn locally installed Codex and Claude Code CLIs into chat model
 - **Live tool trace** in the chat activity stream.
 - **Scoped safety boundary** — the MCP server starts per turn on `127.0.0.1` with a random bearer token and exposes read-only tools.
 
+## Knowledge API for External Tools
+
+Your library does not have to be reachable only from inside this app. Turn on the
+**Knowledge API** in Settings and Lumenfolio runs a local, read-only MCP endpoint
+that any MCP client — Claude Code, Codex, your own harness — can query.
+
+```bash
+claude mcp add --transport http lumenfolio http://127.0.0.1:37650/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+Settings has one-click commands for Claude Code and Codex with the token filled
+in, so connecting is a copy and a paste.
+
+The external client gets the same retrieval tools the in-app agent uses:
+`list_sources` to see what the library holds, `search_library_knowledge` to find
+sources by topic, then `search_chunks`, `open_pages`, `read_sheet`,
+`inspect_tables` and the rest to read one — all returning quotes with their
+source, page and bounding box.
+
+Two differences from the in-app path, both deliberate:
+
+- **An unknown source id is an error, not a substitution.** In-app, a model that
+  invents an id gets the open document, which is the right degradation mid-turn.
+  A program that names a source must be told it does not exist, rather than
+  handed a different one's text and no way to notice.
+- **Web tools are off.** An external harness has its own network access;
+  proxying its requests would lend it this app's proxy and API keys as an egress
+  path.
+
+**The boundary this crosses.** It is off by default. While on, it binds loopback
+only and never listens on the network — but any process on your machine holding
+the token can read your entire knowledge base without going through the app.
+The token can be rotated at any time, which restarts the endpoint and cuts off
+anything still using the old one. It is read-only: nothing reachable through it
+can create, edit or delete.
+
 ## Multimodal Chat
 
 Paste or attach a screenshot, figure, table, diagram or equation crop and ask a vision-capable model about it in the context of your current session.
@@ -174,6 +211,7 @@ An optional, local-first discovery feed of trending papers from Hugging Face, wi
 - Native tool-calling agent loop for capable models, rule-driven fallback for weaker/local ones
 - Local agent providers: auto-detect Codex / Claude Code and use them without another API key
 - Local-agent MCP mode with read-only evidence tools and a live trace
+- Knowledge API: an optional local MCP endpoint so external harnesses can query your library, off by default and read-only
 - Multimodal chat for figures, tables, diagrams and screenshots
 - Knowledge precipitation and a cross-document knowledge graph
 - Visual/table-aware retrieval with rendered crops and TSR-ready table evidence
@@ -210,7 +248,8 @@ Key paths:
 - `src-tauri/src/runtime/rag/`: retrieval and evidence assembly
 - `src-tauri/src/runtime/agent/`: turn runner, policy gate, session memory, ledger, trace
 - `src-tauri/src/runtime/note_edit.rs`: precise note-edit matching
-- `src-tauri/src/local_agent/mcp_server.rs`: loopback MCP tool server for local agents
+- `src-tauri/src/local_agent/mcp_server.rs`: loopback MCP tool server, scoped per turn or library-wide
+- `src-tauri/src/knowledge_api.rs`: the resident knowledge API service and its settings
 
 ## Prerequisites
 
