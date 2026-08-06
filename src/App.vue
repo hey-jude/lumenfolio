@@ -182,6 +182,85 @@ const vaultDir = ref('')
 const vaultBusy = ref(false)
 const vaultStatus = ref('')
 
+// Knowledge API: a resident local MCP endpoint external harnesses can query.
+// Off by default — while it runs, any process on this machine holding the token
+// can read the whole library without going through the app.
+const knowledgeApi = ref({
+  enabled: false,
+  port: 37650,
+  token: '',
+  url: '',
+  running: false,
+  error: '',
+})
+const knowledgeApiBusy = ref(false)
+const knowledgeApiTokenVisible = ref(false)
+
+// Masked by default so the token does not sit in plain sight during a screen
+// share; the copy buttons work regardless of whether it is revealed.
+const knowledgeApiTokenDisplay = computed(() => {
+  const token = knowledgeApi.value.token || ''
+  if (!token) return ''
+  return knowledgeApiTokenVisible.value ? token : `${token.slice(0, 4)}${'•'.repeat(12)}`
+})
+
+const knowledgeApiUrl = computed(() => (
+  knowledgeApi.value.url || `http://127.0.0.1:${knowledgeApi.value.port}/mcp`
+))
+
+// Ready-to-paste registration for the two harnesses most likely to be used.
+const knowledgeApiClaudeCommand = computed(() => (
+  `claude mcp add --transport http lumenfolio ${knowledgeApiUrl.value}`
+  + ` --header "Authorization: Bearer ${knowledgeApi.value.token}"`
+))
+const knowledgeApiCodexCommand = computed(() => (
+  `codex mcp add lumenfolio --url ${knowledgeApiUrl.value}`
+  + ` --bearer-token "${knowledgeApi.value.token}"`
+))
+
+async function loadKnowledgeApi() {
+  try {
+    knowledgeApi.value = await invoke('load_knowledge_api_settings')
+  } catch (err) {
+    console.warn('load_knowledge_api_settings failed', err)
+  }
+}
+
+async function saveKnowledgeApi() {
+  knowledgeApiBusy.value = true
+  try {
+    knowledgeApi.value = await invoke('save_knowledge_api_settings', {
+      enabled: knowledgeApi.value.enabled,
+      port: Number(knowledgeApi.value.port) || 37650,
+    })
+  } catch (err) {
+    knowledgeApi.value.error = err?.message || String(err)
+  } finally {
+    knowledgeApiBusy.value = false
+  }
+}
+
+async function rotateKnowledgeApiToken() {
+  knowledgeApiBusy.value = true
+  try {
+    knowledgeApi.value = await invoke('rotate_knowledge_api_token')
+    showToast(ui.value.knowledgeApiRotated || 'New token issued')
+  } catch (err) {
+    knowledgeApi.value.error = err?.message || String(err)
+  } finally {
+    knowledgeApiBusy.value = false
+  }
+}
+
+async function copyText(text, message) {
+  try {
+    await navigator.clipboard?.writeText(text)
+    showToast(message)
+  } catch (err) {
+    console.warn('clipboard write failed', err)
+  }
+}
+
 // Database snapshots. Notes are already safe as .md; this covers what is left —
 // collections, chat history, settings — none of which can be regenerated.
 const backupDir = ref('')
@@ -1768,6 +1847,7 @@ async function openSettings() {
   await loadProxySettings()
   await loadVaultSettings()
   await loadBackupSettings()
+  await loadKnowledgeApi()
   await loadTranslationSettings()
   initializeEditableProviders()
 }
@@ -6162,6 +6242,58 @@ onMounted(() => {
                 </button>
               </li>
             </ul>
+
+            <!-- Knowledge API: expose the library to external MCP harnesses. -->
+            <label class="settings-field full settings-toggle">
+              <input v-model="knowledgeApi.enabled" type="checkbox" :disabled="knowledgeApiBusy" @change="saveKnowledgeApi" />
+              <span>{{ ui.knowledgeApi }}</span>
+            </label>
+            <div class="settings-note full">{{ ui.knowledgeApiHint }}</div>
+            <div class="settings-note full knowledge-api-warning">⚠️ {{ ui.knowledgeApiWarning }}</div>
+
+            <template v-if="knowledgeApi.enabled">
+              <div class="settings-field full">
+                <div class="vault-row">
+                  <label class="backup-keep">
+                    {{ ui.knowledgeApiPort }}
+                    <input v-model.number="knowledgeApi.port" type="number" min="1024" max="65535" :disabled="knowledgeApiBusy" @change="saveKnowledgeApi" />
+                  </label>
+                  <span :class="['api-status', knowledgeApi.running ? 'is-up' : 'is-down']">
+                    {{ knowledgeApi.running ? `${ui.knowledgeApiRunning} · ${knowledgeApi.url}` : ui.knowledgeApiStopped }}
+                  </span>
+                </div>
+              </div>
+              <div v-if="knowledgeApi.error" class="settings-note full knowledge-api-error">{{ knowledgeApi.error }}</div>
+
+              <div class="settings-field full">
+                <span class="settings-label">{{ ui.knowledgeApiToken }}</span>
+                <div class="vault-row">
+                  <code class="api-token">{{ knowledgeApiTokenDisplay }}</code>
+                  <button type="button" class="settings-btn" @click="knowledgeApiTokenVisible = !knowledgeApiTokenVisible">
+                    {{ knowledgeApiTokenVisible ? ui.hide : ui.show }}
+                  </button>
+                  <button type="button" class="settings-btn" @click="copyText(knowledgeApi.token, ui.knowledgeApiCopied)">
+                    {{ ui.copy }}
+                  </button>
+                  <button type="button" class="settings-btn" :disabled="knowledgeApiBusy" @click="rotateKnowledgeApiToken">
+                    {{ ui.knowledgeApiRotate }}
+                  </button>
+                </div>
+              </div>
+              <div class="settings-note full">{{ ui.knowledgeApiRotateHint }}</div>
+
+              <div class="settings-field full">
+                <span class="settings-label">{{ ui.knowledgeApiConnect }}</span>
+                <div class="vault-row">
+                  <button type="button" class="settings-btn" @click="copyText(knowledgeApiClaudeCommand, ui.knowledgeApiCopied)">
+                    {{ ui.knowledgeApiCopyClaude }}
+                  </button>
+                  <button type="button" class="settings-btn" @click="copyText(knowledgeApiCodexCommand, ui.knowledgeApiCopied)">
+                    {{ ui.knowledgeApiCopyCodex }}
+                  </button>
+                </div>
+              </div>
+            </template>
           </div>
 
           <div v-if="settingsSection === 'chat'" class="settings-panel provider-settings-panel">
@@ -7682,6 +7814,44 @@ onMounted(() => {
   flex: 0 0 auto;
   font-size: 12px;
   color: var(--text-muted, var(--text-secondary));
+}
+
+/* Knowledge API: the warning has to read as a warning, since enabling this
+   widens the app's trust boundary to every process on the machine. */
+.knowledge-api-warning {
+  color: #e0b45a;
+}
+
+.knowledge-api-error {
+  color: var(--danger, #e06a6a);
+}
+
+.api-status {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.api-status.is-up {
+  color: #3db570;
+}
+
+.api-status.is-down {
+  color: var(--text-muted, var(--text-secondary));
+}
+
+.api-token {
+  flex: 1 1 220px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
 }
 
 .settings-btn.primary {
