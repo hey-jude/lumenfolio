@@ -69,11 +69,15 @@ Notes are not an afterthought — they are a source you author.
 
 The edit mechanism deliberately follows what shipped coding agents converged on (exact match, required uniqueness, no fuzzy fallbacks) — fuzzy matching is what makes an editor destroy the text it was asked to improve.
 
-## Your Data Stays Yours
+## Your Data, Backup and Sync
 
-- **Notes are mirrored as plain `.md` files** in a folder you choose. Point it at iCloud, Dropbox, Syncthing or a WebDAV mount and your notes sync with no integration on our side — and no lock-in, since they are just Markdown. If the database is ever lost, the notes are still there, and can be recovered back into the app.
+- **Notes are mirrored as plain `.md` files** in a folder you choose. Point it at iCloud, Dropbox, Syncthing or a WebDAV mount and your notes are carried off this machine with no integration on our side — and no lock-in, since they are just Markdown. If the database is ever lost, the notes are still there and can be recovered back into the app.
 - **Database snapshots** capture what only exists in SQLite — collections, chat history, settings. Snapshots use `VACUUM INTO` (never a file copy, which is how a live SQLite database gets corrupted in a sync folder), are safe to take while you work, and restore on the next launch while keeping the database they replaced. Manual, or on a schedule you choose.
 - Nothing leaves your machine except calls to the model provider you configured.
+
+**Multi-device: this is backup, not sync.** The database is the single source of truth, and the app does not read external edits to the `.md` files — edit a note in another editor and your next in-app save of it overwrites that change. Collections, chat history and the index exist only on the machine that made them. So do not run two copies of Lumenfolio against one synced notes folder. Real two-way sync needs conflict resolution and is deliberately not attempted yet.
+
+**Moving to a new machine**: point the new install at the same notes folder and use *Recover notes from folder*, then restore a database snapshot to bring collections and chat history across.
 
 > A SQLite database must never live in a cloud-sync folder. That is why notes are mirrored as files and the database is snapshotted, rather than the app data directory simply being synced.
 
