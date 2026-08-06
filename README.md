@@ -207,7 +207,6 @@ Key paths:
 - `src-tauri/src/runtime/agent/`: turn runner, policy gate, session memory, ledger, trace
 - `src-tauri/src/runtime/note_edit.rs`: precise note-edit matching
 - `src-tauri/src/local_agent/mcp_server.rs`: loopback MCP tool server for local agents
-- `docs/knowledge_base_pivot_plan.md`: the historical plan behind the knowledge-base pivot, with a summary of what shipped beyond it
 
 ## Prerequisites
 
