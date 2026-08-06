@@ -1,6 +1,6 @@
 [package]
 name = "lumenfolio_desktop"
-version = "0.2.3"
+version = "0.3.0"
 description = "Lumenfolio shell"
 authors = ["Sotarium"]
 license = "AGPL-3.0"
