@@ -19,6 +19,7 @@ mod document_index;
 mod document_translation;
 mod documents;
 mod indexing;
+mod knowledge_api;
 mod llm;
 mod local_agent;
 mod model_catalog;
@@ -1444,7 +1445,7 @@ struct VaultSettings {
 
 /// Where the live database lives, so backup commands can stage a restore next
 /// to it without re-deriving the path.
-struct DatabasePath(PathBuf);
+pub(crate) struct DatabasePath(pub PathBuf);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -5743,7 +5744,7 @@ fn env_var(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn load_app_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+pub(crate) fn load_app_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
     conn.query_row(
         "SELECT value FROM app_settings WHERE key = ?1 LIMIT 1",
         params![key],
@@ -5753,7 +5754,7 @@ fn load_app_setting(conn: &Connection, key: &str) -> Result<Option<String>, Stri
     .map_err(|err| format!("Failed to load app setting {key}: {err}"))
 }
 
-fn save_app_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+pub(crate) fn save_app_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
     conn.execute(
         "INSERT INTO app_settings (key, value, updated_at)
          VALUES (?1, ?2, unixepoch())
@@ -6313,6 +6314,9 @@ pub fn run() {
             collections::delete_collection,
             collections::move_document_to_collection,
             collections::move_collection,
+            knowledge_api::load_knowledge_api_settings,
+            knowledge_api::save_knowledge_api_settings,
+            knowledge_api::rotate_knowledge_api_token,
             load_backup_settings,
             save_backup_settings,
             choose_backup_dir,
@@ -6428,6 +6432,7 @@ pub fn run() {
             app.manage(AppDatabase {
                 conn: Mutex::new(conn),
             });
+            app.manage(knowledge_api::KnowledgeApiState::default());
             // Scheduled snapshot, if one is due. Off the startup path: it takes
             // the database lock, and on a large library VACUUM INTO is long
             // enough to be felt as a slow launch.
@@ -6435,6 +6440,20 @@ pub fn run() {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     maybe_auto_backup(&handle.state::<AppDatabase>());
+                });
+            }
+            // Bring the knowledge API up if the user left it on. Off the startup
+            // path too: a port taken by another process must not stop the app.
+            {
+                let handle = app.handle().clone();
+                let api_db_path = db_path.clone();
+                tauri::async_runtime::spawn(async move {
+                    knowledge_api::start_if_enabled(
+                        api_db_path,
+                        &handle.state::<AppDatabase>(),
+                        &handle.state::<knowledge_api::KnowledgeApiState>(),
+                    )
+                    .await;
                 });
             }
 

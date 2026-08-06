@@ -352,7 +352,7 @@ impl Drop for RunningMcpServer {
     }
 }
 
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     // 128-bit loopback bearer; rand is already in the tree via rmcp.
     format!("{:016x}{:016x}", rand::random::<u64>(), rand::random::<u64>())
 }
