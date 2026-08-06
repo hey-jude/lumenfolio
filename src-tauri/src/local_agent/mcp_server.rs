@@ -78,6 +78,9 @@ pub(crate) struct LumenfolioMcpServer {
 
 /// Tools that answer from the library as a whole and need no focus document.
 const LIBRARY_WIDE_TOOLS: &[&str] = &[
+    // Must be here: the "needs a documentId" error tells the caller to come
+    // here for one, so requiring a documentId to run it would be a dead end.
+    "list_sources",
     "search_library_knowledge",
     "list_trending_papers",
     "query_knowledge_graph",

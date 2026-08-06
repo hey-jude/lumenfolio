@@ -421,6 +421,7 @@ enum RagToolName {
     QueryKnowledgeGraph,
     SearchLibraryKnowledge,
     ListTrendingPapers,
+    ListSources,
     ReadNoteSource,
     ProposeNoteEdit,
     ReadSheet,
@@ -473,6 +474,7 @@ impl RagToolName {
             Self::QueryKnowledgeGraph => "query_knowledge_graph",
             Self::SearchLibraryKnowledge => "search_library_knowledge",
             Self::ListTrendingPapers => "list_trending_papers",
+            Self::ListSources => "list_sources",
             Self::ReadNoteSource => "read_note_source",
             Self::ProposeNoteEdit => "propose_note_edit",
             Self::ReadSheet => "read_sheet",
@@ -735,6 +737,22 @@ pub fn rag_tool_specs_for_capabilities(
             }),
         });
     }
+    // The library's table of contents. Every other tool needs a documentId to read
+    // one source; without an enumeration there is no way to obtain one except by
+    // guessing a topic. That matters most for an external MCP client, which cannot
+    // see the sidebar.
+    specs.push(RagToolSpec {
+        name: "list_sources",
+        description: "List the sources in the knowledge base — id, title, kind, collection and index state. Use this to discover what exists and to get the `documentId` the per-source tools need. Optionally filter by a title substring or by kind (pdf, docx, xlsx, pptx, note, markdown, web). For 'what do I have about X', prefer search_library_knowledge, which searches meaning rather than titles.",
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Case-insensitive substring of the title" },
+                "contentType": { "type": "string", "description": "Restrict to one kind: pdf, docx, xlsx, pptx, note, markdown, text, web" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Max sources (default 30)" }
+            }
+        }),
+    });
     // Authored sources (notes / markdown / clips) keep their Markdown in body_md, and
     // the user edits it live. Retrieval tools only ever see the *indexed* chunks, which
     // lag a save and are split up — useless when the question is about the draft as a
@@ -1075,6 +1093,7 @@ pub fn execute_rag_tool_call_for_capabilities(
         "search_library_knowledge" => execute_search_library_knowledge_tool(&registry, args),
         "list_trending_papers" => execute_list_trending_papers_tool(&registry, args),
         // Web tools: not document-scoped. The Exa key (if any) lives in app_settings.
+        "list_sources" => execute_list_sources_tool(&registry, args),
         "read_note_source" => execute_read_note_source_tool(&registry),
         "propose_note_edit" => execute_propose_note_edit_tool(&registry, args),
         "read_sheet" => execute_read_sheet_tool(&registry, args),
@@ -1532,6 +1551,111 @@ fn execute_read_note_source_tool(
             RagToolName::ReadNoteSource,
             serde_json::json!({ "documentId": registry.document_id }),
             1,
+        ),
+    })
+}
+
+/// Enumerate the library's sources.
+///
+/// Every per-source tool needs a `documentId`, and nothing else hands one out
+/// except `search_library_knowledge`, which matches on precipitated meaning and
+/// so cannot answer "what is actually in here". An external MCP client has no
+/// sidebar to read, making this its entry point.
+fn execute_list_sources_tool(
+    registry: &RagToolRegistry<'_>,
+    args: &serde_json::Value,
+) -> Result<RagToolExecutionOutput, String> {
+    let query = string_arg(args, "query").unwrap_or("").trim().to_lowercase();
+    let content_type = string_arg(args, "contentType")
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty());
+    let limit = u32_arg(args, "limit", 30, 1, 100);
+
+    let mut sql = String::from(
+        "SELECT d.id, d.title, d.content_type, d.index_status, d.page_count,
+                COALESCE(c.name, '')
+         FROM documents d
+         LEFT JOIN collections c ON c.id = d.collection_id
+         WHERE 1 = 1",
+    );
+    if !query.is_empty() {
+        sql.push_str(" AND instr(lower(d.title), ?1) > 0");
+    }
+    if content_type.is_some() {
+        sql.push_str(if query.is_empty() {
+            " AND lower(d.content_type) = ?1"
+        } else {
+            " AND lower(d.content_type) = ?2"
+        });
+    }
+    // Most recently touched first: what the user worked on last is the likeliest
+    // thing a caller is asking about.
+    sql.push_str(" ORDER BY d.last_opened_at DESC, d.updated_at DESC LIMIT ");
+    sql.push_str(&limit.to_string());
+
+    let mut stmt = registry
+        .conn
+        .prepare(&sql)
+        .map_err(|err| format!("Failed to list sources: {err}"))?;
+    let map_row = |row: &rusqlite::Row<'_>| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, String>(5)?,
+        ))
+    };
+    let rows = match (query.is_empty(), &content_type) {
+        (true, None) => stmt.query_map([], map_row),
+        (false, None) => stmt.query_map(params![query], map_row),
+        (true, Some(kind)) => stmt.query_map(params![kind], map_row),
+        (false, Some(kind)) => stmt.query_map(params![query, kind], map_row),
+    }
+    .map_err(|err| format!("Failed to list sources: {err}"))?
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|err| format!("Failed to list sources: {err}"))?;
+
+    let citations: Vec<Citation> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (id, title, kind, status, pages, collection))| {
+            let mut facts = vec![format!("kind: {kind}")];
+            if !collection.is_empty() {
+                facts.push(format!("collection: {collection}"));
+            }
+            if *pages > 1 {
+                facts.push(format!("pages: {pages}"));
+            }
+            // State the index status: a source still indexing answers poorly, and
+            // the caller should know that rather than conclude the content is thin.
+            if status != "indexed" {
+                facts.push(format!("index: {status}"));
+            }
+            Citation {
+                // Keyed by document so repeated calls dedupe rather than stack.
+                id: format!("source-{id}"),
+                label: format!("[{}]", index + 1),
+                page: 0,
+                block_id: String::new(),
+                section_title: Some("library source".to_string()),
+                quote: format!("{title} — documentId: {id} ({})", facts.join(", ")),
+                bbox_list: serde_json::json!([]),
+                document_id: id.clone(),
+                source: "library_index".to_string(),
+            }
+        })
+        .collect();
+    let count = citations.len();
+    Ok(RagToolExecutionOutput {
+        citations,
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::ListSources,
+            serde_json::json!({ "query": query, "contentType": content_type, "limit": limit }),
+            count,
         ),
     })
 }
@@ -7974,6 +8098,59 @@ mod tests {
     }
 
     #[test]
+    fn list_sources_enumerates_the_library_and_filters() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE collections (id TEXT PRIMARY KEY, name TEXT NOT NULL);
+             CREATE TABLE documents (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, content_type TEXT NOT NULL,
+                index_status TEXT NOT NULL, page_count INTEGER NOT NULL DEFAULT 0,
+                collection_id TEXT, last_opened_at INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO collections (id, name) VALUES ('c1', 'Research');
+             INSERT INTO documents
+               (id, title, content_type, index_status, page_count, collection_id, last_opened_at)
+             VALUES
+               ('pdf-1', 'Attention Paper', 'pdf', 'indexed', 12, 'c1', 300),
+               ('xls-1', 'Q3 Budget', 'xlsx', 'indexed', 1, NULL, 200),
+               ('note-1', 'Budget notes', 'note', 'indexing', 1, NULL, 100);",
+        )
+        .expect("schema");
+        let registry = RagToolRegistry::new(&conn, "pdf-1", 4_000);
+
+        let all = execute_list_sources_tool(&registry, &serde_json::json!({})).expect("list");
+        assert_eq!(all.citations.len(), 3);
+        // Most recently opened first, so the likely subject comes first.
+        assert!(all.citations[0].quote.starts_with("Attention Paper"));
+        // The id is in the text: it is what every per-source tool needs next.
+        assert!(all.citations[0].quote.contains("documentId: pdf-1"));
+        assert!(all.citations[0].quote.contains("collection: Research"));
+        // A source that is not ready says so, rather than reading as thin content.
+        assert!(all.citations[2].quote.contains("index: indexing"), "{}", all.citations[2].quote);
+
+        // Title filter is case-insensitive and matches mid-string.
+        let budget = execute_list_sources_tool(&registry, &serde_json::json!({ "query": "budget" }))
+            .expect("filtered");
+        assert_eq!(budget.citations.len(), 2);
+
+        let sheets =
+            execute_list_sources_tool(&registry, &serde_json::json!({ "contentType": "xlsx" }))
+                .expect("by kind");
+        assert_eq!(sheets.citations.len(), 1);
+        assert_eq!(sheets.citations[0].document_id, "xls-1");
+
+        // Both filters together.
+        let both = execute_list_sources_tool(
+            &registry,
+            &serde_json::json!({ "query": "budget", "contentType": "note" }),
+        )
+        .expect("both");
+        assert_eq!(both.citations.len(), 1);
+        assert_eq!(both.citations[0].document_id, "note-1");
+    }
+
+    #[test]
     fn read_note_source_returns_body_and_rejects_file_backed_documents() {
         let conn = Connection::open_in_memory().expect("in-memory db");
         conn.execute_batch(
@@ -8129,7 +8306,10 @@ mod tests {
                 "read_note_source",
                 "propose_note_edit",
                 // Always offered: spreadsheets expose their grid; errors for non-xlsx.
-                "read_sheet"
+                "read_sheet",
+                // Always offered: the library's table of contents, and the only
+                // way to obtain a documentId without guessing at a topic.
+                "list_sources"
             ])
         );
         let vision_names = rag_tool_specs_for_capabilities(true, false)
