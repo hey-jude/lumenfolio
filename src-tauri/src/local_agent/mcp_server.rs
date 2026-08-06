@@ -39,11 +39,34 @@ use crate::runtime::rag::{self, Citation, RagToolCapabilities, RetrievalTraceCan
 /// mean the agent reads more per call and loops the tools less.
 const MCP_MAX_QUOTE_CHARS: usize = 16_000;
 
-/// The document-scoped MCP server handler. One per server (= per turn).
+/// What a server instance is allowed to reach.
+///
+/// The in-app turn server is scoped to the document the user has open plus the
+/// ones they @-referenced, and leans on the RAG layer's silent fallback: a model
+/// that invents a `documentId` gets the focus document rather than an error,
+/// which is the right trade when the caller is a language model mid-turn.
+///
+/// A library server has no focus document and a caller that is another program,
+/// so that fallback becomes a correctness trap — the client asks about source B,
+/// silently receives source A's content, and cannot tell. Library scope therefore
+/// resolves `documentId` against the database and refuses anything it cannot
+/// verify. See `resolve_scope`.
+#[derive(Clone)]
+pub(crate) enum McpScope {
+    /// One chat turn: a focus document, optionally with @-referenced documents.
+    Turn {
+        document_id: String,
+        reference_document_ids: Vec<String>,
+    },
+    /// The whole knowledge base, for external MCP clients.
+    Library,
+}
+
+/// The MCP server handler. One per running server.
 #[derive(Clone)]
 pub(crate) struct LumenfolioMcpServer {
     db_path: PathBuf,
-    document_id: String,
+    scope: McpScope,
     /// Whether the chat's "联网" toggle is on — exposes web_search/web_fetch.
     web_enabled: bool,
     /// Citations served this run, for the agentic dispatch to surface as evidence.
@@ -53,6 +76,15 @@ pub(crate) struct LumenfolioMcpServer {
     candidates: Arc<Mutex<Vec<RetrievalTraceCandidate>>>,
 }
 
+/// Tools that answer from the library as a whole and need no focus document.
+const LIBRARY_WIDE_TOOLS: &[&str] = &[
+    "search_library_knowledge",
+    "list_trending_papers",
+    "query_knowledge_graph",
+    "web_search",
+    "web_fetch",
+];
+
 impl LumenfolioMcpServer {
     fn read_only_conn(&self) -> Result<rusqlite::Connection, McpError> {
         rusqlite::Connection::open_with_flags(
@@ -60,6 +92,79 @@ impl LumenfolioMcpServer {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         )
         .map_err(|err| McpError::internal_error(format!("open db failed: {err}"), None))
+    }
+
+    /// Decide which document a call targets, and which ids the RAG layer may route to.
+    ///
+    /// Turn scope hands back exactly what it was constructed with, so the in-app
+    /// path keeps its existing behaviour (including the silent fallback).
+    ///
+    /// Library scope requires `documentId` for document-scoped tools and verifies
+    /// it exists, returning an error otherwise. Erroring is the whole point: a
+    /// program that mistypes an id must find out, not be handed a different
+    /// source's text. The verified id is also passed as the routing whitelist, so
+    /// the RAG layer's own guard agrees with the decision made here.
+    fn resolve_scope(
+        &self,
+        conn: &rusqlite::Connection,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> Result<(String, Vec<String>), McpError> {
+        match &self.scope {
+            McpScope::Turn {
+                document_id,
+                reference_document_ids,
+            } => Ok((document_id.clone(), reference_document_ids.clone())),
+            McpScope::Library => {
+                let requested = args
+                    .get("documentId")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let Some(requested) = requested else {
+                    if LIBRARY_WIDE_TOOLS.contains(&tool) {
+                        // No focus document is needed or used by these.
+                        return Ok((String::new(), Vec::new()));
+                    }
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "'{tool}' reads one source, so it needs a documentId. \
+                             Call list_sources or search_library_knowledge first to find one."
+                        ),
+                        None,
+                    ));
+                };
+                let exists: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM documents WHERE id = ?1",
+                        rusqlite::params![requested],
+                        |row| row.get(0),
+                    )
+                    .map_err(|err| {
+                        McpError::internal_error(format!("document lookup failed: {err}"), None)
+                    })?;
+                if exists == 0 {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "No source with id '{requested}' exists in this knowledge base. \
+                             Call list_sources to see what is available."
+                        ),
+                        None,
+                    ));
+                }
+                Ok((requested.to_string(), vec![requested.to_string()]))
+            }
+        }
+    }
+
+    /// Web tools stay off for external clients: an outside harness has its own
+    /// network access, and routing its requests through Lumenfolio would lend it
+    /// this app's proxy and API keys as an egress path.
+    fn web_enabled_for_scope(&self) -> bool {
+        match self.scope {
+            McpScope::Turn { .. } => self.web_enabled,
+            McpScope::Library => false,
+        }
     }
 }
 
@@ -77,7 +182,7 @@ impl ServerHandler for LumenfolioMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = rag::rag_tool_specs_for_capabilities(false, self.web_enabled)
+        let tools = rag::rag_tool_specs_for_capabilities(false, self.web_enabled_for_scope())
             .into_iter()
             .map(|spec| {
                 let schema = spec
@@ -108,16 +213,19 @@ impl ServerHandler for LumenfolioMcpServer {
         // future Send despite rusqlite::Connection being !Sync).
         let (output, image_paths) = {
             let conn = self.read_only_conn()?;
+            let (document_id, reference_document_ids) = self.resolve_scope(&conn, &tool, &args)?;
+            let reference_refs: Vec<&str> =
+                reference_document_ids.iter().map(String::as_str).collect();
             let mut output = rag::execute_rag_tool_call_for_capabilities(
                 &conn,
-                &self.document_id,
-                &[],
+                &document_id,
+                &reference_refs,
                 &tool,
                 &args,
                 &fallback_query,
                 RagToolCapabilities {
                     vision_enabled: false,
-                    web_enabled: self.web_enabled,
+                    web_enabled: self.web_enabled_for_scope(),
                     max_quote_chars: MCP_MAX_QUOTE_CHARS,
                 },
             );
@@ -256,27 +364,54 @@ fn unauthorized() -> hyper::Response<BoxBody<Bytes, std::convert::Infallible>> {
         .expect("static response")
 }
 
-/// Start a loopback MCP server for the given document. Returns its URL + bearer
-/// token + the live citation collector. The accept loop runs on the Tauri async
-/// runtime until the returned handle is dropped.
+/// Start a loopback MCP server for one chat turn, scoped to `document_id`.
 pub(crate) async fn start_mcp_server(
     db_path: PathBuf,
     document_id: String,
     web_enabled: bool,
 ) -> Result<RunningMcpServer, String> {
-    let token = random_token();
+    start_scoped_mcp_server(
+        db_path,
+        McpScope::Turn {
+            document_id,
+            reference_document_ids: Vec::new(),
+        },
+        web_enabled,
+        0,
+        None,
+    )
+    .await
+}
+
+/// Start a loopback MCP server. Returns its URL + bearer token + the live
+/// citation collector. The accept loop runs on the Tauri async runtime until the
+/// returned handle is dropped.
+///
+/// `port` 0 asks the OS for a free one (what a per-turn server wants); a library
+/// server passes its configured port so external clients have a stable address,
+/// and a clash surfaces as an error rather than silently drifting elsewhere.
+/// `token` reuses a persisted secret when given, so a configured external client
+/// keeps working across restarts.
+pub(crate) async fn start_scoped_mcp_server(
+    db_path: PathBuf,
+    scope: McpScope,
+    web_enabled: bool,
+    port: u16,
+    token: Option<String>,
+) -> Result<RunningMcpServer, String> {
+    let token = token.unwrap_or_else(random_token);
     let citations: Arc<Mutex<Vec<Citation>>> = Arc::new(Mutex::new(Vec::new()));
     let candidates: Arc<Mutex<Vec<RetrievalTraceCandidate>>> = Arc::new(Mutex::new(Vec::new()));
 
     let factory_path = db_path.clone();
-    let factory_doc = document_id.clone();
+    let factory_scope = scope.clone();
     let factory_citations = citations.clone();
     let factory_candidates = candidates.clone();
     let http_service = StreamableHttpService::new(
         move || {
             Ok(LumenfolioMcpServer {
                 db_path: factory_path.clone(),
-                document_id: factory_doc.clone(),
+                scope: factory_scope.clone(),
                 web_enabled,
                 citations: factory_citations.clone(),
                 candidates: factory_candidates.clone(),
@@ -286,9 +421,15 @@ pub(crate) async fn start_mcp_server(
         StreamableHttpServerConfig::default(),
     );
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
-        .map_err(|err| format!("Failed to bind MCP server: {err}"))?;
+        .map_err(|err| {
+            if port == 0 {
+                format!("Failed to bind MCP server: {err}")
+            } else {
+                format!("Port {port} is not available ({err}). Choose another port.")
+            }
+        })?;
     let port = listener
         .local_addr()
         .map_err(|err| format!("Failed to read MCP server port: {err}"))?
@@ -347,6 +488,104 @@ pub(crate) async fn start_mcp_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn server(scope: McpScope) -> LumenfolioMcpServer {
+        LumenfolioMcpServer {
+            db_path: PathBuf::new(),
+            scope,
+            web_enabled: true,
+            citations: Arc::new(Mutex::new(Vec::new())),
+            candidates: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn seeded_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE documents (id TEXT PRIMARY KEY);
+             INSERT INTO documents (id) VALUES ('doc-a'), ('doc-b');",
+        )
+        .expect("seed");
+        conn
+    }
+
+    /// The in-app path must be untouched by the scope refactor: it keeps handing
+    /// the RAG layer its focus document and @-referenced whitelist, including for
+    /// an id it does not recognise (which that layer then silently falls back on —
+    /// the right behaviour when the caller is a model mid-turn).
+    #[test]
+    fn turn_scope_passes_its_focus_and_references_through() {
+        let conn = seeded_conn();
+        let handler = server(McpScope::Turn {
+            document_id: "doc-a".into(),
+            reference_document_ids: vec!["doc-b".into()],
+        });
+        let args = serde_json::json!({ "documentId": "made-up" });
+        let (document_id, references) = handler
+            .resolve_scope(&conn, "search_chunks", &args)
+            .expect("turn scope never rejects");
+        assert_eq!(document_id, "doc-a");
+        assert_eq!(references, vec!["doc-b".to_string()]);
+    }
+
+    /// The reason library scope exists: an external program that names a source
+    /// that is not there must be told, never quietly handed a different one.
+    #[test]
+    fn library_scope_rejects_an_unknown_document_instead_of_substituting() {
+        let conn = seeded_conn();
+        let handler = server(McpScope::Library);
+        let args = serde_json::json!({ "documentId": "doc-missing" });
+        let err = handler
+            .resolve_scope(&conn, "search_chunks", &args)
+            .expect_err("an unknown id must fail");
+        assert!(err.message.contains("doc-missing"), "{}", err.message);
+    }
+
+    #[test]
+    fn library_scope_resolves_a_known_document_and_whitelists_it() {
+        let conn = seeded_conn();
+        let handler = server(McpScope::Library);
+        let args = serde_json::json!({ "documentId": "doc-b" });
+        let (document_id, references) = handler
+            .resolve_scope(&conn, "search_chunks", &args)
+            .expect("known id resolves");
+        assert_eq!(document_id, "doc-b");
+        // Passed as the whitelist too, so the RAG layer's own guard agrees.
+        assert_eq!(references, vec!["doc-b".to_string()]);
+    }
+
+    #[test]
+    fn library_scope_requires_a_document_for_source_scoped_tools() {
+        let conn = seeded_conn();
+        let handler = server(McpScope::Library);
+        let err = handler
+            .resolve_scope(&conn, "search_chunks", &serde_json::json!({}))
+            .expect_err("a source-scoped tool needs a documentId");
+        // The message has to name the way out, since the caller is a program.
+        assert!(err.message.contains("list_sources"), "{}", err.message);
+    }
+
+    #[test]
+    fn library_scope_allows_library_wide_tools_without_a_document() {
+        let conn = seeded_conn();
+        let handler = server(McpScope::Library);
+        let (document_id, references) = handler
+            .resolve_scope(&conn, "search_library_knowledge", &serde_json::json!({}))
+            .expect("library-wide tools need no focus");
+        assert!(document_id.is_empty());
+        assert!(references.is_empty());
+    }
+
+    /// External clients must not be able to use this app as a network egress.
+    #[test]
+    fn web_tools_are_off_for_library_scope_even_when_enabled() {
+        assert!(server(McpScope::Turn {
+            document_id: "doc-a".into(),
+            reference_document_ids: Vec::new(),
+        })
+        .web_enabled_for_scope());
+        assert!(!server(McpScope::Library).web_enabled_for_scope());
+    }
 
     #[test]
     fn read_image_content_handles_valid_missing_and_empty() {
