@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::State;
+use tauri::{ipc::Response, State};
 
 #[cfg(unix)]
 use std::fs::File;
@@ -99,6 +99,16 @@ pub(crate) fn save_pdf_as(input: SavePdfAsInput) -> Result<Option<PdfSaveOutput>
 pub(crate) fn save_pdf_at_path(input: SavePdfAtPathInput) -> Result<PdfSaveOutput, String> {
     let path = canonical_existing_pdf_path(&input.path)?;
     write_pdf_to_existing_path(&path, &input.bytes)
+}
+
+/// Read a PDF the user previously selected through the native Save As flow.
+/// This is intentionally separate from `read_pdf_artifact_bytes`, whose path
+/// guard only admits pdf2zh cache artifacts.
+#[tauri::command]
+pub(crate) fn read_saved_pdf_bytes(path: String) -> Result<Response, String> {
+    let path = canonical_existing_pdf_path(&path)?;
+    let bytes = fs::read(&path).map_err(|err| format!("Failed to read saved PDF: {err}"))?;
+    Ok(Response::new(bytes))
 }
 
 fn require_document_id(raw: &str) -> Result<String, String> {

@@ -56,6 +56,10 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  pdfPathKind: {
+    type: String,
+    default: 'artifact', // artifact | file
+  },
   activePage: {
     type: Number,
     default: 1,
@@ -385,7 +389,7 @@ const linkedInteractionBlocked = computed(() => (
   })
 ))
 
-watch([() => props.document.id, () => props.pdfPath], loadPdf, { immediate: true })
+watch([() => props.document.id, () => props.pdfPath, () => props.pdfPathKind], loadPdf, { immediate: true })
 
 watch([currentPage, pageCount, scale, loading, error], emitViewerState)
 
@@ -495,7 +499,10 @@ async function loadPdf() {
   try {
     const _p0 = performance.now() // TEMP perf
     const bytes = props.pdfPath
-      ? await invoke('read_pdf_artifact_bytes', { path: props.pdfPath })
+      ? await invoke(
+        props.pdfPathKind === 'file' ? 'read_saved_pdf_bytes' : 'read_pdf_artifact_bytes',
+        { path: props.pdfPath },
+      )
       : await invoke('read_pdf_bytes', { docId: props.document.id })
     if (run !== loadRun) return
     const _pInvoke = performance.now() // TEMP perf

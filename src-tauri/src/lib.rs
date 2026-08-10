@@ -6352,6 +6352,7 @@ pub fn run() {
             pdf_annotation::save_pdf_document_as,
             pdf_annotation::save_pdf_as,
             pdf_annotation::save_pdf_at_path,
+            pdf_annotation::read_saved_pdf_bytes,
             pdf2zh_sidecar::read_pdf_artifact_bytes,
             pdf2zh_sidecar::probe_pdf_translation_runtime,
             pdf2zh_sidecar::start_pdf_translation,
