@@ -141,6 +141,7 @@ const emit = defineEmits([
 ])
 
 const showSource = ref(false)
+const readerPaneRoot = ref(null)
 const pdfViewerRef = ref(null)
 const translationPdfViewerRef = ref(null)
 const sourceAnnotationOpen = ref(false)
@@ -185,6 +186,7 @@ let linkedScrollSyncFrame = 0
 let translationDrivenPage = 0
 let translationDrivenPageTimer = null
 let translationListReadyFrame = 0
+let lastModifiedZoomAt = 0
 
 function loadPaneScrollLinkPreference() {
   try {
@@ -861,6 +863,38 @@ function zoomPdf(delta) {
   }
 }
 
+function canHandleModifiedPdfZoom(target) {
+  if (!isLocalPdf.value || !readerPaneRoot.value) return false
+  return target instanceof Node && readerPaneRoot.value.contains(target)
+}
+
+function isEditableElement(target) {
+  return target instanceof Element && Boolean(target.closest('input, textarea, select, [contenteditable="true"]'))
+}
+
+function handlePdfZoomShortcut(event) {
+  if (!(event.ctrlKey || event.metaKey) || !canHandleModifiedPdfZoom(event.target) || isEditableElement(event.target)) return
+  const key = event.key.toLowerCase()
+  const zoomIn = key === '+' || key === '=' || event.code === 'NumpadAdd'
+  const zoomOut = key === '-' || event.code === 'NumpadSubtract'
+  if (!zoomIn && !zoomOut) return
+  event.preventDefault()
+  event.stopPropagation()
+  zoomPdf(zoomIn ? 0.12 : -0.12)
+}
+
+function handlePdfZoomWheel(event) {
+  if (!(event.ctrlKey || event.metaKey) || !canHandleModifiedPdfZoom(event.target)) return
+  event.preventDefault()
+  event.stopPropagation()
+  const now = performance.now()
+  // High-resolution touchpads emit many wheel events per gesture. Keep zooming
+  // responsive while avoiding a jump from 100% to the clamp in one flick.
+  if (now - lastModifiedZoomAt < 70) return
+  lastModifiedZoomAt = now
+  zoomPdf(event.deltaY < 0 ? 0.12 : -0.12)
+}
+
 function openAnnotation(target) {
   if (target === 'translation') {
     if (!effectiveTranslationArtifactPath.value) return
@@ -906,10 +940,17 @@ function isTranslationPageLoaded(translation) {
 onMounted(() => {
   // eslint-disable-next-line no-console
   console.log(`[pdf-perf] ReaderPane MOUNTED doc=${props.document?.id}`)
+  window.addEventListener('keydown', handlePdfZoomShortcut, true)
+  readerPaneRoot.value?.addEventListener('wheel', handlePdfZoomWheel, {
+    capture: true,
+    passive: false,
+  })
   scheduleTranslationObserverRefresh()
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handlePdfZoomShortcut, true)
+  readerPaneRoot.value?.removeEventListener('wheel', handlePdfZoomWheel, true)
   if (translationPageObserver) translationPageObserver.disconnect()
   if (translationVisibleLoadFrame) window.cancelAnimationFrame(translationVisibleLoadFrame)
   if (translationScrollSyncFrame) window.cancelAnimationFrame(translationScrollSyncFrame)
@@ -1018,7 +1059,7 @@ watch(translationArtifactActivePage, async () => {
 </script>
 
 <template>
-  <section class="reader-pane">
+  <section ref="readerPaneRoot" class="reader-pane">
     <div class="reader-chrome">
       <!-- Row 1: thin title bar = window drag region + the active document name. -->
       <div class="reader-titlebar" data-tauri-drag-region @mousedown="startWindowDrag">

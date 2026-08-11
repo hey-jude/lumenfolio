@@ -15,7 +15,18 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl
 const MIN_SCALE = 0.7
 const MAX_SCALE = 2.4
 const DEFAULT_SCALE = 1.18
-const { AnnotationEditorType } = pdfjsLib
+const { AnnotationEditorParamsType, AnnotationEditorType } = pdfjsLib
+
+const HIGHLIGHT_COLORS = [
+  { value: '#facc15', labelKey: 'annotationColorYellow' },
+  { value: '#84cc16', labelKey: 'annotationColorGreen' },
+  { value: '#ef4444', labelKey: 'annotationColorRed' },
+]
+const DRAWING_COLORS = [
+  { value: '#dc2626', labelKey: 'annotationColorRed' },
+  { value: '#2563eb', labelKey: 'annotationColorBlue' },
+  { value: '#111827', labelKey: 'annotationColorBlack' },
+]
 
 const props = defineProps({
   document: {
@@ -73,6 +84,11 @@ const canUndo = ref(false)
 const canRedo = ref(false)
 const canDelete = ref(false)
 const savedPath = ref('')
+const selectedColors = ref({
+  highlight: HIGHLIGHT_COLORS[0].value,
+  freetext: DRAWING_COLORS[0].value,
+  ink: DRAWING_COLORS[0].value,
+})
 
 let eventBus = null
 let linkService = null
@@ -80,6 +96,8 @@ let loadTask = null
 let loadRun = 0
 let mounted = false
 let shortcutInstalled = false
+let desiredTool = AnnotationEditorType.NONE
+let toolSyncTask = null
 
 const isTranslationTarget = computed(() => props.target === 'translation')
 const saveLabel = computed(() => label('annotationSave', 'Save'))
@@ -91,6 +109,20 @@ const toolItems = computed(() => [
   { id: 'text', mode: AnnotationEditorType.FREETEXT, label: label('annotationText', 'Text') },
   { id: 'ink', mode: AnnotationEditorType.INK, label: label('annotationDraw', 'Draw') },
 ])
+const activeColorGroup = computed(() => {
+  if (activeTool.value === AnnotationEditorType.HIGHLIGHT) return 'highlight'
+  if (activeTool.value === AnnotationEditorType.FREETEXT) return 'freetext'
+  if (activeTool.value === AnnotationEditorType.INK) return 'ink'
+  return ''
+})
+const activeColorPalette = computed(() => (
+  activeColorGroup.value === 'highlight' ? HIGHLIGHT_COLORS
+    : activeColorGroup.value ? DRAWING_COLORS
+      : []
+))
+const activeColor = computed(() => (
+  activeColorGroup.value ? selectedColors.value[activeColorGroup.value] : ''
+))
 const toolbarStatus = computed(() => {
   if (saving.value) return label('annotationSaving', 'Saving…')
   if (error.value) return error.value
@@ -152,6 +184,7 @@ async function loadPdf() {
   currentPage.value = 1
   pageCount.value = 0
   activeTool.value = AnnotationEditorType.NONE
+  desiredTool = AnnotationEditorType.NONE
 
   try {
     const bytes = await readPdfBytes()
@@ -163,6 +196,11 @@ async function loadPdf() {
       if (run !== loadRun) return
       editorManager.value = uiManager
       installShortcutHandler()
+    })
+    eventBus.on('annotationeditormodechanged', ({ mode }) => {
+      if (run !== loadRun) return
+      activeTool.value = mode
+      applyDefaultColor(mode)
     })
     eventBus.on('editingstateschanged', ({ details }) => {
       if (run !== loadRun) return
@@ -257,11 +295,113 @@ function destroyPdf() {
 }
 
 function setTool(mode) {
-  const viewer = pdfViewer.value
-  if (!viewer) return
+  desiredTool = mode
   error.value = ''
-  activeTool.value = mode
-  viewer.annotationEditorMode = { mode }
+  if (toolSyncTask) return toolSyncTask
+  toolSyncTask = synchronizeRequestedTool().finally(() => {
+    toolSyncTask = null
+    if (mounted && pdfViewer.value && activeTool.value !== desiredTool) {
+      void setTool(desiredTool)
+    }
+  })
+  return toolSyncTask
+}
+
+async function synchronizeRequestedTool() {
+  while (mounted && pdfViewer.value && activeTool.value !== desiredTool) {
+    const viewer = pdfViewer.value
+    const mode = desiredTool
+    const enteringEditMode = viewer.annotationEditorMode === AnnotationEditorType.NONE
+      && mode !== AnnotationEditorType.NONE
+    const changed = await switchAnnotationEditorMode(viewer, mode, enteringEditMode)
+    if (!changed) break
+  }
+}
+
+function switchAnnotationEditorMode(viewer, mode, enteringEditMode = false) {
+  if (viewer.annotationEditorMode === mode) {
+    activeTool.value = mode
+    applyDefaultColor(mode)
+    return Promise.resolve(true)
+  }
+
+  return new Promise((resolve) => {
+    let settled = false
+    const complete = (applied) => {
+      if (settled) return
+      settled = true
+      window.clearTimeout(timeoutId)
+      eventBus?.off('annotationeditormodechanged', onModeChanged)
+      if (applied) {
+        activeTool.value = mode
+        applyDefaultColor(mode)
+      }
+      resolve(applied)
+    }
+    const onModeChanged = ({ mode: changedMode }) => {
+      if (changedMode === mode) complete(true)
+    }
+    const timeoutId = window.setTimeout(async () => {
+      // A page can be removed by PDF.js virtualization between the editing-mode
+      // refresh and its pagerendered notification. Drive the public UI manager
+      // directly as a recovery path instead of leaving its old tool active.
+      try {
+        await editorManager.value?.updateMode?.(mode, null, true)
+        complete(true)
+      } catch (err) {
+        error.value = err?.message || String(err)
+        complete(false)
+      }
+    }, 1400)
+
+    eventBus?.on('annotationeditormodechanged', onModeChanged)
+    try {
+      viewer.annotationEditorMode = { mode }
+      // PDF.js defers entering edit mode until every visible editable page has
+      // rerendered. Refresh immediately so virtualized page views dispatch the
+      // pagerendered events that complete that switch.
+      if (enteringEditMode) viewer.refresh()
+    } catch (err) {
+      error.value = err?.message || String(err)
+      complete(false)
+    }
+  })
+}
+
+function colorParamForMode(mode) {
+  if (mode === AnnotationEditorType.HIGHLIGHT) return AnnotationEditorParamsType.HIGHLIGHT_COLOR
+  if (mode === AnnotationEditorType.FREETEXT) return AnnotationEditorParamsType.FREETEXT_COLOR
+  if (mode === AnnotationEditorType.INK) return AnnotationEditorParamsType.INK_COLOR
+  return null
+}
+
+function applyDefaultColor(mode) {
+  const param = colorParamForMode(mode)
+  if (!param) return
+  const group = mode === AnnotationEditorType.HIGHLIGHT
+    ? 'highlight'
+    : mode === AnnotationEditorType.FREETEXT ? 'freetext' : 'ink'
+  editorManager.value?.updateParams?.(param, selectedColors.value[group])
+}
+
+function setColor(color) {
+  const group = activeColorGroup.value
+  const param = colorParamForMode(activeTool.value)
+  if (!group || !param) return
+  selectedColors.value[group] = color
+  editorManager.value?.updateParams?.(param, color)
+}
+
+function handleInkPointerDown(event) {
+  if (activeTool.value !== AnnotationEditorType.INK) return
+  if (event.pointerType !== 'pen' && event.pointerType !== 'touch') return
+  event.preventDefault()
+  const target = event.target
+  target?.setPointerCapture?.(event.pointerId)
+}
+
+function preventInkContextMenu(event) {
+  if (activeTool.value === AnnotationEditorType.INK) event.preventDefault()
 }
 
 function undo() {
@@ -450,30 +590,94 @@ defineExpose({
           v-for="tool in toolItems"
           :key="tool.id"
           type="button"
-          class="annotation-tool"
+          class="annotation-tool icon-only"
           :class="{ active: activeTool === tool.mode }"
           :title="tool.label"
           :aria-label="tool.label"
           :aria-pressed="activeTool === tool.mode"
           @click="setTool(tool.mode)"
-        >{{ tool.label }}</button>
+        >
+          <svg v-if="tool.id === 'select'" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 3.5 18.2 12 12 13.8l-2.8 6.7L5 3.5Z" />
+            <path d="m12.4 13.7 4.2 5" />
+          </svg>
+          <svg v-else-if="tool.id === 'highlight'" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m5 15 8.8-8.8 4 4L9 19H5v-4Z" />
+            <path d="m12.3 6.5 4 4" />
+            <path d="M4 21h16" />
+          </svg>
+          <svg v-else-if="tool.id === 'text'" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M5 5h14" />
+            <path d="M12 5v14" />
+            <path d="M8.5 19h7" />
+          </svg>
+          <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m4 17 10.8-10.8 4 4L8 21H4v-4Z" />
+            <path d="m13.5 6.3 4 4" />
+            <path d="M3 21c3.8-1.1 7.6-1.1 11.4 0" />
+          </svg>
+          <span class="sr-only">{{ tool.label }}</span>
+        </button>
         <span class="annotation-divider" aria-hidden="true"></span>
         <button
           type="button"
-          class="annotation-tool danger"
+          class="annotation-tool icon-only danger"
           :disabled="!canDelete"
           :title="label('annotationErase', 'Delete selected annotation')"
           :aria-label="label('annotationErase', 'Delete selected annotation')"
           @click="eraseSelection"
-        >{{ label('annotationErase', 'Erase') }}</button>
-        <button type="button" class="annotation-tool" :disabled="!canUndo" :title="label('annotationUndo', 'Undo')" @click="undo">
-          {{ label('annotationUndo', 'Undo') }}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m7 15 7.5-7.5 5 5L12 20H7v-5Z" />
+            <path d="m4 20h16" />
+          </svg>
+          <span class="sr-only">{{ label('annotationErase', 'Erase') }}</span>
         </button>
-        <button type="button" class="annotation-tool" :disabled="!canRedo" :title="label('annotationRedo', 'Redo')" @click="redo">
-          {{ label('annotationRedo', 'Redo') }}
+        <button
+          type="button"
+          class="annotation-tool icon-only"
+          :disabled="!canUndo"
+          :title="label('annotationUndo', 'Undo')"
+          :aria-label="label('annotationUndo', 'Undo')"
+          @click="undo"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m9 8-5 4 5 4" />
+            <path d="M5 12h9a5 5 0 0 1 5 5v1" />
+          </svg>
+          <span class="sr-only">{{ label('annotationUndo', 'Undo') }}</span>
+        </button>
+        <button
+          type="button"
+          class="annotation-tool icon-only"
+          :disabled="!canRedo"
+          :title="label('annotationRedo', 'Redo')"
+          :aria-label="label('annotationRedo', 'Redo')"
+          @click="redo"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m15 8 5 4-5 4" />
+            <path d="M19 12h-9a5 5 0 0 0-5 5v1" />
+          </svg>
+          <span class="sr-only">{{ label('annotationRedo', 'Redo') }}</span>
         </button>
       </div>
       <div class="annotation-actions">
+        <div v-if="activeColorPalette.length" class="annotation-color-picker" role="radiogroup" :aria-label="label('annotationColor', 'Annotation color')">
+          <button
+            v-for="color in activeColorPalette"
+            :key="color.value"
+            type="button"
+            class="annotation-color"
+            :class="{ active: activeColor === color.value }"
+            :style="{ '--annotation-color': color.value }"
+            :title="label(color.labelKey, color.value)"
+            :aria-label="label(color.labelKey, color.value)"
+            :aria-checked="activeColor === color.value"
+            role="radio"
+            @click="setColor(color.value)"
+          ><span aria-hidden="true"></span></button>
+        </div>
         <span class="annotation-status" :class="{ error: error, dirty }">{{ toolbarStatus }}</span>
         <button type="button" class="annotation-action" :disabled="saving || loading" @click="save()">{{ saveLabel }}</button>
         <button type="button" class="annotation-action" :disabled="saving || loading" @click="save({ saveAs: true })">{{ saveAsLabel }}</button>
@@ -482,7 +686,16 @@ defineExpose({
     </header>
     <div v-if="loading" class="annotation-placeholder">{{ label('pdfLoading', 'Loading PDF...') }}</div>
     <div v-else-if="error && !pdfDocument" class="annotation-placeholder error">{{ label('pdfLoadFailed', 'PDF failed to load') }}: {{ error }}</div>
-    <div ref="container" class="annotation-pdf-container" :class="{ hidden: loading || (error && !pdfDocument) }">
+    <div
+      ref="container"
+      class="annotation-pdf-container"
+      :class="{
+        hidden: loading || (error && !pdfDocument),
+        'is-ink': activeTool === AnnotationEditorType.INK,
+      }"
+      @contextmenu.capture="preventInkContextMenu"
+      @pointerdown.capture="handleInkPointerDown"
+    >
       <div ref="viewerElement" class="pdfViewer"></div>
     </div>
   </section>
@@ -537,6 +750,33 @@ defineExpose({
   white-space: nowrap;
 }
 
+.annotation-tool.icon-only {
+  display: inline-grid;
+  width: 30px;
+  min-width: 30px;
+  place-items: center;
+  padding: 0;
+}
+
+.annotation-tool.icon-only svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
 .annotation-tool:hover:not(:disabled),
 .annotation-action:hover:not(:disabled) {
   border-color: rgba(96, 165, 250, 0.52);
@@ -570,6 +810,44 @@ defineExpose({
   background: rgba(148, 163, 184, 0.22);
 }
 
+.annotation-color-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 3px;
+}
+
+.annotation-color {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.annotation-color span {
+  width: 14px;
+  height: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: 50%;
+  background: var(--annotation-color);
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.45);
+}
+
+.annotation-color:hover,
+.annotation-color.active {
+  border-color: rgba(255, 255, 255, 0.85);
+  background: rgba(148, 163, 184, 0.16);
+}
+
+.annotation-color.active span {
+  box-shadow: 0 0 0 2px #1e293b, 0 0 0 3px #e2e8f0;
+}
+
 .annotation-status {
   max-width: 150px;
   overflow: hidden;
@@ -587,6 +865,19 @@ defineExpose({
   inset: 42px 0 0;
   overflow: auto;
   background: #3b4049;
+}
+
+/* Let PDF.js receive the complete pointer stream. WebView otherwise treats
+   touch/pen movement as pan/long-press gestures before Ink can consume it. */
+.annotation-pdf-container.is-ink,
+.annotation-pdf-container.is-ink :deep(.annotationEditorLayer),
+.annotation-pdf-container.is-ink :deep(.annotationEditorLayer *) {
+  touch-action: none !important;
+  overscroll-behavior: contain;
+}
+
+.annotation-pdf-container.is-ink :deep(.annotationEditorLayer) {
+  cursor: crosshair;
 }
 
 .annotation-pdf-container.hidden {
