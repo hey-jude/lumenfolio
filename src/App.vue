@@ -5732,7 +5732,8 @@ onMounted(() => {
     </div>
 
     <div v-else-if="!showTrending && !showGraph && !conversationCentered" class="reader-column">
-    <ReaderPane
+    <KeepAlive>
+      <ReaderPane
       :key="`${selectedDocument.id}:${viewerReloadKey}`"
       :document="selectedDocument"
       :translation-languages="translationLanguages"
@@ -5790,6 +5791,7 @@ onMounted(() => {
         />
       </template>
     </ReaderPane>
+    </KeepAlive>
     </div>
 
     <div v-if="!rightCollapsed && !conversationCentered" class="drag-handle" @mousedown.prevent="startResize" />

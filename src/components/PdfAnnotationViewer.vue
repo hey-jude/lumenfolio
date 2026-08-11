@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs'
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url'
@@ -89,6 +89,12 @@ const selectedColors = ref({
   freetext: DRAWING_COLORS[0].value,
   ink: DRAWING_COLORS[0].value,
 })
+const customColors = ref({
+  highlight: [],
+  freetext: [],
+  ink: [],
+})
+const customColorInput = ref(null)
 
 let eventBus = null
 let linkService = null
@@ -98,6 +104,7 @@ let mounted = false
 let shortcutInstalled = false
 let desiredTool = AnnotationEditorType.NONE
 let toolSyncTask = null
+let customColorGroup = ''
 
 const isTranslationTarget = computed(() => props.target === 'translation')
 const saveLabel = computed(() => label('annotationSave', 'Save'))
@@ -115,11 +122,15 @@ const activeColorGroup = computed(() => {
   if (activeTool.value === AnnotationEditorType.INK) return 'ink'
   return ''
 })
-const activeColorPalette = computed(() => (
-  activeColorGroup.value === 'highlight' ? HIGHLIGHT_COLORS
-    : activeColorGroup.value ? DRAWING_COLORS
-      : []
-))
+const activeColorPalette = computed(() => {
+  const group = activeColorGroup.value
+  if (!group) return []
+  const defaults = group === 'highlight' ? HIGHLIGHT_COLORS : DRAWING_COLORS
+  return [
+    ...defaults,
+    ...customColors.value[group].map((value) => ({ value, labelKey: 'annotationCustomColor' })),
+  ]
+})
 const activeColor = computed(() => (
   activeColorGroup.value ? selectedColors.value[activeColorGroup.value] : ''
 ))
@@ -392,6 +403,21 @@ function setColor(color) {
   editorManager.value?.updateParams?.(param, color)
 }
 
+function openCustomColorPicker() {
+  if (!activeColorGroup.value) return
+  customColorGroup = activeColorGroup.value
+  customColorInput.value?.click()
+}
+
+function addCustomColor(event) {
+  const group = customColorGroup
+  const color = String(event.target?.value || '').trim().toLowerCase()
+  if (!group || !/^#[0-9a-f]{6}$/.test(color)) return
+  const exists = activeColorPalette.value.some((item) => item.value.toLowerCase() === color)
+  if (!exists) customColors.value[group].push(color)
+  setColor(color)
+}
+
 function handleInkPointerDown(event) {
   if (activeTool.value !== AnnotationEditorType.INK) return
   if (event.pointerType !== 'pen' && event.pointerType !== 'touch') return
@@ -568,6 +594,15 @@ onMounted(async () => {
   loadPdf()
 })
 
+onActivated(() => {
+  nextTick(() => {
+    if (!pdfViewer.value) return
+    pdfViewer.value.currentScale = scale.value
+    pdfViewer.value.refresh()
+    emitViewerState()
+  })
+})
+
 onBeforeUnmount(() => {
   mounted = false
   loadRun += 1
@@ -677,6 +712,17 @@ defineExpose({
             role="radio"
             @click="setColor(color.value)"
           ><span aria-hidden="true"></span></button>
+          <button
+            type="button"
+            class="annotation-color annotation-color-add"
+            :title="label('annotationAddColor', 'Add color')"
+            :aria-label="label('annotationAddColor', 'Add color')"
+            @click="openCustomColorPicker"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            <span class="sr-only">{{ label('annotationAddColor', 'Add color') }}</span>
+          </button>
+          <input ref="customColorInput" class="native-color-input" type="color" value="#2563eb" tabindex="-1" @change="addCustomColor" />
         </div>
         <span class="annotation-status" :class="{ error: error, dirty }">{{ toolbarStatus }}</span>
         <button type="button" class="annotation-action" :disabled="saving || loading" @click="save()">{{ saveLabel }}</button>
@@ -691,6 +737,9 @@ defineExpose({
       class="annotation-pdf-container"
       :class="{
         hidden: loading || (error && !pdfDocument),
+        'is-creating': activeTool === AnnotationEditorType.HIGHLIGHT
+          || activeTool === AnnotationEditorType.FREETEXT
+          || activeTool === AnnotationEditorType.INK,
         'is-ink': activeTool === AnnotationEditorType.INK,
       }"
       @contextmenu.capture="preventInkContextMenu"
@@ -848,6 +897,27 @@ defineExpose({
   box-shadow: 0 0 0 2px #1e293b, 0 0 0 3px #e2e8f0;
 }
 
+.annotation-color-add {
+  color: #cbd5e1;
+}
+
+.annotation-color-add svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-width: 2;
+}
+
+.native-color-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 .annotation-status {
   max-width: 150px;
   overflow: hidden;
@@ -865,6 +935,16 @@ defineExpose({
   inset: 42px 0 0;
   overflow: auto;
   background: #3b4049;
+}
+
+/* Selection is explicit. While a creation tool is active, existing editors are
+   transparent to the pointer so a click or stroke always creates at that spot. */
+.annotation-pdf-container.is-creating :deep(.annotationEditorLayer > :is(.freeTextEditor, .inkEditor, .highlightEditor, .stampEditor, .signatureEditor)) {
+  pointer-events: none !important;
+}
+
+.annotation-pdf-container.is-creating :deep(.annotationEditorLayer .editToolbar) {
+  pointer-events: none !important;
 }
 
 /* Let PDF.js receive the complete pointer stream. WebView otherwise treats

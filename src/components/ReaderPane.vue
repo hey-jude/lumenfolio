@@ -147,6 +147,7 @@ const translationPdfViewerRef = ref(null)
 const sourceAnnotationOpen = ref(false)
 const translationAnnotationOpen = ref(false)
 const savedTranslationPdfPath = ref('')
+const pendingTranslationPdfPath = ref('')
 const sourceViewerReloadKey = ref(0)
 const translationViewerReloadKey = ref(0)
 const translationScrollRef = ref(null)
@@ -907,18 +908,23 @@ function openAnnotation(target) {
   paneScrollLinked.value = false
 }
 
-function closeAnnotation(target) {
-  if (target === 'translation') translationAnnotationOpen.value = false
-  else sourceAnnotationOpen.value = false
+function closeAnnotation(target, payload = {}) {
+  if (target === 'translation') {
+    const savedPath = payload?.path || pendingTranslationPdfPath.value
+    if (savedPath) savedTranslationPdfPath.value = savedPath
+    pendingTranslationPdfPath.value = ''
+    translationAnnotationOpen.value = false
+  } else {
+    sourceAnnotationOpen.value = false
+  }
 }
 
 function handleAnnotationSaved(payload) {
   if (payload?.target === 'translation' && payload.path) {
-    savedTranslationPdfPath.value = payload.path
-    translationViewerReloadKey.value += 1
-  }
-  if (payload?.target === 'source') {
-    sourceViewerReloadKey.value += 1
+    // Keep the active editor bound to its original bytes until it closes. This
+    // preserves its command stack and avoids destroying PDF.js page layers in
+    // the same turn that saveDocument resolves.
+    pendingTranslationPdfPath.value = payload.path
   }
 }
 
@@ -1039,16 +1045,11 @@ watch(paneScrollLinkPreference, (preferred) => {
 
 watch(translationArtifactPath, async (path) => {
   savedTranslationPdfPath.value = ''
+  pendingTranslationPdfPath.value = ''
   translationAnnotationOpen.value = false
   if (!path) return
   await nextTick()
   syncTranslationArtifactToActivePage()
-})
-
-watch(() => props.document.id, () => {
-  sourceAnnotationOpen.value = false
-  translationAnnotationOpen.value = false
-  savedTranslationPdfPath.value = ''
 })
 
 watch(translationArtifactActivePage, async () => {
@@ -1230,7 +1231,7 @@ watch(translationArtifactActivePage, async () => {
               @page-change="emit('select-page', $event)"
               @state-change="updatePdfViewerState($event, 'source')"
               @saved="handleAnnotationSaved"
-              @close="closeAnnotation('source')"
+              @close="closeAnnotation('source', $event)"
             />
             <PdfViewer
               v-else
@@ -1330,7 +1331,7 @@ watch(translationArtifactActivePage, async () => {
               @page-change="handleTranslationArtifactPageChange"
               @state-change="updatePdfViewerState($event, 'artifact')"
               @saved="handleAnnotationSaved"
-              @close="closeAnnotation('translation')"
+              @close="closeAnnotation('translation', $event)"
             />
             <PdfViewer
               v-else-if="translationArtifactPath"
