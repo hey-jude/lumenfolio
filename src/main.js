@@ -8,13 +8,14 @@ const params = new URLSearchParams(window.location.search)
 const harnessName = params.get('harness') || ''
 const useE2eHarness = import.meta.env.DEV
   && import.meta.env.VITE_E2E === '1'
-  && ['translation-linking', 'pdf-sidecar'].includes(harnessName)
+  && ['translation-linking', 'pdf-sidecar', 'pdf-annotation'].includes(harnessName)
 
 async function resolveRootComponent() {
   if (!useE2eHarness) return App
   const harnesses = {
     'translation-linking': () => import('./e2e/TranslationLinkingHarness.vue'),
     'pdf-sidecar': () => import('./e2e/PdfSidecarHarness.vue'),
+    'pdf-annotation': () => import('./e2e/PdfAnnotationHarness.vue'),
   }
   const { default: Harness } = await harnesses[harnessName]()
   return Harness

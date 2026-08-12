@@ -16,6 +16,11 @@ const MIN_SCALE = 0.7
 const MAX_SCALE = 2.4
 const DEFAULT_SCALE = 1.18
 const { AnnotationEditorParamsType, AnnotationEditorType } = pdfjsLib
+const SELECT_TOOL = 'select'
+// Keep PDF.js in an editing mode while the logical Select tool is active.
+// Switching through NONE tears down editable page state and can wait forever
+// for rerenders on PDFs that already contain annotations.
+const SELECT_BACKING_MODE = AnnotationEditorType.HIGHLIGHT
 
 const HIGHLIGHT_COLORS = [
   { value: '#facc15', labelKey: 'annotationColorYellow' },
@@ -76,7 +81,8 @@ const loading = ref(false)
 const error = ref('')
 const saving = ref(false)
 const dirty = ref(false)
-const activeTool = ref(AnnotationEditorType.NONE)
+const activeTool = ref(SELECT_TOOL)
+const editorReady = ref(false)
 const currentPage = ref(1)
 const pageCount = ref(0)
 const scale = ref(DEFAULT_SCALE)
@@ -84,6 +90,7 @@ const canUndo = ref(false)
 const canRedo = ref(false)
 const canDelete = ref(false)
 const savedPath = ref('')
+const editRevision = ref(0)
 const selectedColors = ref({
   highlight: HIGHLIGHT_COLORS[0].value,
   freetext: DRAWING_COLORS[0].value,
@@ -102,16 +109,25 @@ let loadTask = null
 let loadRun = 0
 let mounted = false
 let shortcutInstalled = false
-let desiredTool = AnnotationEditorType.NONE
+let desiredTool = SELECT_TOOL
 let toolSyncTask = null
+let cancelPendingToolSwitch = null
 let customColorGroup = ''
+let annotationStorage = null
+let annotationModifiedHandler = null
+let previousAnnotationModifiedHandler = null
+let annotationDirtyTrackingReady = false
+let pdfDestroyTask = Promise.resolve()
+let savedAnnotationHash = ''
+let observedAnnotationHash = ''
+let saveRun = 0
 
 const isTranslationTarget = computed(() => props.target === 'translation')
 const saveLabel = computed(() => label('annotationSave', 'Save'))
 const saveAsLabel = computed(() => label('annotationSaveAs', 'Save as'))
 const exitLabel = computed(() => label('annotationExit', 'Exit annotation'))
 const toolItems = computed(() => [
-  { id: 'select', mode: AnnotationEditorType.NONE, label: label('annotationSelect', 'Select') },
+  { id: SELECT_TOOL, mode: SELECT_TOOL, label: label('annotationSelect', 'Select') },
   { id: 'highlight', mode: AnnotationEditorType.HIGHLIGHT, label: label('annotationHighlight', 'Highlight') },
   { id: 'text', mode: AnnotationEditorType.FREETEXT, label: label('annotationText', 'Text') },
   { id: 'ink', mode: AnnotationEditorType.INK, label: label('annotationDraw', 'Draw') },
@@ -152,22 +168,28 @@ function clamp(value, min, max) {
 function installShortcutHandler() {
   if (shortcutInstalled) return
   shortcutInstalled = true
-  window.addEventListener('keydown', handleShortcut)
+  window.addEventListener('keydown', handleShortcut, true)
 }
 
 function removeShortcutHandler() {
   if (!shortcutInstalled) return
   shortcutInstalled = false
-  window.removeEventListener('keydown', handleShortcut)
+  window.removeEventListener('keydown', handleShortcut, true)
 }
 
 function handleShortcut(event) {
   const target = event.target instanceof Element ? event.target : null
-  if (!target || !root.value?.contains(target) || event.defaultPrevented) return
+  if (!target || !root.value?.contains(target)) return
+  if (saving.value) {
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    return
+  }
+  if (event.defaultPrevented) return
   if (target.closest('input, textarea, [contenteditable="true"]')) return
   // PDF.js owns shortcuts while a drawing/text tool is active. Its Select mode
   // intentionally disables that listener, so provide the same commands there.
-  if (activeTool.value !== AnnotationEditorType.NONE) return
+  if (activeTool.value !== SELECT_TOOL || container.value?.contains(target)) return
 
   const modifier = event.ctrlKey || event.metaKey
   if (!modifier) return
@@ -185,17 +207,25 @@ function handleShortcut(event) {
 async function loadPdf() {
   if (!mounted || !container.value || !viewerElement.value) return
   const run = ++loadRun
-  destroyPdf()
+  saving.value = false
+  await destroyPdf()
+  if (run !== loadRun) return
   loading.value = true
   error.value = ''
   dirty.value = false
+  savedPath.value = isTranslationTarget.value && props.pdfPathKind === 'file' ? props.pdfPath : ''
   canUndo.value = false
   canRedo.value = false
   canDelete.value = false
+  editRevision.value = 0
+  savedAnnotationHash = ''
+  observedAnnotationHash = ''
   currentPage.value = 1
   pageCount.value = 0
-  activeTool.value = AnnotationEditorType.NONE
-  desiredTool = AnnotationEditorType.NONE
+  activeTool.value = SELECT_TOOL
+  editorReady.value = false
+  annotationDirtyTrackingReady = false
+  desiredTool = SELECT_TOOL
 
   try {
     const bytes = await readPdfBytes()
@@ -208,19 +238,35 @@ async function loadPdf() {
       editorManager.value = uiManager
       installShortcutHandler()
     })
+    eventBus.on('annotationeditorlayerrendered', () => {
+      if (run !== loadRun || annotationDirtyTrackingReady) return
+      queueMicrotask(() => {
+        if (run !== loadRun || annotationDirtyTrackingReady) return
+        // Existing editors hydrate annotationStorage when their page becomes
+        // visible. Treat the first editor layer as the initial saved baseline.
+        pdfDocument.value?.annotationStorage?.resetModified?.()
+        savedAnnotationHash = annotationHash(pdfDocument.value)
+        observedAnnotationHash = savedAnnotationHash
+        dirty.value = false
+        annotationDirtyTrackingReady = true
+      })
+    })
     eventBus.on('annotationeditormodechanged', ({ mode }) => {
       if (run !== loadRun) return
-      activeTool.value = mode
-      applyDefaultColor(mode)
+      editorReady.value = true
+      if (editorModeForTool(desiredTool) === mode) {
+        activeTool.value = desiredTool
+        error.value = ''
+        applyDefaultColorForTool(desiredTool, mode, editorManager.value)
+      }
+
     })
     eventBus.on('editingstateschanged', ({ details }) => {
       if (run !== loadRun) return
       canUndo.value = Boolean(details?.hasSomethingToUndo)
       canRedo.value = Boolean(details?.hasSomethingToRedo)
       canDelete.value = Boolean(details?.hasSelectedEditor)
-      // Initial editor setup reports an empty state. All later command-state
-      // changes represent a user edit, undo, redo, or selection transition.
-      if (details?.hasSomethingToUndo || details?.hasSomethingToRedo) dirty.value = true
+      queueMicrotask(() => updateDirtyFromStorage(run))
       emitViewerState()
     })
     eventBus.on('pagechanging', ({ pageNumber }) => {
@@ -244,7 +290,11 @@ async function loadPdf() {
     loadTask = task
     const document = await task.promise
     if (run !== loadRun) {
-      document.destroy?.()
+      try {
+        await document.destroy?.()
+      } catch {
+        // A newer load already owns the viewer and worker lifecycle.
+      }
       return
     }
 
@@ -253,10 +303,11 @@ async function loadPdf() {
       viewer: viewerElement.value,
       eventBus,
       linkService,
-      annotationEditorMode: AnnotationEditorType.NONE,
+      annotationEditorMode: SELECT_BACKING_MODE,
       annotationMode: pdfjsLib.AnnotationMode.ENABLE_FORMS,
     })
     pdfDocument.value = document
+    bindAnnotationStorage(document, run)
     pdfViewer.value = viewer
     linkService.setViewer(viewer)
     linkService.setDocument(document)
@@ -291,87 +342,158 @@ async function readPdfBytes() {
 }
 
 function destroyPdf() {
+  saveRun += 1
+  cancelPendingToolSwitch?.()
+  cancelPendingToolSwitch = null
+  toolSyncTask = null
+  unbindAnnotationStorage()
+  annotationDirtyTrackingReady = false
   removeShortcutHandler()
+  editorReady.value = false
   editorManager.value = null
   eventBus = null
   linkService = null
-  loadTask?.destroy?.()
+  const task = loadTask
+  const document = pdfDocument.value
   loadTask = null
   pdfViewer.value?.cleanup?.()
   pdfViewer.value?.setDocument?.(null)
   pdfViewer.value = null
-  pdfDocument.value?.destroy?.()
   pdfDocument.value = null
   if (viewerElement.value) viewerElement.value.replaceChildren()
+  const previousDestroy = pdfDestroyTask
+  pdfDestroyTask = (async () => {
+    await previousDestroy.catch(() => {})
+    try {
+      if (task?.destroy) await task.destroy()
+      else await document?.destroy?.()
+    } catch {
+      // A cancelled loading task can reject while it is already terminating.
+    }
+  })()
+  return pdfDestroyTask
+}
+
+function bindAnnotationStorage(document, run) {
+  unbindAnnotationStorage()
+  const storage = document?.annotationStorage
+  if (!storage) return
+  const previous = storage.onSetModified
+  const onModified = () => {
+    previous?.call(storage)
+    if (run !== loadRun || !annotationDirtyTrackingReady) return
+    queueMicrotask(() => updateDirtyFromStorage(run))
+  }
+  annotationStorage = storage
+  annotationModifiedHandler = onModified
+  previousAnnotationModifiedHandler = previous
+  storage.onSetModified = onModified
+}
+
+function unbindAnnotationStorage() {
+  if (annotationStorage?.onSetModified === annotationModifiedHandler) {
+    annotationStorage.onSetModified = previousAnnotationModifiedHandler
+  }
+  annotationStorage = null
+  annotationModifiedHandler = null
+  previousAnnotationModifiedHandler = null
+}
+
+function annotationHash(document = pdfDocument.value) {
+  return document?.annotationStorage?.serializable?.hash || ''
+}
+
+function updateDirtyFromStorage(run = loadRun) {
+  if (run !== loadRun || !annotationDirtyTrackingReady || !pdfDocument.value) return
+  const hash = annotationHash(pdfDocument.value)
+  if (hash !== observedAnnotationHash) {
+    observedAnnotationHash = hash
+    editRevision.value += 1
+  }
+  dirty.value = hash !== savedAnnotationHash
+  emitViewerState()
 }
 
 function setTool(mode) {
+  if (saving.value) return Promise.resolve(false)
   desiredTool = mode
   error.value = ''
+  if (!editorReady.value || !editorManager.value || !pdfViewer.value) return Promise.resolve(false)
   if (toolSyncTask) return toolSyncTask
-  toolSyncTask = synchronizeRequestedTool().finally(() => {
-    toolSyncTask = null
-    if (mounted && pdfViewer.value && activeTool.value !== desiredTool) {
-      void setTool(desiredTool)
-    }
+  const task = synchronizeRequestedTool()
+  toolSyncTask = task
+  task.finally(() => {
+    if (toolSyncTask === task) toolSyncTask = null
   })
-  return toolSyncTask
+  return task
 }
 
 async function synchronizeRequestedTool() {
-  while (mounted && pdfViewer.value && activeTool.value !== desiredTool) {
+  while (mounted && editorReady.value && pdfViewer.value && editorManager.value) {
     const viewer = pdfViewer.value
-    const mode = desiredTool
-    const enteringEditMode = viewer.annotationEditorMode === AnnotationEditorType.NONE
-      && mode !== AnnotationEditorType.NONE
-    const changed = await switchAnnotationEditorMode(viewer, mode, enteringEditMode)
-    if (!changed) break
+    const manager = editorManager.value
+    const bus = eventBus
+    const requestedTool = desiredTool
+    const mode = editorModeForTool(requestedTool)
+    if (viewer.annotationEditorMode === mode && manager.getMode?.() === mode) {
+      activeTool.value = requestedTool
+      applyDefaultColorForTool(requestedTool, mode, manager)
+      if (requestedTool === desiredTool) return
+      continue
+    }
+    const changed = await switchAnnotationEditorMode(viewer, manager, bus, mode)
+    if (!changed && requestedTool === desiredTool) break
   }
 }
 
-function switchAnnotationEditorMode(viewer, mode, enteringEditMode = false) {
-  if (viewer.annotationEditorMode === mode) {
-    activeTool.value = mode
-    applyDefaultColor(mode)
-    return Promise.resolve(true)
-  }
+function editorModeForTool(tool) {
+  return tool === SELECT_TOOL ? SELECT_BACKING_MODE : tool
+}
 
+function switchAnnotationEditorMode(viewer, manager, bus, mode) {
   return new Promise((resolve) => {
     let settled = false
     const complete = (applied) => {
       if (settled) return
       settled = true
       window.clearTimeout(timeoutId)
-      eventBus?.off('annotationeditormodechanged', onModeChanged)
+      bus?.off('annotationeditormodechanged', onModeChanged)
+      if (cancelPendingToolSwitch === cancel) cancelPendingToolSwitch = null
       if (applied) {
-        activeTool.value = mode
-        applyDefaultColor(mode)
+        if (editorModeForTool(desiredTool) === mode) {
+          activeTool.value = desiredTool
+          applyDefaultColorForTool(desiredTool, mode, manager)
+        }
       }
       resolve(applied)
     }
     const onModeChanged = ({ mode: changedMode }) => {
-      if (changedMode === mode) complete(true)
+      if (changedMode === mode && pdfViewer.value === viewer && editorManager.value === manager) complete(true)
     }
-    const timeoutId = window.setTimeout(async () => {
-      // A page can be removed by PDF.js virtualization between the editing-mode
-      // refresh and its pagerendered notification. Drive the public UI manager
-      // directly as a recovery path instead of leaving its old tool active.
-      try {
-        await editorManager.value?.updateMode?.(mode, null, true)
-        complete(true)
-      } catch (err) {
-        error.value = err?.message || String(err)
-        complete(false)
+    const cancel = () => complete(false)
+    const timeoutId = window.setTimeout(() => {
+      if (pdfViewer.value === viewer && editorManager.value === manager) {
+        const viewerMode = viewer.annotationEditorMode
+        const managerMode = manager.getMode?.()
+        if (viewerMode === mode && managerMode === mode) {
+          complete(true)
+          return
+        }
+        error.value = label('annotationToolSwitchFailed', 'Could not switch annotation tool')
       }
-    }, 1400)
+      complete(false)
+    }, 8000)
 
-    eventBus?.on('annotationeditormodechanged', onModeChanged)
+    cancelPendingToolSwitch = cancel
+    bus?.on('annotationeditormodechanged', onModeChanged)
     try {
-      viewer.annotationEditorMode = { mode }
-      // PDF.js defers entering edit mode until every visible editable page has
-      // rerendered. Refresh immediately so virtualized page views dispatch the
-      // pagerendered events that complete that switch.
-      if (enteringEditMode) viewer.refresh()
+      // PDFViewer owns both its private mode and the UI manager. Bypassing this
+      // setter can leave them disagreeing, which breaks every later switch.
+      if (viewer.annotationEditorMode !== mode) {
+        viewer.annotationEditorMode = { mode }
+      } else if (manager.getMode?.() === mode) {
+        complete(true)
+      }
     } catch (err) {
       error.value = err?.message || String(err)
       complete(false)
@@ -386,16 +508,19 @@ function colorParamForMode(mode) {
   return null
 }
 
-function applyDefaultColor(mode) {
+function applyDefaultColorForTool(tool, mode, manager = editorManager.value) {
+  if (tool === SELECT_TOOL) return
+  if (tool === AnnotationEditorType.HIGHLIGHT) manager?.unselectAll?.()
   const param = colorParamForMode(mode)
   if (!param) return
   const group = mode === AnnotationEditorType.HIGHLIGHT
     ? 'highlight'
     : mode === AnnotationEditorType.FREETEXT ? 'freetext' : 'ink'
-  editorManager.value?.updateParams?.(param, selectedColors.value[group])
+  manager?.updateParams?.(param, selectedColors.value[group])
 }
 
 function setColor(color) {
+  if (saving.value) return
   const group = activeColorGroup.value
   const param = colorParamForMode(activeTool.value)
   if (!group || !param) return
@@ -404,12 +529,14 @@ function setColor(color) {
 }
 
 function openCustomColorPicker() {
+  if (saving.value) return
   if (!activeColorGroup.value) return
   customColorGroup = activeColorGroup.value
   customColorInput.value?.click()
 }
 
 function addCustomColor(event) {
+  if (saving.value) return
   const group = customColorGroup
   const color = String(event.target?.value || '').trim().toLowerCase()
   if (!group || !/^#[0-9a-f]{6}$/.test(color)) return
@@ -418,83 +545,110 @@ function addCustomColor(event) {
   setColor(color)
 }
 
-function handleInkPointerDown(event) {
-  if (activeTool.value !== AnnotationEditorType.INK) return
-  if (event.pointerType !== 'pen' && event.pointerType !== 'touch') return
-  event.preventDefault()
-  const target = event.target
-  target?.setPointerCapture?.(event.pointerId)
-}
-
 function preventInkContextMenu(event) {
   if (activeTool.value === AnnotationEditorType.INK) event.preventDefault()
 }
 
+function markEditorInput() {
+  if (saving.value || !annotationDirtyTrackingReady) return
+  editRevision.value += 1
+  dirty.value = true
+  emitViewerState()
+}
+
 function undo() {
-  if (!canUndo.value) return
+  if (saving.value || !canUndo.value) return
   editorManager.value?.undo?.()
 }
 
 function redo() {
-  if (!canRedo.value) return
+  if (saving.value || !canRedo.value) return
   editorManager.value?.redo?.()
 }
 
 function eraseSelection() {
-  if (!canDelete.value) return
+  if (saving.value || !canDelete.value) return
   editorManager.value?.delete?.()
 }
 
 async function save({ saveAs = false } = {}) {
   const document = pdfDocument.value
   if (!document || saving.value) return
+  const run = loadRun
+  const operation = ++saveRun
+  const documentId = props.document.id
+  const documentTitle = props.document?.title || props.document?.shortTitle || 'document.pdf'
+  const target = props.target
+  const translationTarget = target === 'translation'
+  const outputPath = savedPath.value
+  const manager = editorManager.value
   saving.value = true
   error.value = ''
+  const isCurrentSave = () => operation === saveRun
+    && run === loadRun
+    && pdfDocument.value === document
   try {
+    // Commit contenteditable FreeText and an in-progress drawing before PDF.js
+    // serializes annotationStorage. Otherwise Save can omit the last action.
+    manager?.commitOrRemove?.()
+    manager?.currentLayer?.endDrawingSession?.(false)
+    await nextTick()
+    if (!isCurrentSave()) return
+    updateDirtyFromStorage(run)
+    const savedRevision = editRevision.value
+    const savedHash = annotationHash(document)
     const bytes = await document.saveDocument()
+    if (!isCurrentSave()) return
     let result
-    if (isTranslationTarget.value) {
-      if (saveAs || !savedPath.value) {
+    if (translationTarget) {
+      if (saveAs || !outputPath) {
         result = await invoke('save_pdf_as', {
-          input: { defaultName: defaultFileName(), bytes },
+          input: { defaultName: defaultFileName(documentTitle, true), bytes },
         })
       } else {
         result = await invoke('save_pdf_at_path', {
-          input: { path: savedPath.value, bytes },
+          input: { path: outputPath, bytes },
         })
       }
     } else if (saveAs) {
       result = await invoke('save_pdf_document_as', {
-        input: { documentId: props.document.id, defaultName: defaultFileName(), bytes },
+        input: { documentId, defaultName: defaultFileName(documentTitle, false), bytes },
       })
     } else {
       result = await invoke('save_pdf_document', {
-        input: { documentId: props.document.id, bytes },
+        input: { documentId, bytes },
       })
     }
 
-    if (!result) return
-    savedPath.value = result.path || savedPath.value
-    dirty.value = false
+    if (!result || !isCurrentSave()) return
+    savedPath.value = result.path || outputPath
+    if (editRevision.value === savedRevision && annotationHash(document) === savedHash) {
+      savedAnnotationHash = savedHash
+      observedAnnotationHash = savedHash
+      dirty.value = false
+    } else {
+      updateDirtyFromStorage(run)
+    }
     emit('saved', {
-      target: props.target,
+      target,
       path: result.path || '',
       size: Number(result.size || 0),
-      pathKind: isTranslationTarget.value ? 'file' : 'source',
+      pathKind: translationTarget ? 'file' : 'source',
     })
     emitViewerState()
   } catch (err) {
+    if (!isCurrentSave()) return
     error.value = err?.message || String(err)
     emitViewerState()
   } finally {
-    saving.value = false
+    if (operation === saveRun) saving.value = false
   }
 }
 
-function defaultFileName() {
-  const source = String(props.document?.title || props.document?.shortTitle || 'document.pdf')
+function defaultFileName(title = props.document?.title || props.document?.shortTitle || 'document.pdf', translationTarget = isTranslationTarget.value) {
+  const source = String(title)
   const stem = source.replace(/\.pdf$/i, '').trim() || 'document'
-  return isTranslationTarget.value
+  return translationTarget
     ? `${stem}.translated.annotated.pdf`
     : `${stem}.annotated.pdf`
 }
@@ -577,7 +731,7 @@ function emitViewerState() {
 }
 
 watch(
-  [() => props.document?.id, () => props.pdfPath, () => props.pdfPathKind],
+  [() => props.document?.id, () => props.pdfPath, () => props.pdfPathKind, () => props.target],
   () => {
     if (mounted) loadPdf()
   },
@@ -618,7 +772,7 @@ defineExpose({
 </script>
 
 <template>
-  <section ref="root" class="pdf-annotation-viewer" :aria-label="label('annotationWorkspace', 'PDF annotation editor')">
+  <section ref="root" class="pdf-annotation-viewer" :class="{ 'is-saving': saving }" :aria-busy="saving" :aria-label="label('annotationWorkspace', 'PDF annotation editor')">
     <header class="annotation-toolbar">
       <div class="annotation-tools" role="toolbar" :aria-label="label('annotationTools', 'Annotation tools')">
         <button
@@ -630,6 +784,7 @@ defineExpose({
           :title="tool.label"
           :aria-label="tool.label"
           :aria-pressed="activeTool === tool.mode"
+          :disabled="!editorReady || saving"
           @click="setTool(tool.mode)"
         >
           <svg v-if="tool.id === 'select'" viewBox="0 0 24 24" aria-hidden="true">
@@ -657,7 +812,7 @@ defineExpose({
         <button
           type="button"
           class="annotation-tool icon-only danger"
-          :disabled="!canDelete"
+          :disabled="saving || !canDelete"
           :title="label('annotationErase', 'Delete selected annotation')"
           :aria-label="label('annotationErase', 'Delete selected annotation')"
           @click="eraseSelection"
@@ -671,7 +826,7 @@ defineExpose({
         <button
           type="button"
           class="annotation-tool icon-only"
-          :disabled="!canUndo"
+          :disabled="saving || !canUndo"
           :title="label('annotationUndo', 'Undo')"
           :aria-label="label('annotationUndo', 'Undo')"
           @click="undo"
@@ -685,7 +840,7 @@ defineExpose({
         <button
           type="button"
           class="annotation-tool icon-only"
-          :disabled="!canRedo"
+          :disabled="saving || !canRedo"
           :title="label('annotationRedo', 'Redo')"
           :aria-label="label('annotationRedo', 'Redo')"
           @click="redo"
@@ -709,6 +864,7 @@ defineExpose({
             :title="label(color.labelKey, color.value)"
             :aria-label="label(color.labelKey, color.value)"
             :aria-checked="activeColor === color.value"
+            :disabled="saving"
             role="radio"
             @click="setColor(color.value)"
           ><span aria-hidden="true"></span></button>
@@ -717,6 +873,7 @@ defineExpose({
             class="annotation-color annotation-color-add"
             :title="label('annotationAddColor', 'Add color')"
             :aria-label="label('annotationAddColor', 'Add color')"
+            :disabled="saving"
             @click="openCustomColorPicker"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
@@ -737,13 +894,13 @@ defineExpose({
       class="annotation-pdf-container"
       :class="{
         hidden: loading || (error && !pdfDocument),
-        'is-creating': activeTool === AnnotationEditorType.HIGHLIGHT
-          || activeTool === AnnotationEditorType.FREETEXT
-          || activeTool === AnnotationEditorType.INK,
+        'is-select': activeTool === SELECT_TOOL,
+        'is-highlight': activeTool === AnnotationEditorType.HIGHLIGHT,
         'is-ink': activeTool === AnnotationEditorType.INK,
       }"
+      :inert="saving"
+      @input.capture="markEditorInput"
       @contextmenu.capture="preventInkContextMenu"
-      @pointerdown.capture="handleInkPointerDown"
     >
       <div ref="viewerElement" class="pdfViewer"></div>
     </div>
@@ -893,6 +1050,11 @@ defineExpose({
   background: rgba(148, 163, 184, 0.16);
 }
 
+.annotation-color:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 .annotation-color.active span {
   box-shadow: 0 0 0 2px #1e293b, 0 0 0 3px #e2e8f0;
 }
@@ -937,14 +1099,39 @@ defineExpose({
   background: #3b4049;
 }
 
-/* Selection is explicit. While a creation tool is active, existing editors are
-   transparent to the pointer so a click or stroke always creates at that spot. */
-.annotation-pdf-container.is-creating :deep(.annotationEditorLayer > :is(.freeTextEditor, .inkEditor, .highlightEditor, .stampEditor, .signatureEditor)) {
+/* Highlight and Ink must draw through existing annotations. FreeText keeps
+   PDF.js' native hit-testing so an existing text box can be edited again. */
+.annotation-pdf-container.is-highlight :deep(.annotationEditorLayer > :is(.freeTextEditor, .inkEditor, .highlightEditor, .stampEditor, .signatureEditor)),
+.annotation-pdf-container.is-ink :deep(.annotationEditorLayer > :is(.freeTextEditor, .inkEditor, .highlightEditor, .stampEditor, .signatureEditor)) {
   pointer-events: none !important;
 }
 
-.annotation-pdf-container.is-creating :deep(.annotationEditorLayer .editToolbar) {
+.annotation-pdf-container.is-highlight :deep(.annotationEditorLayer > :is(.freeTextEditor, .inkEditor, .highlightEditor, .stampEditor, .signatureEditor) *),
+.annotation-pdf-container.is-ink :deep(.annotationEditorLayer > :is(.freeTextEditor, .inkEditor, .highlightEditor, .stampEditor, .signatureEditor) *) {
   pointer-events: none !important;
+}
+
+.annotation-pdf-container.is-highlight :deep(.annotationEditorLayer .editToolbar),
+.annotation-pdf-container.is-ink :deep(.annotationEditorLayer .editToolbar) {
+  pointer-events: none !important;
+}
+
+/* Select is a logical tool backed by PDF.js Highlight mode. Block the text
+   layer so dragging does not create highlights, while retaining hit-testing on
+   every existing editor and its toolbar. */
+.annotation-pdf-container.is-select :deep(.textLayer) {
+  pointer-events: none !important;
+  user-select: none !important;
+}
+
+.annotation-pdf-container.is-select :deep(.annotationEditorLayer) {
+  pointer-events: none !important;
+}
+
+.annotation-pdf-container.is-select :deep(.annotationEditorLayer > :is(.freeTextEditor, .inkEditor, .highlightEditor, .stampEditor, .signatureEditor)),
+.annotation-pdf-container.is-select :deep(.annotationEditorLayer > :is(.freeTextEditor, .inkEditor, .highlightEditor, .stampEditor, .signatureEditor) .internal),
+.annotation-pdf-container.is-select :deep(.annotationEditorLayer .editToolbar) {
+  pointer-events: auto !important;
 }
 
 /* Let PDF.js receive the complete pointer stream. WebView otherwise treats
