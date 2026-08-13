@@ -26,6 +26,7 @@ mod model_catalog;
 mod net;
 mod office;
 mod pdf2zh_sidecar;
+mod pdf_annotation;
 mod pdf_index;
 mod pdf_layout_dump;
 mod providers;
@@ -6347,6 +6348,11 @@ pub fn run() {
             load_last_workspace,
             read_pdf_bytes,
             read_document_bytes,
+            pdf_annotation::save_pdf_document,
+            pdf_annotation::save_pdf_document_as,
+            pdf_annotation::save_pdf_as,
+            pdf_annotation::save_pdf_at_path,
+            pdf_annotation::read_saved_pdf_bytes,
             pdf2zh_sidecar::read_pdf_artifact_bytes,
             pdf2zh_sidecar::probe_pdf_translation_runtime,
             pdf2zh_sidecar::start_pdf_translation,

@@ -31,6 +31,12 @@ const PdfViewer = defineAsyncComponent({
   delay: 80,
   timeout: 30000,
 })
+const PdfAnnotationViewer = defineAsyncComponent({
+  loader: () => import('./PdfAnnotationViewer.vue'),
+  loadingComponent: PdfViewerLoading,
+  delay: 80,
+  timeout: 30000,
+})
 
 const props = defineProps({
   document: {
@@ -135,8 +141,15 @@ const emit = defineEmits([
 ])
 
 const showSource = ref(false)
+const readerPaneRoot = ref(null)
 const pdfViewerRef = ref(null)
 const translationPdfViewerRef = ref(null)
+const sourceAnnotationOpen = ref(false)
+const translationAnnotationOpen = ref(false)
+const savedTranslationPdfPath = ref('')
+const pendingTranslationPdfPath = ref('')
+const sourceViewerReloadKey = ref(0)
+const translationViewerReloadKey = ref(0)
 const translationScrollRef = ref(null)
 const translationScrolling = ref(false)
 const translationListReady = ref(false)
@@ -174,6 +187,7 @@ let linkedScrollSyncFrame = 0
 let translationDrivenPage = 0
 let translationDrivenPageTimer = null
 let translationListReadyFrame = 0
+let lastModifiedZoomAt = 0
 
 function loadPaneScrollLinkPreference() {
   try {
@@ -312,6 +326,12 @@ const translationArtifactPath = computed(() => {
   }
   return ''
 })
+const effectiveTranslationArtifactPath = computed(() => (
+  savedTranslationPdfPath.value || translationArtifactPath.value
+))
+const effectiveTranslationArtifactPathKind = computed(() => (
+  savedTranslationPdfPath.value ? 'file' : 'artifact'
+))
 const translationArtifactActivePage = computed(() => {
   if (translationArtifactScope.value === 'partial') return partialArtifactPageIndex.value || 1
   return props.activePage
@@ -330,7 +350,7 @@ const translationArtifactDocumentId = computed(() => {
     'pdf-translation',
     translationArtifactScope.value || 'none',
     pages || 'full',
-    translationArtifactPath.value,
+    effectiveTranslationArtifactPath.value,
   ].join(':')
 })
 const translationArtifactPageLabel = computed(() => {
@@ -844,6 +864,70 @@ function zoomPdf(delta) {
   }
 }
 
+function canHandleModifiedPdfZoom(target) {
+  if (!isLocalPdf.value || !readerPaneRoot.value) return false
+  return target instanceof Node && readerPaneRoot.value.contains(target)
+}
+
+function isEditableElement(target) {
+  return target instanceof Element && Boolean(target.closest('input, textarea, select, [contenteditable="true"]'))
+}
+
+function handlePdfZoomShortcut(event) {
+  if (!(event.ctrlKey || event.metaKey) || !canHandleModifiedPdfZoom(event.target) || isEditableElement(event.target)) return
+  const key = event.key.toLowerCase()
+  const zoomIn = key === '+' || key === '=' || event.code === 'NumpadAdd'
+  const zoomOut = key === '-' || event.code === 'NumpadSubtract'
+  if (!zoomIn && !zoomOut) return
+  event.preventDefault()
+  event.stopPropagation()
+  zoomPdf(zoomIn ? 0.12 : -0.12)
+}
+
+function handlePdfZoomWheel(event) {
+  if (!(event.ctrlKey || event.metaKey) || !canHandleModifiedPdfZoom(event.target)) return
+  event.preventDefault()
+  event.stopPropagation()
+  const now = performance.now()
+  // High-resolution touchpads emit many wheel events per gesture. Keep zooming
+  // responsive while avoiding a jump from 100% to the clamp in one flick.
+  if (now - lastModifiedZoomAt < 70) return
+  lastModifiedZoomAt = now
+  zoomPdf(event.deltaY < 0 ? 0.12 : -0.12)
+}
+
+function openAnnotation(target) {
+  if (target === 'translation') {
+    if (!effectiveTranslationArtifactPath.value) return
+    translationAnnotationOpen.value = true
+  } else {
+    sourceAnnotationOpen.value = true
+  }
+  // Annotation mode owns pointer and scroll events inside PDF.js, so the
+  // reading-viewer scroll-link must remain off while it is active.
+  paneScrollLinked.value = false
+}
+
+function closeAnnotation(target, payload = {}) {
+  if (target === 'translation') {
+    const savedPath = payload?.path || pendingTranslationPdfPath.value
+    if (savedPath) savedTranslationPdfPath.value = savedPath
+    pendingTranslationPdfPath.value = ''
+    translationAnnotationOpen.value = false
+  } else {
+    sourceAnnotationOpen.value = false
+  }
+}
+
+function handleAnnotationSaved(payload) {
+  if (payload?.target === 'translation' && payload.path) {
+    // Keep the active editor bound to its original bytes until it closes. This
+    // preserves its command stack and avoids destroying PDF.js page layers in
+    // the same turn that saveDocument resolves.
+    pendingTranslationPdfPath.value = payload.path
+  }
+}
+
 function translationPagePlaceholderLabel(translation) {
   if (translation?.status === 'failed') return translation.error || props.ui.translationFailed
   if (props.document.translation.status === 'succeeded') return props.ui.translationPageLoading
@@ -862,10 +946,17 @@ function isTranslationPageLoaded(translation) {
 onMounted(() => {
   // eslint-disable-next-line no-console
   console.log(`[pdf-perf] ReaderPane MOUNTED doc=${props.document?.id}`)
+  window.addEventListener('keydown', handlePdfZoomShortcut, true)
+  readerPaneRoot.value?.addEventListener('wheel', handlePdfZoomWheel, {
+    capture: true,
+    passive: false,
+  })
   scheduleTranslationObserverRefresh()
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handlePdfZoomShortcut, true)
+  readerPaneRoot.value?.removeEventListener('wheel', handlePdfZoomWheel, true)
   if (translationPageObserver) translationPageObserver.disconnect()
   if (translationVisibleLoadFrame) window.cancelAnimationFrame(translationVisibleLoadFrame)
   if (translationScrollSyncFrame) window.cancelAnimationFrame(translationScrollSyncFrame)
@@ -953,6 +1044,9 @@ watch(paneScrollLinkPreference, (preferred) => {
 })
 
 watch(translationArtifactPath, async (path) => {
+  savedTranslationPdfPath.value = ''
+  pendingTranslationPdfPath.value = ''
+  translationAnnotationOpen.value = false
   if (!path) return
   await nextTick()
   syncTranslationArtifactToActivePage()
@@ -966,7 +1060,7 @@ watch(translationArtifactActivePage, async () => {
 </script>
 
 <template>
-  <section class="reader-pane">
+  <section ref="readerPaneRoot" class="reader-pane">
     <div class="reader-chrome">
       <!-- Row 1: thin title bar = window drag region + the active document name. -->
       <div class="reader-titlebar" data-tauri-drag-region @mousedown="startWindowDrag">
@@ -1036,6 +1130,18 @@ watch(translationArtifactActivePage, async () => {
             <span v-if="showIndexStatus" class="status-chip" :class="document.indexStatus">
               {{ indexStatusLabel }}
             </span>
+
+            <button
+              v-if="!(viewMode === 'translated' && canOpenTranslationView)"
+              type="button"
+              class="toolbar-btn annotation-toggle"
+              :class="{ active: sourceAnnotationOpen }"
+              :title="sourceAnnotationOpen ? ui.annotationExit : ui.annotationOpen"
+              :aria-label="sourceAnnotationOpen ? ui.annotationExit : ui.annotationOpen"
+              @click="sourceAnnotationOpen ? closeAnnotation('source') : openAnnotation('source')"
+            >
+              {{ sourceAnnotationOpen ? ui.annotationExit : ui.annotationOpen }}
+            </button>
 
             <div class="pdf-toolbar-controls">
               <div class="toolbar-control-group page-control-group">
@@ -1110,9 +1216,27 @@ watch(translationArtifactActivePage, async () => {
             v-show="!(viewMode === 'translated' && canOpenTranslationView)"
             class="viewer-card pdf-compare-pane local-pdf-source"
           >
-            <PdfViewer
+            <PdfAnnotationViewer
+              v-if="sourceAnnotationOpen"
               ref="pdfViewerRef"
-              :key="`source-pdf:${document.id}`"
+              :key="`source-annotation:${document.id}:${sourceViewerReloadKey}`"
+              class="real-pdf-viewer"
+              :class="{ 'compare-pdf-viewer': viewMode === 'dual' && canOpenTranslationView }"
+              :document="document"
+              :active-page="activePage"
+              target="source"
+              :ui="ui"
+              @loaded="emit('document-loaded', $event)"
+              @load-failed="emit('document-load-failed', $event)"
+              @page-change="emit('select-page', $event)"
+              @state-change="updatePdfViewerState($event, 'source')"
+              @saved="handleAnnotationSaved"
+              @close="closeAnnotation('source', $event)"
+            />
+            <PdfViewer
+              v-else
+              ref="pdfViewerRef"
+              :key="`source-pdf:${document.id}:${sourceViewerReloadKey}`"
               class="real-pdf-viewer"
               :class="{ 'compare-pdf-viewer': viewMode === 'dual' && canOpenTranslationView }"
               :document="document"
@@ -1179,13 +1303,45 @@ watch(translationArtifactActivePage, async () => {
             class="viewer-card translated-reader"
             :class="{ 'translation-wide-pane': viewMode === 'translated' }"
           >
-            <PdfViewer
-              v-if="translationArtifactPath"
+            <div v-if="translationArtifactPath" class="annotation-pane-heading">
+              <span>{{ ui.translatedPdf }}</span>
+              <button
+                type="button"
+                class="annotation-pane-toggle"
+                :class="{ active: translationAnnotationOpen }"
+                :title="translationAnnotationOpen ? ui.annotationExit : ui.annotationOpen"
+                :aria-label="translationAnnotationOpen ? ui.annotationExit : ui.annotationOpen"
+                @click="translationAnnotationOpen ? closeAnnotation('translation') : openAnnotation('translation')"
+              >
+                {{ translationAnnotationOpen ? ui.annotationExit : ui.annotationOpen }}
+              </button>
+            </div>
+            <PdfAnnotationViewer
+              v-if="translationArtifactPath && translationAnnotationOpen"
               ref="translationPdfViewerRef"
+              :key="`translated-annotation:${translationArtifactDocumentId}:${translationViewerReloadKey}`"
               class="real-pdf-viewer translated-artifact-viewer"
               v-bind="testAttrs('translated-artifact-viewer')"
               :document="translationArtifactDocument"
-              :pdf-path="translationArtifactPath"
+              :pdf-path="effectiveTranslationArtifactPath"
+              :pdf-path-kind="effectiveTranslationArtifactPathKind"
+              :active-page="translationArtifactActivePage"
+              target="translation"
+              :ui="ui"
+              @page-change="handleTranslationArtifactPageChange"
+              @state-change="updatePdfViewerState($event, 'artifact')"
+              @saved="handleAnnotationSaved"
+              @close="closeAnnotation('translation', $event)"
+            />
+            <PdfViewer
+              v-else-if="translationArtifactPath"
+              ref="translationPdfViewerRef"
+              :key="`translated-pdf:${translationArtifactDocumentId}:${translationViewerReloadKey}`"
+              class="real-pdf-viewer translated-artifact-viewer"
+              v-bind="testAttrs('translated-artifact-viewer')"
+              :document="translationArtifactDocument"
+              :pdf-path="effectiveTranslationArtifactPath"
+              :pdf-path-kind="effectiveTranslationArtifactPathKind"
               :active-page="translationArtifactActivePage"
               :selection-locked="true"
               :selection-actions-enabled="false"
@@ -1890,6 +2046,38 @@ watch(translationArtifactActivePage, async () => {
 .translated-artifact-viewer {
   flex: 1;
   min-height: 0;
+}
+
+.annotation-pane-heading {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 9px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.annotation-pane-toggle {
+  min-height: 24px;
+  border: 1px solid rgba(96, 165, 250, 0.35);
+  border-radius: 6px;
+  padding: 0 7px;
+  background: rgba(59, 130, 246, 0.1);
+  color: #bfdbfe;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.annotation-pane-toggle:hover,
+.annotation-pane-toggle.active,
+.annotation-toggle.active {
+  border-color: rgba(96, 165, 250, 0.7);
+  background: rgba(59, 130, 246, 0.24);
+  color: #fff;
 }
 
 .translation-page {

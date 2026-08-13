@@ -9,9 +9,24 @@ function base64ToBytes(value) {
   return bytes
 }
 
-export async function invoke(command) {
-  if (command === 'read_pdf_bytes') return base64ToBytes(PDF_BASE64)
+export async function invoke(command, args = {}) {
+  window.__pdfAnnotationInvokes ||= []
+  if (command === 'read_pdf_bytes') {
+    window.__pdfAnnotationInvokes.push({ command, docId: args.docId })
+    return base64ToBytes(PDF_BASE64)
+  }
   if (command === 'read_pdf_artifact_bytes') return base64ToBytes(PDF_BASE64)
+  if (command === 'save_pdf_document' || command === 'save_pdf_document_as') {
+    const input = args.input || {}
+    window.__pdfAnnotationInvokes.push({
+      command,
+      documentId: input.documentId,
+      byteLength: input.bytes?.length || 0,
+    })
+    const delay = Number(window.__pdfAnnotationSaveDelay || 0)
+    if (delay > 0) await new Promise((resolve) => window.setTimeout(resolve, delay))
+    return { path: `${input.documentId || 'document'}.annotated.pdf`, size: input.bytes?.length || 0 }
+  }
   if (command === 'request_pdf_translation_pages') return { jobId: 'e2e', requestedPages: [] }
   if (command === 'update_document_reading_state') return null
   // ask_document_stream returns nothing and drives the UI via emitted events; in

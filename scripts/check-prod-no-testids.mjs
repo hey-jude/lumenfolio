@@ -1,7 +1,8 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const distDir = new URL('../dist', import.meta.url).pathname
+const distDir = fileURLToPath(new URL('../dist/', import.meta.url))
 const forbidden = [
   'data-testid',
   'harness=translation-linking',
