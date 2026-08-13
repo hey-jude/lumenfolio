@@ -1,22 +1,10 @@
+/* Every color, radius, duration and weight lives in tokens.css. This file is
+   only the app-wide element defaults that sit on top of them. */
+@import './tokens.css';
+
 :root {
   color-scheme: dark;
-  font-family:
-    'SF Pro Display',
-    'SF Pro Text',
-    'Segoe UI',
-    'PingFang SC',
-    'Hiragino Sans GB',
-    sans-serif;
-  --bg-app: #17181b;
-  --bg-sidebar: #2a2d31;
-  --bg-panel: #1d1f23;
-  --bg-elevated: #23262b;
-  --line-soft: #32363d;
-  --text-primary: #f3f4f6;
-  --text-secondary: #a1a8b3;
-  --text-muted: #7c8390;
-  --accent: #6aa9ff;
-  --accent-soft: rgba(106, 169, 255, 0.18);
+  font-family: var(--font-sans);
 }
 
 * {
