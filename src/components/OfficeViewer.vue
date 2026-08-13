@@ -504,7 +504,7 @@ onBeforeUnmount(destroyPptxViewer)
   background: var(--bg-panel, #1f1f24);
   color: var(--text-muted, var(--text-secondary));
   font-size: 11px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   text-align: center;
 }
 
@@ -530,6 +530,9 @@ onBeforeUnmount(destroyPptxViewer)
   z-index: 1;
 }
 
+/* Deliberately a raw 700, not --w-strong: this class mirrors the workbook's own
+   bold formatting, so it reports the document rather than styling the app.
+   Toning it down to the UI weight would misrepresent the file. */
 .office-table .is-bold {
   font-weight: 700;
   color: var(--text-primary);

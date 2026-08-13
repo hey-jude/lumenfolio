@@ -1566,7 +1566,7 @@ onBeforeUnmount(() => {
   color: inherit;
   font-size: 11px;
   line-height: 1.15;
-  font-weight: 700;
+  font-weight: var(--w-medium);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1608,7 +1608,7 @@ onBeforeUnmount(() => {
   border-radius: 14px;
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 800;
+  font-weight: var(--w-medium);
 }
 
 .rail-actions {
@@ -1635,7 +1635,7 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   font-size: 18px;
-  font-weight: 750;
+  font-weight: var(--w-medium);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.08),
     0 8px 24px rgba(0, 0, 0, 0.14);
@@ -1666,8 +1666,8 @@ onBeforeUnmount(() => {
 
 .panel-label {
   font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  font-weight: var(--w-strong);
+  letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
   color: var(--text-muted, var(--text-secondary));
   min-width: 0;
@@ -1947,7 +1947,7 @@ onBeforeUnmount(() => {
   padding: 4px 2px;
   text-align: left;
   font-size: 12px;
-  font-weight: 760;
+  font-weight: var(--w-strong);
 }
 
 .folder-title:hover {
@@ -2081,7 +2081,7 @@ onBeforeUnmount(() => {
   background: var(--accent, #6aa9ff);
   color: #0b1220;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: var(--w-medium);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2153,7 +2153,7 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
 }
 
 .collection-count {
@@ -2222,7 +2222,7 @@ onBeforeUnmount(() => {
   background: rgba(255, 255, 255, 0.06);
   color: var(--text-primary);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
   padding: 2px 6px;
   outline: none;
 }

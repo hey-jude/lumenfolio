@@ -1599,7 +1599,7 @@ watch(translationArtifactActivePage, async () => {
   white-space: nowrap;
   color: var(--text-muted);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
 }
 
 /* Row 2: translation/page/zoom controls, right-aligned. Not a drag region so the
@@ -1680,7 +1680,7 @@ watch(translationArtifactActivePage, async () => {
   outline: none;
   padding: 0 10px;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   letter-spacing: 0;
   text-align: left;
   text-overflow: ellipsis;
@@ -1716,7 +1716,7 @@ watch(translationArtifactActivePage, async () => {
   justify-content: center;
   gap: 7px;
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
 }
 
 .toolbar-btn:disabled,
@@ -1742,7 +1742,7 @@ watch(translationArtifactActivePage, async () => {
 
 .toolbar-icon {
   font-size: 15px;
-  font-weight: 800;
+  font-weight: var(--w-medium);
   line-height: 1;
 }
 
@@ -1820,7 +1820,7 @@ watch(translationArtifactActivePage, async () => {
   cursor: pointer;
   padding: 0;
   font-size: 17px;
-  font-weight: 750;
+  font-weight: var(--w-medium);
 }
 
 .page-meter,
@@ -1830,7 +1830,7 @@ watch(translationArtifactActivePage, async () => {
   white-space: nowrap;
   color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 650;
+  font-weight: var(--w-medium);
 }
 
 .translation-error {
@@ -1870,7 +1870,7 @@ watch(translationArtifactActivePage, async () => {
 .empty-title {
   color: var(--text-primary);
   font-size: 18px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
 }
 
 .empty-copy {
@@ -2058,7 +2058,7 @@ watch(translationArtifactActivePage, async () => {
   border-bottom: 1px solid rgba(148, 163, 184, 0.16);
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
 }
 
 .annotation-pane-toggle {
@@ -2145,7 +2145,7 @@ watch(translationArtifactActivePage, async () => {
 
 .translation-full-title {
   font-size: 18px;
-  font-weight: 800;
+  font-weight: var(--w-strong);
 }
 
 .translation-full-detail {
@@ -2259,7 +2259,7 @@ watch(translationArtifactActivePage, async () => {
 .translation-page-title {
   margin-bottom: 18px;
   font-size: 17px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
 }
 
 .translation-page-block {
@@ -2282,7 +2282,7 @@ watch(translationArtifactActivePage, async () => {
 
 .translation-page-block-source {
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
   color: #4b5563;
   margin-bottom: 8px;
 }
@@ -2323,7 +2323,7 @@ watch(translationArtifactActivePage, async () => {
 
 .page-heading {
   font-size: 18px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
   margin-bottom: 24px;
 }
 
@@ -2394,7 +2394,7 @@ watch(translationArtifactActivePage, async () => {
   align-items: center;
   gap: 12px;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
 }
 
 .inline-translation-head button,

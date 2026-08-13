@@ -145,7 +145,7 @@ function isAdding(paper) {
 
 .trending-title {
   font-size: 16px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
   color: var(--text-primary);
 }
 
@@ -305,7 +305,7 @@ function isAdding(paper) {
 
 .trending-card-title {
   font-size: 14px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   color: var(--text-primary);
   line-height: 1.35;
 }
@@ -330,7 +330,7 @@ function isAdding(paper) {
 
 .trending-upvotes {
   color: var(--accent);
-  font-weight: 600;
+  font-weight: var(--w-strong);
 }
 
 .trending-card-abstract {
@@ -355,7 +355,7 @@ function isAdding(paper) {
   border: 1px solid rgba(106, 169, 255, 0.45);
   background: rgba(106, 169, 255, 0.16);
   color: var(--text-primary);
-  font-weight: 600;
+  font-weight: var(--w-strong);
 }
 
 .trending-add:disabled {

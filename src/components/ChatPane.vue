@@ -1907,8 +1907,12 @@ function evidenceSourceLabel(source) {
         @keydown="markUserScrolledMessages"
       >
         <div v-if="!visibleMessages.length" class="chat-empty-state">
-          <div class="chat-empty-title">{{ ui.chatEmptyTitle }}</div>
-          <div class="chat-empty-copy">{{ ui.chatEmptyHint }}</div>
+          <div class="chat-empty-title">
+            {{ centered ? ui.chatEmptyTitleHome : ui.chatEmptyTitle }}
+          </div>
+          <div class="chat-empty-copy">
+            {{ centered ? ui.chatEmptyHintHome : ui.chatEmptyHint }}
+          </div>
 
           <!-- Home quick actions + recent sources: only when this pane is the main
                stage (no document open). A right-docked empty chat stays minimal. -->
@@ -2735,7 +2739,7 @@ function evidenceSourceLabel(source) {
   background: rgba(255, 255, 255, 0.02);
   color: var(--text-muted);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   cursor: pointer;
   flex-shrink: 0;
   transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
@@ -2844,9 +2848,9 @@ function evidenceSourceLabel(source) {
 .session-history-title {
   padding: 10px 12px 6px;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: var(--tracking-caps);
   color: var(--text-muted);
 }
 
@@ -2924,7 +2928,7 @@ function evidenceSourceLabel(source) {
 .chat-title {
   color: var(--text-primary);
   font-size: 16px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
 }
 
 .chat-subtitle {
@@ -2948,7 +2952,7 @@ function evidenceSourceLabel(source) {
   color: var(--text-muted);
   cursor: pointer;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   padding: 3px 10px;
   border-radius: 999px;
 }
@@ -3071,7 +3075,7 @@ function evidenceSourceLabel(source) {
 .chat-empty-title {
   color: var(--text-primary);
   font-size: 15px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
 }
 
 .chat-empty-copy {
@@ -3246,7 +3250,7 @@ function evidenceSourceLabel(source) {
 .note-edit-title {
   color: var(--text-primary);
   font-size: 12.5px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
 }
 
 .note-edit-meta {
@@ -3279,7 +3283,7 @@ function evidenceSourceLabel(source) {
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.28);
   color: var(--text-secondary);
-  font-family: 'SF Mono', Menlo, Monaco, monospace;
+  font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.55;
   white-space: pre-wrap;
@@ -3304,7 +3308,7 @@ function evidenceSourceLabel(source) {
   padding: 6px 9px;
   max-height: 160px;
   overflow: auto;
-  font-family: 'SF Mono', Menlo, Monaco, monospace;
+  font-family: var(--font-mono);
   font-size: 11.5px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -3360,7 +3364,7 @@ function evidenceSourceLabel(source) {
   color: var(--text-secondary);
   margin-bottom: 8px;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--tracking-caps);
 }
 
 .prepare-line,
@@ -3592,9 +3596,9 @@ function evidenceSourceLabel(source) {
   color: var(--text-muted);
   font-family: inherit;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: var(--tracking-caps);
   cursor: pointer;
 }
 
@@ -3635,7 +3639,7 @@ function evidenceSourceLabel(source) {
 
 .rec-section-label {
   font-size: 11px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   color: var(--text-muted);
 }
 
@@ -3696,10 +3700,10 @@ function evidenceSourceLabel(source) {
 
 .evidence-sources-label {
   font-size: 11px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: var(--tracking-caps);
 }
 
 .evidence-source-chip {
@@ -3760,8 +3764,8 @@ function evidenceSourceLabel(source) {
 .evidence-strip-label {
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  font-weight: var(--w-medium);
+  letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
 }
 
@@ -3835,7 +3839,7 @@ function evidenceSourceLabel(source) {
   background: rgba(255, 255, 255, 0.04);
   color: var(--text-secondary);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   cursor: pointer;
   transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
 }
@@ -3929,8 +3933,8 @@ button.agent-process-head:disabled {
 .agent-process-kicker {
   color: var(--text-muted);
   font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
+  font-weight: var(--w-medium);
+  letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
 }
 
@@ -3938,7 +3942,7 @@ button.agent-process-head:disabled {
   margin-top: 4px;
   color: var(--text-primary);
   font-size: 14px;
-  font-weight: 750;
+  font-weight: var(--w-strong);
 }
 
 .agent-process-badge {
@@ -3952,7 +3956,7 @@ button.agent-process-head:disabled {
   background: rgba(255, 255, 255, 0.055);
   color: var(--text-secondary);
   font-size: 11px;
-  font-weight: 750;
+  font-weight: var(--w-medium);
   white-space: nowrap;
 }
 
@@ -4098,7 +4102,7 @@ button.agent-process-head:disabled {
 .agent-stage-title {
   color: var(--text-primary);
   font-size: 12px;
-  font-weight: 760;
+  font-weight: var(--w-strong);
   white-space: nowrap;
 }
 
@@ -4238,7 +4242,7 @@ button.agent-process-head:disabled {
   cursor: pointer;
   color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
   list-style: none;
 }
 
@@ -4249,7 +4253,7 @@ button.agent-process-head:disabled {
 .agent-activity-summary {
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-align: right;
 }
 
@@ -4309,7 +4313,7 @@ button.agent-process-head:disabled {
   margin-bottom: 5px;
   color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
 }
 
 /* "in <Doc>" badge on a trace step that searched another document. */
@@ -4321,7 +4325,7 @@ button.agent-process-head:disabled {
   background: rgba(106, 169, 255, 0.14);
   color: var(--text-secondary);
   font-size: 10px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   vertical-align: middle;
 }
 
@@ -4329,7 +4333,7 @@ button.agent-process-head:disabled {
   color: var(--text-muted);
   font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
+  letter-spacing: var(--tracking-caps);
 }
 
 .agent-step-detail {
@@ -4356,7 +4360,7 @@ button.agent-process-head:disabled {
   padding: 0;
   color: var(--text-muted);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   list-style: none;
 }
 
@@ -4380,7 +4384,7 @@ button.agent-process-head:disabled {
 .reasoning-panel summary span:last-child {
   color: var(--text-muted);
   font-size: 11px;
-  font-weight: 500;
+  font-weight: var(--w-medium);
   text-transform: lowercase;
   letter-spacing: 0;
 }
@@ -4414,7 +4418,7 @@ button.agent-process-head:disabled {
   color: var(--text-secondary);
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--tracking-caps);
   margin-bottom: 8px;
 }
 
@@ -4541,7 +4545,7 @@ button.agent-process-head:disabled {
   gap: 10px;
   color: var(--text-primary);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
 }
 
 .pending-selection-head button {
@@ -4633,7 +4637,7 @@ button.agent-process-head:disabled {
 
 .mention-chip-at {
   color: var(--accent, #6aa6ff);
-  font-weight: 600;
+  font-weight: var(--w-strong);
 }
 
 .mention-chip-name {
@@ -4816,7 +4820,7 @@ button.agent-process-head:disabled {
   align-items: center;
   justify-content: center;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
   color: var(--text-secondary);
 }
 
@@ -4926,7 +4930,7 @@ button.agent-process-head:disabled {
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: var(--w-medium);
   outline: none;
   white-space: nowrap;
   text-overflow: ellipsis;

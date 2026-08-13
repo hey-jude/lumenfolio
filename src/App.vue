@@ -6759,7 +6759,7 @@ onMounted(() => {
 
 .update-banner-icon {
   color: var(--accent);
-  font-weight: 700;
+  font-weight: var(--w-medium);
 }
 
 .update-banner-text {
@@ -6776,7 +6776,7 @@ onMounted(() => {
   background: rgba(106, 169, 255, 0.16);
   color: var(--text-primary);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   cursor: pointer;
 }
 
@@ -6951,7 +6951,7 @@ onMounted(() => {
 .confirm-title {
   color: var(--text-primary);
   font-size: 15px;
-  font-weight: 760;
+  font-weight: var(--w-strong);
 }
 
 .confirm-close {
@@ -6989,7 +6989,7 @@ onMounted(() => {
   background: rgba(255, 255, 255, 0.035);
   color: var(--text-primary);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -7018,7 +7018,7 @@ onMounted(() => {
   color: var(--text-primary);
   cursor: pointer;
   padding: 8px 13px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
 }
 
 .confirm-btn:hover:not(:disabled) {
@@ -7068,7 +7068,7 @@ onMounted(() => {
 
 .settings-title {
   font-size: 17px;
-  font-weight: 750;
+  font-weight: var(--w-strong);
   color: var(--text-primary);
 }
 
@@ -7125,7 +7125,7 @@ onMounted(() => {
 .settings-nav-item span {
   color: var(--text-primary);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: var(--w-medium);
 }
 
 .settings-nav-item small {
@@ -7355,7 +7355,7 @@ onMounted(() => {
   padding: 0 7px;
   border-radius: 999px;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
 }
 
 .provider-list-default:hover:not(:disabled) {
@@ -7396,7 +7396,7 @@ onMounted(() => {
 .provider-list-name {
   color: var(--text-primary);
   font-size: 13px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
 }
 
 .provider-list-meta {
@@ -7413,7 +7413,7 @@ onMounted(() => {
   background: rgba(106, 169, 255, 0.14);
   color: var(--accent);
   font-size: 10px;
-  font-weight: 700;
+  font-weight: var(--w-medium);
 }
 
 .provider-detail {
@@ -7487,7 +7487,7 @@ onMounted(() => {
   font-size: 12px;
   color: var(--text-secondary);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
+  letter-spacing: var(--tracking-caps);
 }
 
 .settings-field span,
@@ -7852,7 +7852,7 @@ onMounted(() => {
   border: 1px solid var(--line-soft);
   background: rgba(255, 255, 255, 0.03);
   color: var(--text-primary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 

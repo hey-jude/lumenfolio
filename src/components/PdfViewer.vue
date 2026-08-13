@@ -2589,7 +2589,7 @@ defineExpose({
 .translation-popover-title {
   color: var(--text-primary);
   font-size: 13px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
   flex-shrink: 0;
 }
 

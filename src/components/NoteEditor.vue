@@ -687,7 +687,7 @@ const editorTheme = EditorView.theme(
   background: transparent;
   color: var(--text-primary);
   font-size: 18px;
-  font-weight: 500;
+  font-weight: var(--w-medium);
 }
 
 .note-head-meta {

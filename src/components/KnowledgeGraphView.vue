@@ -659,7 +659,7 @@ watch(colorBy, () => {
 
 .graph-title {
   font-size: 15px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
   color: var(--text-primary);
 }
 
@@ -810,8 +810,8 @@ watch(colorBy, () => {
 
 .insights-label {
   font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  font-weight: var(--w-medium);
+  letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
   color: var(--text-muted);
   margin-bottom: 6px;

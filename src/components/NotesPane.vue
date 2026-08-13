@@ -236,7 +236,7 @@ function timeLabel(note) {
 
 .notes-title {
   font-size: 16px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
   color: var(--text-primary);
 }
 
@@ -265,7 +265,7 @@ function timeLabel(note) {
   color: var(--text-muted);
   cursor: pointer;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   padding: 3px 10px;
   border-radius: 999px;
 }
@@ -301,7 +301,7 @@ function timeLabel(note) {
 
 .notes-empty-title {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   color: var(--text-secondary);
 }
 
@@ -347,7 +347,7 @@ function timeLabel(note) {
 
 .note-page {
   font-size: 11px;
-  font-weight: 600;
+  font-weight: var(--w-strong);
   color: var(--accent, #6aa9ff);
   background: rgba(106, 169, 255, 0.12);
   padding: 1px 8px;

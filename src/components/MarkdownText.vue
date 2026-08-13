@@ -122,7 +122,7 @@ function escapeHtml(value) {
 .markdown-text :deep(h6) {
   margin: 12px 0 7px;
   color: var(--text-primary);
-  font-weight: 700;
+  font-weight: var(--w-strong);
   line-height: 1.28;
 }
 
@@ -172,7 +172,7 @@ function escapeHtml(value) {
   padding: 1px 5px;
   background: rgba(255, 255, 255, 0.045);
   color: var(--text-primary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 

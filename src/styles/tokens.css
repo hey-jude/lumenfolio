@@ -80,10 +80,16 @@
      macOS but round to 700 under Segoe UI on Windows, so the same screen
      had different weights per platform. Three weights, no more.
 
-     `--tracking-chrome` is for Latin chrome ONLY — buttons, labels, table
-     headers, chips. Prose must stay at 0: this app's body text is largely
-     Chinese, and PingFang's Han glyphs are already full-width squares that
-     tighten badly. Expressed in em so it scales with font-size. */
+     There is deliberately NO negative tracking token. Tightening Latin UI
+     text is a real refinement, but it cannot be scoped by CSS selector here:
+     this app's chrome is itself bilingual — a button reads "Send" or "发送"
+     depending on locale — and PingFang's Han glyphs are full-width squares
+     that only get cramped when pulled together. SF Pro already applies
+     optical tracking on macOS, so the gain was small and the risk was not.
+
+     `--tracking-caps` is the one tracking we do want: uppercase micro-labels
+     need opening up, not closing in. It replaced four hand-picked values
+     (0.08 / 0.06 / 0.04 / 0.03em) that were all doing the same job. */
   --font-sans: 'SF Pro Text', 'SF Pro Display', 'Segoe UI', 'PingFang SC',
     'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
@@ -100,7 +106,7 @@
   --w-medium: 500;
   --w-strong: 600;
 
-  --tracking-chrome: -0.01em;
+  --tracking-caps: 0.08em;
   --lh-tight: 1.35;
   --lh-body: 1.55;
 

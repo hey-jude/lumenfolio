@@ -110,7 +110,7 @@ function handleSave() {
 
 .composer-title {
   font-size: 15px;
-  font-weight: 700;
+  font-weight: var(--w-strong);
   color: var(--text-primary);
 }
 
