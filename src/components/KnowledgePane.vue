@@ -148,7 +148,7 @@ const statusLabel = computed(() => {
   z-index: 5;
   display: flex;
   min-height: 0;
-  background: var(--bg-panel);
+  background: var(--surface-1);
 }
 
 .kp-graph {
@@ -164,7 +164,7 @@ const statusLabel = computed(() => {
   flex: 1;
   display: grid;
   place-items: center;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 13px;
   text-align: center;
   padding: 20px;
@@ -182,7 +182,7 @@ const statusLabel = computed(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-left: 1px solid var(--line-soft);
+  border-left: 1px solid var(--line);
 }
 
 .kp-side-head {
@@ -191,26 +191,26 @@ const statusLabel = computed(() => {
   align-items: center;
   gap: 8px;
   padding: 10px 14px 8px;
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line);
 }
 
 .kp-status {
   font-size: 11px;
   padding: 1px 8px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-secondary);
+  border-radius: var(--r-pill);
+  background: var(--surface-hover);
+  color: var(--ink-2);
 }
 
 .kp-status.running,
 .kp-status.pending {
-  color: #f0b54a;
-  background: rgba(240, 181, 74, 0.14);
+  color: var(--warning);
+  background: var(--warning-tint);
 }
 
 .kp-status.failed {
-  color: #ffb3b3;
-  background: rgba(198, 73, 73, 0.14);
+  color: var(--danger);
+  background: var(--danger-tint);
 }
 
 .kp-spacer {
@@ -220,7 +220,7 @@ const statusLabel = computed(() => {
 .kp-link {
   border: none;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: pointer;
   font-size: 11.5px;
   padding: 0;
@@ -236,17 +236,17 @@ const statusLabel = computed(() => {
   height: 24px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--line-soft);
-  border-radius: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: pointer;
   font-size: 14px;
 }
 
 .kp-reprecipitate:hover:not(:disabled) {
-  color: var(--text-primary);
-  border-color: rgba(106, 169, 255, 0.4);
+  color: var(--ink);
+  border-color: var(--accent-line);
 }
 
 .kp-reprecipitate:disabled {
@@ -264,14 +264,14 @@ const statusLabel = computed(() => {
 .kp-error {
   margin-bottom: 10px;
   font-size: 12px;
-  color: #ffb3b3;
+  color: var(--danger);
 }
 
 .kp-summary {
   margin: 0 0 14px;
   font-size: 12.5px;
   line-height: 1.6;
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .kp-group {
@@ -283,7 +283,7 @@ const statusLabel = computed(() => {
   font-weight: var(--w-medium);
   letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: var(--ink-3);
   margin-bottom: 6px;
 }
 
@@ -296,32 +296,32 @@ const statusLabel = computed(() => {
 .kp-chip {
   font-size: 11px;
   padding: 2px 9px;
-  border-radius: 999px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-secondary);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   cursor: default;
 }
 
 .kp-chip.entity {
-  border-color: rgba(106, 169, 255, 0.35);
-  color: #cfe0ff;
+  border-color: var(--accent-line);
+  color: var(--accent-ink);
 }
 
 .kp-chip.concept {
-  border-color: rgba(192, 132, 252, 0.35);
+  border-color: var(--accent-line);
   color: #e6d6ff;
 }
 
 .kp-keywords {
   font-size: 11.5px;
-  color: var(--text-muted);
+  color: var(--ink-3);
   line-height: 1.5;
 }
 
 .kp-related {
   padding-top: 10px;
-  border-top: 1px solid var(--line-soft);
+  border-top: 1px solid var(--line);
 }
 
 .kp-related-item {
@@ -329,16 +329,16 @@ const statusLabel = computed(() => {
   width: 100%;
   padding: 6px 8px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   cursor: pointer;
   text-align: left;
 }
 
 .kp-related-item:hover {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(106, 169, 255, 0.25);
+  background: var(--surface-wash);
+  border-color: var(--accent-line);
 }
 
 .kp-related-title {
@@ -347,7 +347,7 @@ const statusLabel = computed(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .kp-related-meta {
@@ -370,6 +370,6 @@ const statusLabel = computed(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--ink-3);
 }
 </style>

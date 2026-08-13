@@ -514,24 +514,24 @@ const editorTheme = EditorView.theme(
     '&': {
       height: '100%',
       fontSize: '14px',
-      color: 'var(--text-primary)',
+      color: 'var(--ink)',
       backgroundColor: 'transparent',
     },
     '.cm-content': {
       fontFamily:
-        "'SF Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
-      caretColor: 'var(--accent, #6aa9ff)',
+        'var(--font-mono)',
+      caretColor: 'var(--accent)',
       padding: '14px 0',
     },
     '.cm-gutters': {
       backgroundColor: 'transparent',
-      color: 'var(--text-muted, var(--text-secondary))',
+      color: 'var(--ink-3)',
       border: 'none',
     },
-    '.cm-activeLine': { backgroundColor: 'var(--bg-elevated, rgba(255,255,255,0.03))' },
+    '.cm-activeLine': { backgroundColor: 'var(--surface-2)' },
     '.cm-activeLineGutter': { backgroundColor: 'transparent' },
     '&.cm-focused': { outline: 'none' },
-    '.cm-cursor': { borderLeftColor: 'var(--accent, #6aa9ff)' },
+    '.cm-cursor': { borderLeftColor: 'var(--accent)' },
     '.cm-scroller': { lineHeight: '1.6' },
   },
   { dark: true },
@@ -668,7 +668,7 @@ const editorTheme = EditorView.theme(
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-base, var(--bg-panel));
+  background: var(--surface-1);
 }
 
 .note-editor-head {
@@ -676,7 +676,7 @@ const editorTheme = EditorView.theme(
   align-items: center;
   gap: 12px;
   padding: 14px 20px;
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line);
 }
 
 .note-title-input {
@@ -685,7 +685,7 @@ const editorTheme = EditorView.theme(
   border: none;
   outline: none;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 18px;
   font-weight: var(--w-medium);
 }
@@ -699,64 +699,64 @@ const editorTheme = EditorView.theme(
 
 .note-view-toggle {
   display: inline-flex;
-  border: 1px solid var(--line-soft);
-  border-radius: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
   overflow: hidden;
 }
 
 .note-view-toggle button {
   border: none;
   background: transparent;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
   font-size: 12px;
   padding: 3px 10px;
   cursor: pointer;
   font-family: inherit;
   transition:
-    background 0.12s ease,
-    color 0.12s ease;
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
 }
 
 .note-view-toggle button + button {
-  border-left: 1px solid var(--line-soft);
+  border-left: 1px solid var(--line);
 }
 
 .note-view-toggle button:hover {
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .note-view-toggle button.active {
-  background: var(--accent-soft, rgba(106, 169, 255, 0.16));
-  color: var(--accent-text, var(--accent, #6aa9ff));
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .note-kind-badge {
   font-size: 11px;
-  color: var(--text-muted, var(--text-secondary));
-  border: 1px solid var(--line-soft);
-  border-radius: 6px;
+  color: var(--ink-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
   padding: 2px 7px;
 }
 
 .note-source-link {
   font-size: 12px;
-  color: var(--accent, #6aa9ff);
+  color: var(--accent);
   text-decoration: none;
 }
 
 .note-index-status {
   font-size: 12px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
 }
 
 .note-index-status.note-saved {
-  color: var(--success, #4caf86);
+  color: var(--success);
 }
 
 .note-error {
   margin: 0;
   padding: 8px 20px;
-  color: var(--danger, #e06a6a);
+  color: var(--danger);
   font-size: 13px;
 }
 
@@ -786,12 +786,12 @@ const editorTheme = EditorView.theme(
   content: '';
   position: absolute;
   inset: 0 4px;
-  background: var(--line-soft);
-  transition: background 0.12s ease;
+  background: var(--line);
+  transition: background var(--dur-fast) var(--ease);
 }
 
 .note-divider:hover::after {
-  background: rgba(106, 169, 255, 0.55);
+  background: var(--accent);
 }
 
 .note-cm-host {
@@ -816,33 +816,36 @@ const editorTheme = EditorView.theme(
   height: 100%;
   background: transparent;
 
+  /* Milkdown has its own variable vocabulary. Every one of them is bridged to a
+     token here rather than given a value, so the editor cannot drift away from
+     the rest of the app the next time the palette moves. */
   --crepe-color-background: transparent;
-  --crepe-color-on-background: var(--text-primary);
-  --crepe-color-surface: var(--bg-panel);
-  --crepe-color-surface-low: var(--bg-elevated);
-  --crepe-color-on-surface: var(--text-primary);
-  --crepe-color-on-surface-variant: var(--text-secondary);
-  --crepe-color-outline: var(--line-soft);
+  --crepe-color-on-background: var(--ink);
+  --crepe-color-surface: var(--surface-1);
+  --crepe-color-surface-low: var(--surface-2);
+  --crepe-color-on-surface: var(--ink);
+  --crepe-color-on-surface-variant: var(--ink-2);
+  --crepe-color-outline: var(--line);
   --crepe-color-primary: var(--accent);
-  --crepe-color-secondary: var(--accent-soft);
-  --crepe-color-on-secondary: var(--text-primary);
-  --crepe-color-inverse: var(--bg-elevated);
-  --crepe-color-on-inverse: var(--text-primary);
-  --crepe-color-inline-code: #ff9d9d;
-  --crepe-color-error: #ffb3b3;
-  --crepe-color-hover: rgba(255, 255, 255, 0.05);
-  --crepe-color-selected: var(--accent-soft);
-  --crepe-color-inline-area: var(--bg-elevated);
+  --crepe-color-secondary: var(--accent-tint);
+  --crepe-color-on-secondary: var(--ink);
+  --crepe-color-inverse: var(--surface-2);
+  --crepe-color-on-inverse: var(--ink);
+  --crepe-color-inline-code: var(--danger);
+  --crepe-color-error: var(--danger);
+  --crepe-color-hover: var(--surface-hover);
+  --crepe-color-selected: var(--accent-tint);
+  --crepe-color-inline-area: var(--surface-2);
 
   /* The stock theme ships Noto Serif/Noto Sans/Space Mono — fonts this app doesn't
      load, so headings would fall back to a different family than the rest of the UI. */
   --crepe-font-title: inherit;
   --crepe-font-default: inherit;
-  --crepe-font-code: 'SF Mono', 'JetBrains Mono', Menlo, Monaco, 'Courier New', monospace;
+  --crepe-font-code: var(--font-mono);
 
   /* frame-dark uses white-tinted shadows, which glow oddly on this darker surface. */
-  --crepe-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --crepe-shadow-2: 0 4px 14px rgba(0, 0, 0, 0.45);
+  --crepe-shadow-1: var(--shadow-card);
+  --crepe-shadow-2: var(--shadow-overlay);
 }
 
 .note-crepe-host :deep(.milkdown .ProseMirror) {
@@ -855,19 +858,19 @@ const editorTheme = EditorView.theme(
    clickable unit rather than editable bracket syntax. */
 .note-crepe-host :deep(.wiki-link) {
   padding: 1px 4px;
-  border-radius: 5px;
-  background: rgba(106, 169, 255, 0.12);
-  color: var(--accent, #6aa9ff);
+  border-radius: var(--r-xs);
+  background: var(--accent-tint);
+  color: var(--accent);
   cursor: pointer;
   white-space: nowrap;
 }
 
 .note-crepe-host :deep(.wiki-link:hover) {
-  background: rgba(106, 169, 255, 0.22);
+  background: var(--accent-tint);
 }
 
 .note-crepe-host :deep(.wiki-link.ProseMirror-selectednode) {
-  outline: 1px solid rgba(106, 169, 255, 0.6);
+  outline: 1px solid var(--accent-line);
 }
 
 .note-live-status {
@@ -876,16 +879,16 @@ const editorTheme = EditorView.theme(
   left: 50%;
   transform: translateX(-50%);
   margin: 0;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 12px;
 }
 
 .note-live-error {
-  color: var(--text-danger, #ffb3b3);
+  color: var(--danger);
 }
 
 .note-preview-pane {
-  background: var(--bg-panel);
+  background: var(--surface-1);
 }
 
 .note-preview-inner {
@@ -894,7 +897,7 @@ const editorTheme = EditorView.theme(
 
 .note-links-bar {
   flex: 0 0 auto;
-  border-top: 1px solid var(--line-soft);
+  border-top: 1px solid var(--line);
   padding: 10px 20px;
   display: flex;
   flex-direction: column;
@@ -912,15 +915,15 @@ const editorTheme = EditorView.theme(
 
 .note-links-title {
   font-size: 11px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
   margin-right: 4px;
 }
 
 .note-link-chip {
-  border: 1px solid var(--line-soft);
-  background: var(--accent-soft, rgba(106, 169, 255, 0.12));
-  color: var(--accent, #6aa9ff);
-  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--accent-tint);
+  color: var(--accent);
+  border-radius: var(--r-pill);
   padding: 3px 10px;
   font-size: 12px;
   cursor: pointer;
@@ -928,7 +931,7 @@ const editorTheme = EditorView.theme(
 
 .note-link-chip.unresolved {
   background: transparent;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
   border-style: dashed;
 }
 </style>

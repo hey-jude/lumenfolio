@@ -90,7 +90,7 @@ function handleSave() {
   position: fixed;
   inset: 0;
   z-index: 1200;
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--scrim);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -98,10 +98,10 @@ function handleSave() {
 
 .note-composer {
   width: min(460px, calc(100vw - 32px));
-  border: 1px solid var(--line-soft);
-  border-radius: 14px;
-  background: #202329;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-overlay);
   padding: 16px;
   display: flex;
   flex-direction: column;
@@ -111,14 +111,14 @@ function handleSave() {
 .composer-title {
   font-size: 15px;
   font-weight: var(--w-strong);
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .composer-quote {
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--ink-3);
   line-height: 1.45;
-  border-left: 2px solid var(--line-soft);
+  border-left: 2px solid var(--line);
   padding: 4px 0 4px 10px;
   max-height: 110px;
   overflow: auto;
@@ -129,10 +129,10 @@ function handleSave() {
   box-sizing: border-box;
   resize: vertical;
   min-height: 90px;
-  border: 1px solid var(--line-soft);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-primary);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-wash);
+  color: var(--ink);
   font-size: 13px;
   line-height: 1.5;
   padding: 10px 12px;
@@ -140,7 +140,7 @@ function handleSave() {
 }
 
 .composer-input:focus {
-  border-color: rgba(106, 169, 255, 0.4);
+  border-color: var(--accent-line);
 }
 
 .composer-actions {
@@ -152,22 +152,22 @@ function handleSave() {
 .composer-btn {
   min-height: 34px;
   padding: 0 14px;
-  border-radius: 9px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-secondary);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   cursor: pointer;
   font-size: 13px;
 }
 
 .composer-btn:hover {
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .composer-btn.primary {
-  border-color: rgba(106, 169, 255, 0.4);
-  background: rgba(106, 169, 255, 0.16);
-  color: var(--text-primary);
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 
 .composer-btn:disabled {

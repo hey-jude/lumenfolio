@@ -22,6 +22,10 @@ const SELECT_TOOL = 'select'
 // for rerenders on PDFs that already contain annotations.
 const SELECT_BACKING_MODE = AnnotationEditorType.HIGHLIGHT
 
+// Literal hex, never tokens: these values are handed to PDF.js and written into
+// the saved PDF as the annotation's own color. A CSS variable would not resolve
+// there, and even if it did, the mark's color must not change when the app's
+// theme does — it belongs to the document from then on.
 const HIGHLIGHT_COLORS = [
   { value: '#facc15', labelKey: 'annotationColorYellow' },
   { value: '#84cc16', labelKey: 'annotationColorGreen' },
@@ -916,7 +920,7 @@ defineExpose({
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  background: #1b1f25;
+  background: var(--surface-1);
 }
 
 .annotation-toolbar {
@@ -927,8 +931,8 @@ defineExpose({
   justify-content: space-between;
   gap: 8px;
   padding: 5px 8px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
-  background: rgba(24, 28, 34, 0.98);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-1);
 }
 
 .annotation-tools,
@@ -947,10 +951,10 @@ defineExpose({
 .annotation-action {
   min-height: 28px;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   padding: 0 8px;
   background: transparent;
-  color: #cbd5e1;
+  color: var(--ink-2);
   cursor: pointer;
   font-size: 11px;
   white-space: nowrap;
@@ -985,22 +989,22 @@ defineExpose({
 
 .annotation-tool:hover:not(:disabled),
 .annotation-action:hover:not(:disabled) {
-  border-color: rgba(96, 165, 250, 0.52);
-  background: rgba(59, 130, 246, 0.16);
-  color: #fff;
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 
 .annotation-tool.active,
 .annotation-action:not(.quiet) {
-  border-color: rgba(96, 165, 250, 0.45);
-  background: rgba(59, 130, 246, 0.2);
-  color: #dbeafe;
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
 }
 
 .annotation-tool.danger:hover:not(:disabled) {
-  border-color: rgba(248, 113, 113, 0.52);
-  background: rgba(239, 68, 68, 0.16);
-  color: #fecaca;
+  border-color: var(--danger-line);
+  background: var(--danger-tint);
+  color: var(--danger);
 }
 
 .annotation-tool:disabled,
@@ -1013,7 +1017,7 @@ defineExpose({
   width: 1px;
   height: 20px;
   margin: 0 2px;
-  background: rgba(148, 163, 184, 0.22);
+  background: var(--line);
 }
 
 .annotation-color-picker {
@@ -1035,10 +1039,14 @@ defineExpose({
   cursor: pointer;
 }
 
+/* Deliberately raw, not tokenized: these two rings sit directly on the user's
+   own highlight color, which can be anything they pick. They need a fixed
+   dark/light pair to stay legible against a yellow swatch and a black one
+   alike — a theme token would follow the app and lose that guarantee. */
 .annotation-color span {
   width: 14px;
   height: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line-strong);
   border-radius: 50%;
   background: var(--annotation-color);
   box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.45);
@@ -1046,8 +1054,8 @@ defineExpose({
 
 .annotation-color:hover,
 .annotation-color.active {
-  border-color: rgba(255, 255, 255, 0.85);
-  background: rgba(148, 163, 184, 0.16);
+  border-color: var(--line-strong);
+  background: var(--line);
 }
 
 .annotation-color:disabled {
@@ -1060,7 +1068,7 @@ defineExpose({
 }
 
 .annotation-color-add {
-  color: #cbd5e1;
+  color: var(--ink-2);
 }
 
 .annotation-color-add svg {
@@ -1083,20 +1091,20 @@ defineExpose({
 .annotation-status {
   max-width: 150px;
   overflow: hidden;
-  color: #94a3b8;
+  color: var(--ink-3);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.annotation-status.dirty { color: #facc15; }
-.annotation-status.error { color: #fca5a5; }
+.annotation-status.dirty { color: var(--warning); }
+.annotation-status.error { color: var(--danger); }
 
 .annotation-pdf-container {
   position: absolute;
   inset: 42px 0 0;
   overflow: auto;
-  background: #3b4049;
+  background: var(--surface-3);
 }
 
 /* Highlight and Ink must draw through existing annotations. FreeText keeps
@@ -1162,12 +1170,12 @@ defineExpose({
   flex: 1 1 auto;
   place-items: center;
   padding: 24px;
-  color: #94a3b8;
+  color: var(--ink-3);
   font-size: 13px;
   text-align: center;
 }
 
-.annotation-placeholder.error { color: #fca5a5; }
+.annotation-placeholder.error { color: var(--danger); }
 
 @media (max-width: 960px) {
   .annotation-toolbar {

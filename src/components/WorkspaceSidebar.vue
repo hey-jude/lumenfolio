@@ -1301,13 +1301,13 @@ onBeforeUnmount(() => {
   z-index: 6;
   width: 296px;
   min-width: 296px;
-  background: var(--bg-sidebar);
-  border-right: 1px solid var(--line-soft);
+  background: var(--surface-3);
+  border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   padding: 0 14px 16px;
   gap: 14px;
-  transition: width 180ms ease, min-width 180ms ease, padding 180ms ease;
+  transition: width var(--dur-slow) var(--ease), min-width var(--dur-slow) var(--ease), padding var(--dur-slow) var(--ease);
 }
 
 /* Knowledge-base pivot (P1): icon rail + panel inside the expanded sidebar. */
@@ -1331,10 +1331,10 @@ onBeforeUnmount(() => {
 .rail-mode {
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   border: 1px solid transparent;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   cursor: pointer;
   font-size: 15px;
   display: inline-flex;
@@ -1343,14 +1343,14 @@ onBeforeUnmount(() => {
 }
 
 .rail-mode:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-primary);
+  background: var(--surface-hover);
+  color: var(--ink);
 }
 
 .rail-mode.active {
-  background: var(--accent-soft, rgba(106, 169, 255, 0.14));
-  border-color: rgba(106, 169, 255, 0.3);
-  color: var(--accent, #6aa9ff);
+  background: var(--accent-tint);
+  border-color: var(--accent-line);
+  color: var(--accent);
 }
 
 /* Rail icons are 1em stroke SVGs so they inherit each rail's font-size (32px
@@ -1385,14 +1385,14 @@ onBeforeUnmount(() => {
   width: 40px;
   height: 40px;
   font-size: 20px;
-  border-radius: 11px;
+  border-radius: var(--r-lg);
 }
 
 .rail-divider {
   flex: 0 0 auto;
   width: 26px;
   height: 1px;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-hover-strong);
   margin: 8px 0 2px;
 }
 
@@ -1418,16 +1418,16 @@ onBeforeUnmount(() => {
 }
 
 .sidebar.drag-active {
-  background: linear-gradient(145deg, rgba(106, 169, 255, 0.12), transparent 70%);
-  border-right-color: rgba(106, 169, 255, 0.26);
+  background: linear-gradient(145deg, var(--accent-tint), transparent 70%);
+  border-right-color: var(--accent-line);
 }
 
 .sidebar.drag-active::after {
   content: '';
   position: absolute;
   inset: 6px;
-  border: 1px dashed rgba(132, 183, 255, 0.75);
-  border-radius: 12px;
+  border: 1px dashed var(--accent-line);
+  border-radius: var(--r-lg);
   pointer-events: none;
 }
 
@@ -1438,7 +1438,7 @@ onBeforeUnmount(() => {
   align-items: center;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.028), transparent 150px),
-    var(--bg-sidebar);
+    var(--surface-3);
 }
 
 .sidebar-window-bar {
@@ -1466,8 +1466,8 @@ onBeforeUnmount(() => {
   place-items: center;
   flex: 0 0 auto;
   margin-top: -2px;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.025);
+  border-radius: var(--r-xl);
+  background: var(--surface-wash);
 }
 
 .rail-brand img {
@@ -1505,32 +1505,32 @@ onBeforeUnmount(() => {
   align-content: center;
   gap: 4px;
   border: 1px solid transparent;
-  border-radius: 14px;
+  border-radius: var(--r-lg);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   cursor: pointer;
   padding: 8px 7px 7px;
   text-align: center;
-  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+  transition: border-color var(--dur-base) var(--ease), background var(--dur-base) var(--ease), color var(--dur-base) var(--ease);
 }
 
 .rail-doc:hover {
-  background: rgba(255, 255, 255, 0.045);
-  color: var(--text-primary);
+  background: var(--surface-hover);
+  color: var(--ink);
 }
 
 .rail-doc.active {
-  color: var(--text-primary);
-  border-color: rgba(106, 169, 255, 0.44);
-  background: rgba(106, 169, 255, 0.12);
+  color: var(--ink);
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
 }
 
 .rail-doc-icon {
   position: relative;
   width: 25px;
   height: 30px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line-strong);
   background:
     linear-gradient(135deg, transparent 0 8px, rgba(255, 255, 255, 0.12) 8px 9px, transparent 9px) top right / 12px 12px no-repeat,
     linear-gradient(180deg, rgba(255, 255, 255, 0.11), rgba(255, 255, 255, 0.045));
@@ -1543,10 +1543,10 @@ onBeforeUnmount(() => {
   top: -1px;
   width: 10px;
   height: 10px;
-  border-left: 1px solid rgba(255, 255, 255, 0.14);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 0 7px 0 4px;
-  background: rgba(255, 255, 255, 0.08);
+  border-left: 1px solid var(--line-strong);
+  border-bottom: 1px solid var(--line-strong);
+  border-radius: 0 var(--r-sm) 0 var(--r-xs);
+  background: var(--surface-hover-strong);
 }
 
 .rail-doc-icon::after {
@@ -1586,8 +1586,8 @@ onBeforeUnmount(() => {
   bottom: 8px;
   width: 3px;
   overflow: hidden;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: var(--r-pill);
+  background: var(--surface-hover-strong);
 }
 
 .rail-doc-progress span {
@@ -1604,9 +1604,9 @@ onBeforeUnmount(() => {
   min-height: 56px;
   display: grid;
   place-items: center;
-  border: 1px dashed rgba(255, 255, 255, 0.14);
-  border-radius: 14px;
-  color: var(--text-muted);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-lg);
+  color: var(--ink-3);
   font-size: 11px;
   font-weight: var(--w-medium);
 }
@@ -1619,32 +1619,34 @@ onBeforeUnmount(() => {
   width: 100%;
   flex: 0 0 auto;
   padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--line);
 }
 
 .rail-btn {
   width: 38px;
   height: 38px;
-  border-radius: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line-strong);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.085), rgba(255, 255, 255, 0.035)),
     rgba(255, 255, 255, 0.028);
-  color: rgba(235, 241, 248, 0.84);
+  color: var(--ink);
   cursor: pointer;
   display: grid;
   place-items: center;
   font-size: 18px;
   font-weight: var(--w-medium);
+  /* The inset highlight is what makes the rail button read as a physical key;
+     the raised token supplies the ring and the drop below it. */
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 8px 24px rgba(0, 0, 0, 0.14);
-  transition: border-color 140ms ease, background 140ms ease, color 140ms ease, transform 140ms ease;
+    inset 0 1px 0 var(--surface-hover-strong),
+    var(--shadow-raised);
+  transition: border-color var(--dur-base) var(--ease), background var(--dur-base) var(--ease), color var(--dur-base) var(--ease), transform var(--dur-base) var(--ease);
 }
 
 .rail-btn:hover:not(:disabled) {
-  color: var(--text-primary);
-  border-color: rgba(122, 162, 255, 0.58);
+  color: var(--ink);
+  border-color: var(--accent-line);
   background:
     linear-gradient(180deg, rgba(122, 162, 255, 0.18), rgba(122, 162, 255, 0.065)),
     rgba(255, 255, 255, 0.045);
@@ -1669,7 +1671,7 @@ onBeforeUnmount(() => {
   font-weight: var(--w-strong);
   letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1688,18 +1690,18 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 
 .panel-action-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-primary);
+  background: var(--surface-hover);
+  color: var(--ink);
 }
 
 .panel-action-btn:disabled {
@@ -1718,10 +1720,10 @@ onBeforeUnmount(() => {
   z-index: 20;
   min-width: 168px;
   padding: 4px;
-  border: 1px solid var(--line-soft);
-  border-radius: 10px;
-  background: var(--bg-panel, #1f1f24);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-overlay);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1734,16 +1736,16 @@ onBeforeUnmount(() => {
   width: 100%;
   padding: 7px 9px;
   border: none;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
 }
 
 .add-menu-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-hover);
 }
 
 .add-menu-ic {
@@ -1752,7 +1754,7 @@ onBeforeUnmount(() => {
   width: 16px;
   height: 16px;
   flex: 0 0 16px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .add-menu-ic svg {
@@ -1765,10 +1767,10 @@ onBeforeUnmount(() => {
   z-index: 1000;
   min-width: 172px;
   padding: 4px;
-  border: 1px solid var(--line-soft);
-  border-radius: 10px;
-  background: var(--bg-panel, #1f1f24);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.38);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-overlay);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1781,21 +1783,21 @@ onBeforeUnmount(() => {
   width: 100%;
   padding: 7px 10px;
   border: none;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
 }
 
 .ctx-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--surface-hover);
 }
 
 .ctx-item.ctx-danger:hover {
-  background: rgba(224, 106, 106, 0.14);
-  color: var(--danger, #e06a6a);
+  background: var(--danger-tint);
+  color: var(--danger);
 }
 
 /* The icon is dimmer than its label at rest; on the danger row's hover it should
@@ -1810,7 +1812,7 @@ onBeforeUnmount(() => {
   width: 16px;
   height: 16px;
   flex: 0 0 16px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .ctx-ic svg {
@@ -1820,13 +1822,13 @@ onBeforeUnmount(() => {
 .ctx-sep {
   height: 1px;
   margin: 3px 4px;
-  background: var(--line-soft);
+  background: var(--line);
 }
 
 .panel-hint {
   margin-left: auto;
   font-size: 11px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
   opacity: 0.7;
 }
 
@@ -1834,10 +1836,10 @@ onBeforeUnmount(() => {
   width: 22px;
   height: 22px;
   flex: 0 0 22px;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   border: 1px solid transparent;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: pointer;
   display: grid;
   place-items: center;
@@ -1845,7 +1847,7 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1;
   opacity: 0;
-  transition: opacity 140ms ease, background 140ms ease, color 140ms ease, border-color 140ms ease;
+  transition: opacity var(--dur-base) var(--ease), background var(--dur-base) var(--ease), color var(--dur-base) var(--ease), border-color var(--dur-base) var(--ease);
 }
 
 .sidebar-header:hover .path-reveal-btn,
@@ -1854,9 +1856,9 @@ onBeforeUnmount(() => {
 }
 
 .path-reveal-btn:hover:not(:disabled) {
-  color: var(--text-primary);
-  border-color: rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.055);
+  color: var(--ink);
+  border-color: var(--line);
+  background: var(--surface-hover);
 }
 
 .path-reveal-btn:disabled {
@@ -1869,9 +1871,9 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  border-radius: var(--r-lg);
   padding: 0 12px;
   min-height: 40px;
 }
@@ -1880,7 +1882,7 @@ onBeforeUnmount(() => {
   width: 100%;
   background: transparent;
   border: none;
-  color: var(--text-primary);
+  color: var(--ink);
   outline: none;
   font-size: 13px;
 }
@@ -1889,7 +1891,7 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  color: var(--text-muted);
+  color: var(--ink-3);
 }
 
 .tree-area {
@@ -1910,21 +1912,21 @@ onBeforeUnmount(() => {
 
 .folder-group {
   position: relative;
-  border-radius: 14px;
+  border-radius: var(--r-lg);
   padding: 0px 4px 0px;
   margin-top: -6px;
-  transition: background 140ms ease, box-shadow 140ms ease;
+  transition: background var(--dur-base) var(--ease), box-shadow var(--dur-base) var(--ease);
 }
 
 .folder-group.drop-target {
-  background: rgba(106, 169, 255, 0.14);
+  background: var(--accent-tint);
   box-shadow:
-    inset 0 0 0 1px rgba(132, 183, 255, 0.55),
-    0 0 0 1px rgba(132, 183, 255, 0.2);
+    inset 0 0 0 1px var(--accent-line),
+    0 0 0 1px var(--accent-tint);
 }
 
 .folder-group.drop-target .folder-title {
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .workspace-title-row {
@@ -1942,7 +1944,7 @@ onBeforeUnmount(() => {
   gap: 6px;
   border: none;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   cursor: pointer;
   padding: 4px 2px;
   text-align: left;
@@ -1951,13 +1953,13 @@ onBeforeUnmount(() => {
 }
 
 .folder-title:hover {
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .folder-caret {
   width: 12px;
   flex: 0 0 12px;
-  color: var(--text-muted);
+  color: var(--ink-3);
 }
 
 .folder-name {
@@ -1974,12 +1976,12 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 140ms ease, background 140ms ease, color 140ms ease, border-color 140ms ease;
+  transition: opacity var(--dur-base) var(--ease), background var(--dur-base) var(--ease), color var(--dur-base) var(--ease), border-color var(--dur-base) var(--ease);
   padding: 0;
   line-height: 1;
   font-size: 14px;
@@ -1997,13 +1999,13 @@ onBeforeUnmount(() => {
 }
 
 .folder-open-btn:hover {
-  color: var(--text-primary);
-  border-color: rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.055);
+  color: var(--ink);
+  border-color: var(--line);
+  background: var(--surface-hover);
 }
 
 .folder-delete-btn {
-  color: rgba(255, 102, 102, 0.9);
+  color: var(--danger);
 }
 
 .folder-delete-icon {
@@ -2012,9 +2014,9 @@ onBeforeUnmount(() => {
 }
 
 .folder-delete-btn:hover {
-  color: #ff6b6b;
-  border-color: rgba(255, 107, 107, 0.4);
-  background: rgba(255, 107, 107, 0.12);
+  color: var(--danger);
+  border-color: var(--danger-line);
+  background: var(--danger-tint);
 }
 
 /* Knowledge-base pivot: collection tree rows. */
@@ -2035,10 +2037,10 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 4px;
   min-width: 0;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   padding: 4px 6px 4px 2px;
   border: 1px solid transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 /* Manual reorder: an accent insertion line at the row edge where a dragged
@@ -2052,8 +2054,8 @@ onBeforeUnmount(() => {
   left: 4px;
   right: 4px;
   height: 2px;
-  border-radius: 2px;
-  background: var(--accent, #6aa9ff);
+  border-radius: var(--r-xs);
+  background: var(--accent);
   pointer-events: none;
 }
 
@@ -2077,33 +2079,33 @@ onBeforeUnmount(() => {
   transform: translate(12px, 8px);
   max-width: 220px;
   padding: 4px 10px;
-  border-radius: 8px;
-  background: var(--accent, #6aa9ff);
-  color: #0b1220;
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: var(--surface-0);
   font-size: 12px;
   font-weight: var(--w-medium);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   pointer-events: none;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-overlay);
 }
 
 .collection-row:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-wash);
 }
 
 .collection-row.active {
-  background: rgba(106, 169, 255, 0.12);
-  border-color: rgba(106, 169, 255, 0.25);
-  color: var(--text-primary);
+  background: var(--accent-tint);
+  border-color: var(--accent-line);
+  color: var(--ink);
 }
 
 /* C-d: highlight a collection as a drop target (doc move / nest / OS file). */
 .collection-row.drag-over {
-  background: rgba(106, 169, 255, 0.2);
-  border-color: rgba(106, 169, 255, 0.55);
-  color: var(--text-primary);
+  background: var(--accent-tint);
+  border-color: var(--accent-line);
+  color: var(--ink);
 }
 
 .collection-caret {
@@ -2114,14 +2116,14 @@ onBeforeUnmount(() => {
   place-items: center;
   border: none;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: pointer;
   padding: 0;
   line-height: 1;
 }
 
 .collection-caret svg {
-  transition: transform 120ms ease;
+  transition: transform var(--dur-fast) var(--ease);
 }
 
 .collection-caret.expanded svg {
@@ -2129,7 +2131,7 @@ onBeforeUnmount(() => {
 }
 
 .collection-row:hover .collection-caret {
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .collection-name-btn {
@@ -2158,7 +2160,7 @@ onBeforeUnmount(() => {
 
 .collection-count {
   flex: 0 0 auto;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
@@ -2168,7 +2170,7 @@ onBeforeUnmount(() => {
   gap: 2px;
   flex: 0 0 auto;
   opacity: 0;
-  transition: opacity 0.12s ease;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 
 .collection-row:hover .collection-actions,
@@ -2179,7 +2181,7 @@ onBeforeUnmount(() => {
 
 /* Inline delete confirm: keep the ✓/✗ visible regardless of hover. */
 .collection-confirm-yes {
-  color: var(--danger, #e06a6a);
+  color: var(--danger);
 }
 
 .collection-action-btn {
@@ -2188,12 +2190,12 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   line-height: 1;
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 
 .collection-action-btn svg {
@@ -2201,26 +2203,26 @@ onBeforeUnmount(() => {
 }
 
 .collection-action-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-primary);
+  background: var(--surface-hover-strong);
+  color: var(--ink);
 }
 
 .collection-delete-btn {
-  color: rgba(255, 102, 102, 0.9);
+  color: var(--danger);
 }
 
 .collection-delete-btn:hover {
-  background: rgba(255, 102, 102, 0.14);
-  color: rgba(255, 102, 102, 1);
+  background: var(--danger-tint);
+  color: var(--danger);
 }
 
 .collection-rename-input {
   flex: 1;
   min-width: 0;
-  border: 1px solid var(--line-soft);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-primary);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-hover);
+  color: var(--ink);
   font-size: 12px;
   font-weight: var(--w-medium);
   padding: 2px 6px;
@@ -2245,7 +2247,7 @@ onBeforeUnmount(() => {
      collection-row rhythm (tight padding, no inter-row margin, small radius) so
      parent folders and their documents share one vertical cadence. */
   padding: 5px 8px;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   margin-bottom: 0;
   border: 1px solid transparent;
   /* WKWebView (Tauri/Safari) sizes <button> to its min-content width and won't
@@ -2257,12 +2259,12 @@ onBeforeUnmount(() => {
 
 /* Per-document actions (reindex + delete), revealed on row hover. */
 .doc-row:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--surface-wash);
 }
 
 .doc-row.active {
-  background: rgba(255, 255, 255, 0.075);
-  border-color: rgba(106, 169, 255, 0.25);
+  background: var(--surface-hover-strong);
+  border-color: var(--accent-line);
 }
 
 .doc-main {
@@ -2285,33 +2287,33 @@ onBeforeUnmount(() => {
   align-self: center;
   width: 8px;
   height: 8px;
-  border-radius: 999px;
-  background: var(--text-muted);
+  border-radius: var(--r-pill);
+  background: var(--ink-3);
 }
 
 .doc-status-dot.ready {
-  background: #3db570;
-  box-shadow: 0 0 0 2px rgba(61, 181, 112, 0.14);
+  background: var(--success);
+  box-shadow: 0 0 0 2px var(--success-tint);
 }
 
 .doc-status-dot.failed {
-  background: #e06464;
-  box-shadow: 0 0 0 2px rgba(198, 73, 73, 0.14);
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--danger-tint);
 }
 
 .doc-status-dot.processing {
-  background: #f0b54a;
+  background: var(--warning);
   animation: doc-status-pulse 1.4s ease-in-out infinite;
 }
 
 @keyframes doc-status-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(240, 181, 74, 0.45);
+    box-shadow: 0 0 0 0 var(--warning-line);
     opacity: 1;
   }
   50% {
-    box-shadow: 0 0 0 4px rgba(240, 181, 74, 0);
+    box-shadow: 0 0 0 4px transparent;
     opacity: 0.55;
   }
 }
@@ -2319,7 +2321,7 @@ onBeforeUnmount(() => {
 .doc-name {
   flex: 1;
   min-width: 0;
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 13px;
   line-height: 1.35;
   overflow: hidden;
@@ -2329,7 +2331,7 @@ onBeforeUnmount(() => {
 
 .doc-time {
   flex-shrink: 0;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -2337,8 +2339,8 @@ onBeforeUnmount(() => {
 .doc-progress {
   height: 3px;
   overflow: hidden;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: var(--r-pill);
+  background: var(--surface-hover-strong);
 }
 
 .doc-progress span {
@@ -2346,30 +2348,30 @@ onBeforeUnmount(() => {
   height: 100%;
   border-radius: inherit;
   background: linear-gradient(90deg, #ffd089, #8ae8ff);
-  transition: width 180ms ease;
+  transition: width var(--dur-slow) var(--ease);
 }
 
 .empty-tree,
 .scan-error {
-  border: 1px solid var(--line-soft);
-  border-radius: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
   padding: 12px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 13px;
   line-height: 1.5;
 }
 
 .scan-error {
-  color: #ffb3b3;
-  border-color: rgba(198, 73, 73, 0.28);
-  background: rgba(198, 73, 73, 0.1);
+  color: var(--danger);
+  border-color: var(--danger-line);
+  background: var(--danger-tint);
 }
 
 .sidebar-status {
   flex: 0 0 auto;
   padding: 6px 10px 2px;
   font-size: 11px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
   min-height: 16px;
 }
 </style>

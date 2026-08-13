@@ -1570,16 +1570,16 @@ watch(translationArtifactActivePage, async () => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-app);
+  background: var(--surface-0);
 }
 
 .reader-chrome {
   display: grid;
   grid-template-rows: 30px 42px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+  border-bottom: 1px solid var(--line);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.012)),
-    var(--bg-app);
+    var(--surface-0);
 }
 
 /* Row 1: thin centered title bar (window drag handle + active doc name). */
@@ -1589,7 +1589,7 @@ watch(translationArtifactActivePage, async () => {
   justify-content: center;
   min-width: 0;
   padding: 0 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  border-bottom: 1px solid var(--line);
 }
 
 .reader-titlebar-name {
@@ -1597,7 +1597,7 @@ watch(translationArtifactActivePage, async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 12px;
   font-weight: var(--w-strong);
 }
@@ -1625,8 +1625,8 @@ watch(translationArtifactActivePage, async () => {
   display: inline-flex;
   align-items: center;
   flex-shrink: 0;
-  border: 1px solid var(--line-soft);
-  border-radius: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
   overflow: hidden;
 }
 
@@ -1638,33 +1638,33 @@ watch(translationArtifactActivePage, async () => {
   padding: 0 12px;
   border: none;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: pointer;
   font-size: 12px;
 }
 
 .reader-mode-tabs button.active {
-  background: rgba(106, 169, 255, 0.16);
-  color: var(--text-primary);
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 
 .knowledge-working-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #f0b54a;
+  background: var(--warning);
 }
 
 .toolbar-select,
 .toolbar-btn,
 .toolbar-control-group {
   height: 32px;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   /* Ghost toolbar: no borders/boxes by default — controls read as icons/labels
      and only show a subtle highlight on hover (or when active). */
   border: none;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--ink);
   white-space: nowrap;
   flex-shrink: 0;
 }
@@ -1675,7 +1675,7 @@ watch(translationArtifactActivePage, async () => {
   max-width: 150px;
   appearance: none;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--ink);
   cursor: pointer;
   outline: none;
   padding: 0 10px;
@@ -1689,7 +1689,7 @@ watch(translationArtifactActivePage, async () => {
 .toolbar-select:hover,
 .toolbar-btn:hover,
 .pdf-toolbar-controls button:hover {
-  background-color: rgba(255, 255, 255, 0.08);
+  background-color: var(--surface-hover-strong);
 }
 
 /* The ghost toolbar controls use a calm background highlight instead of a hard
@@ -1699,12 +1699,12 @@ watch(translationArtifactActivePage, async () => {
 .toolbar-btn:focus-visible,
 .pdf-toolbar-controls button:focus-visible {
   outline: none;
-  background-color: rgba(255, 255, 255, 0.08);
+  background-color: var(--surface-hover-strong);
 }
 
 .toolbar-select:hover,
 .toolbar-select:focus-visible {
-  background-color: rgba(255, 255, 255, 0.08);
+  background-color: var(--surface-hover-strong);
 }
 
 .toolbar-btn {
@@ -1728,16 +1728,16 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .toolbar-btn.split-toggle.running {
-  background: rgba(106, 169, 255, 0.14);
+  background: var(--accent-tint);
 }
 
 .toolbar-btn.stop-action {
-  color: #ffb3b3;
-  background: rgba(198, 73, 73, 0.12);
+  color: var(--danger);
+  background: var(--danger-tint);
 }
 
 .toolbar-btn.stop-action:hover {
-  background: rgba(198, 73, 73, 0.2);
+  background: var(--danger-tint);
 }
 
 .toolbar-icon {
@@ -1748,59 +1748,59 @@ watch(translationArtifactActivePage, async () => {
 
 .compact-progress {
   font-size: 11px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .toolbar-btn.split-toggle {
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .toolbar-btn.split-toggle.active {
-  color: var(--text-primary);
-  background: rgba(106, 169, 255, 0.16);
+  color: var(--ink);
+  background: var(--accent-tint);
 }
 
 .status-chip {
   padding: 5px 10px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   font-size: 11px;
   line-height: 1;
-  color: var(--text-primary);
-  border: 1px solid var(--line-soft);
+  color: var(--ink);
+  border: 1px solid var(--line);
   white-space: nowrap;
 }
 
 .status-chip.succeeded {
-  background: rgba(61, 181, 112, 0.16);
+  background: var(--success-tint);
 }
 
 .status-chip.running,
 .status-chip.pending {
-  background: rgba(214, 151, 44, 0.18);
+  background: var(--warning-tint);
 }
 
 .status-chip.failed {
-  background: rgba(198, 73, 73, 0.18);
+  background: var(--danger-tint);
 }
 
 .status-chip.indexed {
-  background: rgba(61, 181, 112, 0.16);
+  background: var(--success-tint);
 }
 
 .status-chip.indexing,
 .status-chip.pending {
-  background: rgba(214, 151, 44, 0.18);
+  background: var(--warning-tint);
 }
 
 .status-chip.stale {
-  background: rgba(198, 73, 73, 0.18);
+  background: var(--danger-tint);
 }
 
 .pdf-toolbar-controls {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 12px;
 }
 
@@ -1814,9 +1814,9 @@ watch(translationArtifactActivePage, async () => {
   width: 32px;
   height: 30px;
   border: none;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--text-primary);
+  color: var(--ink);
   cursor: pointer;
   padding: 0;
   font-size: 17px;
@@ -1828,17 +1828,17 @@ watch(translationArtifactActivePage, async () => {
   min-width: 52px;
   text-align: center;
   white-space: nowrap;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 12px;
   font-weight: var(--w-medium);
 }
 
 .translation-error {
   margin: 14px 20px 0;
-  border: 1px solid rgba(198, 73, 73, 0.28);
-  background: rgba(198, 73, 73, 0.12);
-  color: #ffb3b3;
-  border-radius: 12px;
+  border: 1px solid var(--danger-line);
+  background: var(--danger-tint);
+  color: var(--danger);
+  border-radius: var(--r-lg);
   padding: 12px 14px;
   font-size: 13px;
 }
@@ -1854,9 +1854,9 @@ watch(translationArtifactActivePage, async () => {
 .empty-stage,
 .viewer-card {
   height: 100%;
-  border: 1px solid var(--line-soft);
-  border-radius: 18px;
-  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  background: var(--surface-1);
   overflow: visible;
 }
 
@@ -1868,13 +1868,13 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .empty-title {
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 18px;
   font-weight: var(--w-strong);
 }
 
 .empty-copy {
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 13px;
 }
 
@@ -1882,8 +1882,8 @@ watch(translationArtifactActivePage, async () => {
   width: 320px;
   max-width: 70vw;
   height: 10px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.06);
+  border-radius: var(--r-pill);
+  background: var(--surface-hover);
   overflow: hidden;
 }
 
@@ -1934,12 +1934,12 @@ watch(translationArtifactActivePage, async () => {
 .viewer-card-header {
   position: relative;
   min-height: 48px;
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line);
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 16px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 12px;
 }
 
@@ -1952,8 +1952,8 @@ watch(translationArtifactActivePage, async () => {
   min-width: 0;
   min-height: 0;
   margin: 8px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
   background:
     linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.055), transparent),
     rgba(255, 255, 255, 0.025);
@@ -2000,18 +2000,18 @@ watch(translationArtifactActivePage, async () => {
   height: 28px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--line-soft);
-  border-radius: 9px;
-  background: rgba(18, 23, 31, 0.86);
-  color: var(--text-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-float);
+  color: var(--ink-3);
   cursor: pointer;
   pointer-events: auto;
   backdrop-filter: blur(8px);
   transition:
-    border-color 160ms ease,
-    background 160ms ease,
-    color 160ms ease,
-    box-shadow 160ms ease;
+    border-color var(--dur-base) var(--ease),
+    background var(--dur-base) var(--ease),
+    color var(--dur-base) var(--ease),
+    box-shadow var(--dur-base) var(--ease);
 }
 
 .pane-link-button svg {
@@ -2020,10 +2020,10 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .pane-link-button.linked {
-  border-color: rgba(106, 169, 255, 0.52);
-  background: rgba(37, 99, 235, 0.2);
-  color: #bfdbfe;
-  box-shadow: 0 0 0 1px rgba(106, 169, 255, 0.12);
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
+  box-shadow: 0 0 0 1px var(--accent-tint);
 }
 
 .pane-link-button:disabled {
@@ -2055,19 +2055,19 @@ watch(translationArtifactActivePage, async () => {
   justify-content: space-between;
   gap: 8px;
   padding: 0 9px;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
-  color: var(--text-muted);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-3);
   font-size: 11px;
   font-weight: var(--w-strong);
 }
 
 .annotation-pane-toggle {
   min-height: 24px;
-  border: 1px solid rgba(96, 165, 250, 0.35);
-  border-radius: 6px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-sm);
   padding: 0 7px;
-  background: rgba(59, 130, 246, 0.1);
-  color: #bfdbfe;
+  background: var(--accent-tint);
+  color: var(--accent-ink);
   cursor: pointer;
   font-size: 11px;
 }
@@ -2075,18 +2075,26 @@ watch(translationArtifactActivePage, async () => {
 .annotation-pane-toggle:hover,
 .annotation-pane-toggle.active,
 .annotation-toggle.active {
-  border-color: rgba(96, 165, 250, 0.7);
-  background: rgba(59, 130, 246, 0.24);
-  color: #fff;
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 
+/* ─────────────────── Paper, not chrome ───────────────────
+   Everything from here down through .inline-translation paints a rendered page
+   — the translated document as a sheet the reader is looking at. Those colors
+   are deliberately raw and deliberately light: they describe the document, not
+   the application, and must not follow the app's theme. Reading a translation
+   on a dark grey card is not the same artifact as reading it on paper.
+
+   Do not migrate these onto tokens. */
 .translation-page {
   flex: 1;
   min-height: 0;
   margin: 6px 8px 8px;
   padding: 0;
   overflow: auto;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: #f4f1e8;
   color: #1d2126;
   box-shadow: none;
@@ -2113,8 +2121,8 @@ watch(translationArtifactActivePage, async () => {
 .translation-page.has-full-state {
   display: grid;
   place-items: center;
-  background: #171b22;
-  color: var(--text-primary);
+  background: var(--surface-1);
+  color: var(--ink);
 }
 
 .translation-full-state {
@@ -2123,7 +2131,7 @@ watch(translationArtifactActivePage, async () => {
   justify-items: center;
   gap: 14px;
   text-align: center;
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .translation-full-logo {
@@ -2131,10 +2139,10 @@ watch(translationArtifactActivePage, async () => {
   height: 72px;
   display: grid;
   place-items: center;
-  border-radius: 18px;
-  border: 1px solid rgba(106, 169, 255, 0.38);
-  background: rgba(255, 255, 255, 0.06);
-  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.28);
+  border-radius: var(--r-xl);
+  border: 1px solid var(--accent-line);
+  background: var(--surface-hover);
+  box-shadow: var(--shadow-page);
 }
 
 .translation-full-logo img {
@@ -2150,7 +2158,7 @@ watch(translationArtifactActivePage, async () => {
 
 .translation-full-detail {
   max-width: 460px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 13px;
   line-height: 1.7;
 }
@@ -2159,8 +2167,8 @@ watch(translationArtifactActivePage, async () => {
   width: min(220px, 70%);
   height: 3px;
   overflow: hidden;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.12);
+  border-radius: var(--r-pill);
+  background: var(--surface-active);
 }
 
 .translation-full-track span {
@@ -2169,7 +2177,7 @@ watch(translationArtifactActivePage, async () => {
   min-width: 18%;
   border-radius: inherit;
   background: linear-gradient(90deg, #38bdf8, #2563eb);
-  transition: width 180ms ease;
+  transition: width var(--dur-slow) var(--ease);
 }
 
 .translation-full-state.loading .translation-full-track span {
@@ -2187,30 +2195,30 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .translation-full-state.error .translation-full-logo {
-  border-color: rgba(248, 113, 113, 0.42);
+  border-color: var(--danger-line);
 }
 
 .translation-full-state.error .translation-full-title {
-  color: #fca5a5;
+  color: var(--danger);
 }
 .translation-full-state.info .translation-full-logo {
-  border-color: rgba(106, 169, 255, 0.34);
+  border-color: var(--accent-line);
 }
 .translation-full-state.info .translation-full-title {
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .translation-full-retry {
-  border: 1px solid rgba(106, 169, 255, 0.32);
-  border-radius: 6px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-sm);
   padding: 7px 12px;
-  background: rgba(106, 169, 255, 0.12);
-  color: #bfdbfe;
+  background: var(--accent-tint);
+  color: var(--accent-ink);
   cursor: pointer;
 }
 
 .translation-full-retry:hover {
-  background: rgba(106, 169, 255, 0.18);
+  background: var(--accent-tint);
 }
 
 .translation-page-sheet {
@@ -2222,7 +2230,7 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .translation-page-sheet.active {
-  outline: 1px solid rgba(59, 130, 246, 0.28);
+  outline: 1px solid var(--accent-line);
   outline-offset: -1px;
 }
 
@@ -2236,7 +2244,7 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .translation-page-sheet.failed {
-  background: rgba(180, 58, 42, 0.08);
+  background: var(--danger-tint);
 }
 
 .translation-placeholder {
@@ -2248,10 +2256,10 @@ watch(translationArtifactActivePage, async () => {
 
 .translation-page-content {
   padding: 28px 30px 34px;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   background: #f3efe7;
   color: #1d2126;
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.16);
+  box-shadow: var(--shadow-page);
   max-width: 860px;
   margin: 0 auto;
 }
@@ -2269,14 +2277,14 @@ watch(translationArtifactActivePage, async () => {
   border: 1px solid rgba(117, 126, 140, 0.2);
   background: rgba(255, 255, 255, 0.54);
   color: inherit;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   padding: 14px 16px;
   margin-bottom: 12px;
   cursor: pointer;
 }
 
 .translation-page-block.active {
-  border-color: rgba(59, 130, 246, 0.56);
+  border-color: var(--accent-line);
   background: rgba(232, 240, 255, 0.96);
 }
 
@@ -2300,8 +2308,8 @@ watch(translationArtifactActivePage, async () => {
   margin: 20px auto;
   background: #f3efe7;
   color: #1d2126;
-  border-radius: 8px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.22);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-page);
   padding: 36px 42px 70px;
   overflow: visible;
 }
@@ -2333,7 +2341,7 @@ watch(translationArtifactActivePage, async () => {
   text-align: left;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   padding: 10px 12px;
   line-height: 1.8;
   font-size: 15px;
@@ -2343,8 +2351,8 @@ watch(translationArtifactActivePage, async () => {
 }
 
 .text-block.active {
-  background: rgba(250, 204, 21, 0.24);
-  border-color: rgba(214, 164, 20, 0.35);
+  background: var(--warning-tint);
+  border-color: var(--warning-line);
 }
 
 .selection-toolbar {
@@ -2354,24 +2362,24 @@ watch(translationArtifactActivePage, async () => {
   transform: translateX(-50%);
   display: flex;
   gap: 8px;
-  background: #1e2228;
+  background: var(--surface-2);
   padding: 8px;
-  border-radius: 14px;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow-overlay);
 }
 
 .selection-toolbar button {
   min-height: 34px;
   min-width: 80px;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   border: none;
   background: transparent;
-  color: #d6dce6;
+  color: var(--ink-2);
   cursor: pointer;
 }
 
 .selection-toolbar .active-action {
-  background: rgba(106, 169, 255, 0.18);
+  background: var(--accent-tint);
 }
 
 .inline-translation {
@@ -2379,12 +2387,12 @@ watch(translationArtifactActivePage, async () => {
   right: 28px;
   bottom: 92px;
   width: 360px;
-  border-radius: 14px;
-  border: 1px solid rgba(106, 169, 255, 0.28);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--accent-line);
   background: rgba(255, 255, 255, 0.98);
   color: #111827;
   padding: 14px;
-  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
+  box-shadow: var(--shadow-overlay);
   z-index: 6;
 }
 
@@ -2401,7 +2409,7 @@ watch(translationArtifactActivePage, async () => {
 .toggle-source {
   border: none;
   background: transparent;
-  color: #2563eb;
+  color: var(--accent-ink);
   cursor: pointer;
 }
 
@@ -2427,15 +2435,15 @@ watch(translationArtifactActivePage, async () => {
 .page-chip {
   min-width: 58px;
   min-height: 38px;
-  border-radius: 12px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-secondary);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   cursor: pointer;
 }
 
 .page-chip.active {
-  background: rgba(106, 169, 255, 0.12);
-  color: var(--text-primary);
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 </style>

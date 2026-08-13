@@ -131,7 +131,7 @@ function isAdding(paper) {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: var(--bg-app);
+  background: var(--surface-0);
 }
 
 .trending-head {
@@ -140,13 +140,13 @@ function isAdding(paper) {
   justify-content: space-between;
   padding: 0 18px;
   min-height: 72px;
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line);
 }
 
 .trending-title {
   font-size: 16px;
   font-weight: var(--w-strong);
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .trending-actions {
@@ -158,8 +158,8 @@ function isAdding(paper) {
 .trending-tabs {
   display: inline-flex;
   align-items: center;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
   padding: 2px;
 }
 
@@ -167,16 +167,16 @@ function isAdding(paper) {
   height: 26px;
   padding: 0 12px;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 12px;
   cursor: pointer;
 }
 
 .trending-tab.active {
-  background: rgba(106, 169, 255, 0.16);
-  color: var(--text-primary);
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 
 .trending-tab:disabled {
@@ -190,10 +190,10 @@ function isAdding(paper) {
   gap: 6px;
   height: 30px;
   padding: 0 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-secondary);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   font-size: 12px;
   cursor: pointer;
 }
@@ -204,8 +204,8 @@ function isAdding(paper) {
 }
 
 .trending-refresh:hover:not(:disabled) {
-  border-color: rgba(106, 169, 255, 0.4);
-  color: var(--text-primary);
+  border-color: var(--accent-line);
+  color: var(--ink);
 }
 
 .trending-refresh:disabled {
@@ -224,15 +224,15 @@ function isAdding(paper) {
   max-width: 1400px;
   margin: 0 auto 12px;
   padding: 8px 12px;
-  border: 1px solid rgba(198, 73, 73, 0.4);
-  border-radius: 8px;
-  background: rgba(198, 73, 73, 0.12);
-  color: #ffb3b3;
+  border: 1px solid var(--danger-line);
+  border-radius: var(--r-md);
+  background: var(--danger-tint);
+  color: var(--danger);
   font-size: 12px;
 }
 
 .trending-state {
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 13px;
   padding: 32px 0;
   text-align: center;
@@ -247,7 +247,7 @@ function isAdding(paper) {
 
 .trending-state-detail {
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--ink-3);
   max-width: 420px;
 }
 
@@ -255,15 +255,15 @@ function isAdding(paper) {
 .trending-add,
 .trending-open-hf {
   cursor: pointer;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   font-size: 12px;
 }
 
 .trending-retry {
   padding: 6px 14px;
-  border: 1px solid rgba(106, 169, 255, 0.4);
-  background: rgba(106, 169, 255, 0.14);
-  color: var(--text-primary);
+  border: 1px solid var(--accent-line);
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 
 .trending-list {
@@ -278,9 +278,9 @@ function isAdding(paper) {
 .trending-card {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-1);
   overflow: hidden;
 }
 
@@ -290,11 +290,11 @@ function isAdding(paper) {
   height: 156px;
   object-fit: cover;
   object-position: top center;
-  background: var(--bg-elevated);
+  background: var(--surface-2);
 }
 
 .trending-thumb-empty {
-  background: linear-gradient(135deg, var(--bg-elevated), var(--bg-panel));
+  background: linear-gradient(135deg, var(--surface-2), var(--surface-1));
 }
 
 .trending-card-main {
@@ -306,14 +306,14 @@ function isAdding(paper) {
 .trending-card-title {
   font-size: 14px;
   font-weight: var(--w-strong);
-  color: var(--text-primary);
+  color: var(--ink);
   line-height: 1.35;
 }
 
 .trending-card-authors {
   margin-top: 3px;
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -325,7 +325,7 @@ function isAdding(paper) {
   flex-wrap: wrap;
   gap: 10px;
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--ink-3);
 }
 
 .trending-upvotes {
@@ -337,7 +337,7 @@ function isAdding(paper) {
   margin: 8px 0 0;
   font-size: 12.5px;
   line-height: 1.5;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
@@ -352,9 +352,9 @@ function isAdding(paper) {
 
 .trending-add {
   padding: 5px 14px;
-  border: 1px solid rgba(106, 169, 255, 0.45);
-  background: rgba(106, 169, 255, 0.16);
-  color: var(--text-primary);
+  border: 1px solid var(--accent-line);
+  background: var(--accent-tint);
+  color: var(--ink);
   font-weight: var(--w-strong);
 }
 
@@ -365,13 +365,13 @@ function isAdding(paper) {
 
 .trending-open-hf {
   padding: 5px 12px;
-  border: 1px solid var(--line-soft);
+  border: 1px solid var(--line);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .trending-open-hf:hover {
-  border-color: rgba(106, 169, 255, 0.4);
-  color: var(--text-primary);
+  border-color: var(--accent-line);
+  color: var(--ink);
 }
 </style>

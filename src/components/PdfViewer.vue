@@ -2290,15 +2290,15 @@ defineExpose({
 .pdf-viewer {
   height: 100%;
   min-height: 0;
-  background: var(--bg-app);
+  background: var(--surface-0);
 }
 
 .pdf-state button {
   min-height: 30px;
-  border-radius: 9px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-primary);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink);
   cursor: pointer;
   padding: 0 10px;
 }
@@ -2313,7 +2313,7 @@ defineExpose({
      the global style in styles/main.css. */
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 120px),
-    var(--bg-app);
+    var(--surface-0);
 }
 
 .pdf-pages {
@@ -2330,27 +2330,30 @@ defineExpose({
   display: grid;
   place-content: center;
   gap: 12px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   text-align: center;
   max-width: 520px;
   margin: 0 auto;
 }
 
 .pdf-state.error {
-  color: #ffb3b3;
+  color: var(--danger);
 }
 
 .pdf-error {
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 12px;
   line-height: 1.5;
 }
 
+/* White because the page is paper, not because the theme says so — a PDF
+   renders its own background and this is what sits behind it. Tokenizing it
+   would tint every document the moment the palette moved. */
 .pdf-page-host {
   position: relative;
   flex: 0 0 auto;
   background: #ffffff;
-  box-shadow: 0 22px 52px rgba(0, 0, 0, 0.34);
+  box-shadow: var(--shadow-page);
   overflow: hidden;
 }
 
@@ -2390,31 +2393,31 @@ defineExpose({
 
 .reader-highlight {
   position: absolute;
-  border-radius: 2px;
+  border-radius: var(--r-xs);
 }
 
 .reader-highlight.note {
-  background: rgba(250, 204, 21, 0.16);
-  outline: 1px solid rgba(250, 204, 21, 0.3);
+  background: var(--warning-tint);
+  outline: 1px solid var(--warning-line);
 }
 
 .reader-highlight.active {
-  background: rgba(245, 180, 24, 0.18);
-  outline: 1px solid rgba(214, 164, 20, 0.22);
+  background: var(--warning-tint);
+  outline: 1px solid var(--warning-line);
 }
 
 .reader-highlight.assist {
-  background: rgba(255, 236, 153, 0.16);
+  background: var(--warning-tint);
 }
 
 .reader-highlight.linked {
-  background: rgba(96, 165, 250, 0.13);
-  outline: 1px solid rgba(96, 165, 250, 0.28);
+  background: var(--accent-tint);
+  outline: 1px solid var(--accent-line);
 }
 
 .reader-highlight.selection {
-  background: rgba(82, 144, 255, 0.18);
-  outline: 1px solid rgba(82, 144, 255, 0.14);
+  background: var(--accent-tint);
+  outline: 1px solid var(--accent-line);
 }
 
 .assist-rail {
@@ -2426,11 +2429,11 @@ defineExpose({
   display: flex;
   align-items: center;
   gap: 4px;
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  border-radius: 999px;
-  background: rgba(24, 28, 34, 0.94);
-  box-shadow: 0 12px 24px rgba(15, 23, 42, 0.28);
-  transition: width 0.14s ease, height 0.14s ease, border-radius 0.14s ease;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface-float);
+  box-shadow: var(--shadow-overlay);
+  transition: width var(--dur-base) var(--ease), height var(--dur-base) var(--ease), border-radius var(--dur-base) var(--ease);
 }
 
 .assist-rail-hit-zone {
@@ -2441,7 +2444,7 @@ defineExpose({
 
 .assist-rail.expanded {
   width: 190px;
-  border-radius: 14px;
+  border-radius: var(--r-lg);
 }
 
 .assist-rail.vertical {
@@ -2452,7 +2455,7 @@ defineExpose({
 .assist-rail.vertical.expanded {
   width: 58px;
   height: 154px;
-  border-radius: 14px;
+  border-radius: var(--r-lg);
 }
 
 .assist-trigger,
@@ -2461,16 +2464,16 @@ defineExpose({
   width: 36px;
   height: 36px;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: transparent;
-  color: #d6dce6;
+  color: var(--ink-2);
   cursor: pointer;
   font-size: 12px;
 }
 
 .assist-trigger {
   margin-left: 2px;
-  color: #9fbfff;
+  color: var(--accent-ink);
   font-size: 18px;
 }
 
@@ -2485,7 +2488,7 @@ defineExpose({
   gap: 4px;
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.1s ease;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 
 .assist-rail.expanded .assist-actions {
@@ -2511,8 +2514,8 @@ defineExpose({
 
 .assist-actions button:hover,
 .assist-trigger:hover {
-  background: rgba(106, 169, 255, 0.16);
-  color: #ffffff;
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 
 .selection-toolbar {
@@ -2524,10 +2527,10 @@ defineExpose({
   align-items: center;
   gap: 4px;
   padding: 2px 4px;
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  border-radius: 14px;
-  background: rgba(24, 28, 34, 0.96);
-  box-shadow: 0 14px 28px rgba(15, 23, 42, 0.3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-overlay);
   backdrop-filter: blur(14px);
 }
 
@@ -2536,17 +2539,17 @@ defineExpose({
   min-width: 0;
   height: 34px;
   border: none;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   background: transparent;
-  color: #d6dce6;
+  color: var(--ink-2);
   cursor: pointer;
   font-size: 12px;
   white-space: nowrap;
 }
 
 .selection-toolbar button:hover {
-  background: rgba(106, 169, 255, 0.16);
-  color: #ffffff;
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 
 .translation-popover {
@@ -2559,15 +2562,15 @@ defineExpose({
   flex-direction: column;
   gap: 10px;
   padding: 14px;
-  border: 1px solid rgba(106, 169, 255, 0.2);
-  border-radius: 16px;
-  background: rgba(24, 28, 34, 0.96);
-  box-shadow: 0 20px 42px rgba(15, 23, 42, 0.34);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-xl);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-overlay);
   backdrop-filter: blur(16px);
 }
 
 .translation-popover.failed {
-  border-color: rgba(255, 179, 179, 0.24);
+  border-color: var(--danger-line);
 }
 
 .translation-popover-head {
@@ -2587,7 +2590,7 @@ defineExpose({
 }
 
 .translation-popover-title {
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 13px;
   font-weight: var(--w-strong);
   flex-shrink: 0;
@@ -2595,7 +2598,7 @@ defineExpose({
 
 .translation-popover-subtitle {
   min-width: 0;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 11px;
   line-height: 1.45;
   overflow: hidden;
@@ -2618,13 +2621,13 @@ defineExpose({
   height: 26px;
   padding: 0;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--r-md);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   cursor: pointer;
   font-size: 16px;
   line-height: 1;
-  transition: color 140ms ease, background 140ms ease;
+  transition: color var(--dur-base) var(--ease), background var(--dur-base) var(--ease);
 }
 
 .popover-icon-btn svg {
@@ -2633,8 +2636,8 @@ defineExpose({
 }
 
 .popover-icon-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-primary);
+  background: var(--surface-hover-strong);
+  color: var(--ink);
 }
 
 .popover-icon-btn:disabled {
@@ -2647,7 +2650,7 @@ defineExpose({
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 13px;
   line-height: 1.65;
   white-space: pre-wrap;
@@ -2655,12 +2658,12 @@ defineExpose({
 
 /* Scrollbar look comes from the global style in styles/main.css. */
 .translation-popover-error {
-  color: #ffb3b3;
+  color: var(--danger);
 }
 
 .translation-popover-hint {
   margin-top: 8px;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 12px;
   line-height: 1.45;
 }

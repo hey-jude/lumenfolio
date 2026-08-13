@@ -153,9 +153,9 @@ function timeLabel(note) {
   display: flex;
   flex-direction: column;
   height: 100%;
-  border-left: 1px solid var(--line-soft);
-  background: var(--bg-panel);
-  transition: width 0.18s ease;
+  border-left: 1px solid var(--line);
+  background: var(--surface-1);
+  transition: width var(--dur-slow) var(--ease);
 }
 
 .notes-shell.collapsed {
@@ -168,19 +168,19 @@ function timeLabel(note) {
   left: -12px;
   width: 24px;
   height: 24px;
-  border-radius: 999px;
-  border: 1px solid var(--line-soft);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink-2);
   cursor: pointer;
   z-index: 3;
   font-size: 11px;
-  transition: color 140ms ease, background 140ms ease;
+  transition: color var(--dur-base) var(--ease), background var(--dur-base) var(--ease);
 }
 
 .collapse-btn:hover {
-  color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink);
+  background: var(--surface-hover);
 }
 
 .collapsed-rail {
@@ -188,7 +188,7 @@ function timeLabel(note) {
   width: 100%;
   border: none;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   cursor: pointer;
   writing-mode: vertical-rl;
   padding: 16px 0;
@@ -197,8 +197,8 @@ function timeLabel(note) {
 }
 
 .collapsed-rail:hover {
-  color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.035);
+  color: var(--ink);
+  background: var(--surface-wash);
 }
 
 .notes-header {
@@ -207,7 +207,7 @@ function timeLabel(note) {
   justify-content: space-between;
   gap: 12px;
   padding: 18px 18px 14px;
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line);
   flex-shrink: 0;
 }
 
@@ -217,33 +217,33 @@ function timeLabel(note) {
   justify-content: center;
   width: 28px;
   height: 28px;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
   padding: 0;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-secondary);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   cursor: pointer;
   font-size: 13px;
   flex-shrink: 0;
-  transition: border-color 140ms ease, color 140ms ease, background 140ms ease;
+  transition: border-color var(--dur-base) var(--ease), color var(--dur-base) var(--ease), background var(--dur-base) var(--ease);
 }
 
 .notes-close-btn:hover {
-  border-color: rgba(106, 169, 255, 0.34);
-  color: var(--text-primary);
-  background: rgba(106, 169, 255, 0.08);
+  border-color: var(--accent-line);
+  color: var(--ink);
+  background: var(--accent-tint);
 }
 
 .notes-title {
   font-size: 16px;
   font-weight: var(--w-strong);
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .notes-subtitle {
   margin-top: 4px;
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--ink-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -254,29 +254,29 @@ function timeLabel(note) {
   display: inline-flex;
   gap: 4px;
   padding: 3px;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
   flex-shrink: 0;
 }
 
 .pane-tabs button {
   border: none;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: pointer;
   font-size: 12px;
   font-weight: var(--w-strong);
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
 }
 
 .pane-tabs button:hover {
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .pane-tabs button.active {
-  background: rgba(106, 169, 255, 0.14);
-  color: var(--text-primary);
+  background: var(--accent-tint);
+  color: var(--ink);
   cursor: default;
 }
 
@@ -295,14 +295,14 @@ function timeLabel(note) {
   justify-content: center;
   gap: 6px;
   height: 100%;
-  color: var(--text-muted);
+  color: var(--ink-3);
   text-align: center;
 }
 
 .notes-empty-title {
   font-size: 13px;
   font-weight: var(--w-strong);
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .notes-empty-copy {
@@ -318,24 +318,24 @@ function timeLabel(note) {
 }
 
 .note-card {
-  border: 1px solid var(--line-soft);
-  border-radius: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
   padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
   cursor: pointer;
-  background: rgba(255, 255, 255, 0.02);
-  transition: border-color 140ms ease, background 140ms ease;
+  background: var(--surface-wash);
+  transition: border-color var(--dur-base) var(--ease), background var(--dur-base) var(--ease);
 }
 
 .note-card:hover {
-  border-color: rgba(106, 169, 255, 0.3);
+  border-color: var(--accent-line);
 }
 
 .note-card.active {
-  border-color: rgba(106, 169, 255, 0.5);
-  background: rgba(106, 169, 255, 0.08);
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
 }
 
 .note-card-head {
@@ -348,28 +348,28 @@ function timeLabel(note) {
 .note-page {
   font-size: 11px;
   font-weight: var(--w-strong);
-  color: var(--accent, #6aa9ff);
-  background: rgba(106, 169, 255, 0.12);
+  color: var(--accent);
+  background: var(--accent-tint);
   padding: 1px 8px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
 }
 
 .note-time {
   font-size: 11px;
-  color: var(--text-muted);
+  color: var(--ink-3);
 }
 
 .note-quote {
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--ink-3);
   line-height: 1.45;
-  border-left: 2px solid var(--line-soft);
+  border-left: 2px solid var(--line);
   padding-left: 8px;
 }
 
 .note-content {
   font-size: 13px;
-  color: var(--text-primary);
+  color: var(--ink);
   line-height: 1.5;
   word-break: break-word;
 }
@@ -383,20 +383,20 @@ function timeLabel(note) {
 .note-actions button {
   border: none;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: pointer;
   font-size: 12px;
   padding: 2px 6px;
-  border-radius: 6px;
+  border-radius: var(--r-sm);
 }
 
 .note-actions button:hover {
-  color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink);
+  background: var(--surface-hover);
 }
 
 .note-actions button.danger:hover {
-  color: #ffb3b3;
-  background: rgba(255, 99, 99, 0.1);
+  color: var(--danger);
+  background: var(--danger-tint);
 }
 </style>

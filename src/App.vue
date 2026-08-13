@@ -6719,7 +6719,7 @@ onMounted(() => {
 <style scoped>
 .app-shell {
   height: 100vh;
-  background: var(--bg-app);
+  background: var(--surface-0);
   display: flex;
   overflow: hidden;
   /* Positioning context for the floating Notes drawer. */
@@ -6748,13 +6748,13 @@ onMounted(() => {
   gap: 10px;
   max-width: calc(100vw - 48px);
   padding: 8px 10px 8px 14px;
-  border: 1px solid rgba(106, 169, 255, 0.4);
-  border-radius: 999px;
-  background: rgba(29, 31, 35, 0.96);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-pill);
+  background: var(--surface-1);
+  box-shadow: var(--shadow-overlay);
   backdrop-filter: blur(8px);
   font-size: 13px;
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .update-banner-icon {
@@ -6771,17 +6771,17 @@ onMounted(() => {
 .update-banner-view {
   flex-shrink: 0;
   padding: 4px 12px;
-  border: 1px solid rgba(106, 169, 255, 0.5);
-  border-radius: 999px;
-  background: rgba(106, 169, 255, 0.16);
-  color: var(--text-primary);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-pill);
+  background: var(--accent-tint);
+  color: var(--ink);
   font-size: 12px;
   font-weight: var(--w-strong);
   cursor: pointer;
 }
 
 .update-banner-view:hover {
-  background: rgba(106, 169, 255, 0.26);
+  background: var(--accent-tint);
 }
 
 .update-banner-dismiss {
@@ -6791,17 +6791,17 @@ onMounted(() => {
   display: grid;
   place-items: center;
   border: none;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
 }
 
 .update-banner-dismiss:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-primary);
+  background: var(--surface-hover-strong);
+  color: var(--ink);
 }
 
 /* Notes drawer: an absolutely-positioned wrapper that floats over the Agent
@@ -6816,7 +6816,7 @@ onMounted(() => {
   bottom: 0;
   width: 330px;
   z-index: 40;
-  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.28);
+  box-shadow: var(--shadow-overlay);
 }
 
 .notes-drawer > :deep(.notes-shell) {
@@ -6826,7 +6826,7 @@ onMounted(() => {
 
 .notes-drawer-enter-active,
 .notes-drawer-leave-active {
-  transition: transform 0.22s ease, opacity 0.22s ease;
+  transition: transform var(--dur-slow) var(--ease), opacity var(--dur-slow) var(--ease);
 }
 
 .notes-drawer-enter-from,
@@ -6841,15 +6841,15 @@ onMounted(() => {
   flex: 1;
   position: relative;
   overflow: hidden;
-  background: var(--bg-panel);
+  background: var(--surface-1);
 }
 
 .async-panel-loading::before {
   content: "";
   position: absolute;
   inset: 18px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
   background:
     linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.055), transparent),
     rgba(255, 255, 255, 0.025);
@@ -6874,10 +6874,10 @@ onMounted(() => {
   margin-right: -12px;
   align-self: flex-start;
   margin-top: 5px;
-  border-radius: 999px;
-  border: 1px solid var(--line-soft);
-  background: var(--bg-elevated);
-  color: var(--text-secondary);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink-2);
   cursor: pointer;
   z-index: 8;
   display: grid;
@@ -6887,8 +6887,8 @@ onMounted(() => {
 }
 
 .left-collapse-btn:hover {
-  color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.075);
+  color: var(--ink);
+  background: var(--surface-hover-strong);
 }
 
 .drag-handle {
@@ -6906,8 +6906,8 @@ onMounted(() => {
   top: 14px;
   bottom: 14px;
   width: 2px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  border-radius: var(--r-pill);
+  background: var(--surface-hover-strong);
   transform: translateX(-50%);
 }
 
@@ -6919,7 +6919,7 @@ onMounted(() => {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(0, 0, 0, 0.48);
+  background: var(--scrim);
 }
 
 .confirm-backdrop {
@@ -6929,10 +6929,10 @@ onMounted(() => {
 .confirm-modal {
   width: min(430px, 100%);
   overflow: hidden;
-  border: 1px solid var(--line-soft);
-  border-radius: 14px;
-  background: #202329;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-overlay);
 }
 
 .confirm-head,
@@ -6945,11 +6945,11 @@ onMounted(() => {
 }
 
 .confirm-head {
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line);
 }
 
 .confirm-title {
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 15px;
   font-weight: var(--w-strong);
 }
@@ -6957,10 +6957,10 @@ onMounted(() => {
 .confirm-close {
   width: 30px;
   height: 30px;
-  border-radius: 999px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-secondary);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   cursor: pointer;
   font-size: 18px;
 }
@@ -6972,7 +6972,7 @@ onMounted(() => {
 
 .confirm-body {
   padding: 18px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 13px;
   line-height: 1.55;
 }
@@ -6984,10 +6984,10 @@ onMounted(() => {
 .confirm-target {
   margin-top: 14px;
   padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.07);
-  background: rgba(255, 255, 255, 0.035);
-  color: var(--text-primary);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink);
   font-size: 12px;
   font-weight: var(--w-medium);
   overflow: hidden;
@@ -6998,41 +6998,41 @@ onMounted(() => {
 .confirm-error {
   margin-top: 12px;
   padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 117, 117, 0.28);
-  background: rgba(255, 89, 89, 0.1);
-  color: #ffc0c0;
+  border-radius: var(--r-md);
+  border: 1px solid var(--danger-line);
+  background: var(--danger-tint);
+  color: var(--danger);
   font-size: 12px;
 }
 
 .confirm-actions {
   justify-content: flex-end;
-  border-top: 1px solid var(--line-soft);
+  border-top: 1px solid var(--line);
 }
 
 .confirm-btn {
   min-width: 86px;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-primary);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface-wash);
+  color: var(--ink);
   cursor: pointer;
   padding: 8px 13px;
   font-weight: var(--w-medium);
 }
 
 .confirm-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--surface-hover-strong);
 }
 
 .confirm-btn.danger {
-  border-color: rgba(255, 128, 128, 0.38);
-  background: rgba(255, 91, 91, 0.15);
-  color: #ffd2d2;
+  border-color: var(--danger-line);
+  background: var(--danger-tint);
+  color: var(--danger);
 }
 
 .confirm-btn.danger:hover:not(:disabled) {
-  background: rgba(255, 91, 91, 0.24);
+  background: var(--danger-tint);
 }
 
 .confirm-btn:disabled {
@@ -7046,10 +7046,10 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--line-soft);
-  border-radius: 16px;
-  background: #202329;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-overlay);
 }
 
 .settings-head,
@@ -7063,28 +7063,28 @@ onMounted(() => {
 }
 
 .settings-head {
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line);
 }
 
 .settings-title {
   font-size: 17px;
   font-weight: var(--w-strong);
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .settings-subtitle {
   margin-top: 4px;
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--ink-3);
 }
 
 .settings-close {
   width: 32px;
   height: 32px;
-  border-radius: 999px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-secondary);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   cursor: pointer;
   font-size: 20px;
 }
@@ -7099,8 +7099,8 @@ onMounted(() => {
 
 .settings-nav {
   padding: 16px 12px;
-  border-right: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.018);
+  border-right: 1px solid var(--line);
+  background: var(--surface-wash);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -7109,9 +7109,9 @@ onMounted(() => {
 .settings-nav-item {
   width: 100%;
   border: 1px solid transparent;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   cursor: pointer;
   padding: 10px 12px;
   text-align: left;
@@ -7123,21 +7123,21 @@ onMounted(() => {
 }
 
 .settings-nav-item span {
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 13px;
   font-weight: var(--w-medium);
 }
 
 .settings-nav-item small {
   margin-top: 4px;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 11px;
   line-height: 1.35;
 }
 
 .settings-nav-item.active {
-  border-color: rgba(106, 169, 255, 0.24);
-  background: rgba(106, 169, 255, 0.1);
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
 }
 
 .settings-panel {
@@ -7162,8 +7162,8 @@ onMounted(() => {
 .local-agents-card {
   grid-column: 1 / -1;
   padding: 14px 16px;
-  border-bottom: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.015);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-wash);
 }
 
 .local-agents-head {
@@ -7176,18 +7176,18 @@ onMounted(() => {
 
 .local-agents-recheck {
   flex-shrink: 0;
-  border: 1px solid var(--line-soft);
-  border-radius: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 12px;
   padding: 4px 10px;
   cursor: pointer;
 }
 
 .local-agents-recheck:hover:not(:disabled) {
-  color: var(--text-primary);
-  border-color: rgba(106, 169, 255, 0.4);
+  color: var(--ink);
+  border-color: var(--accent-line);
 }
 
 .local-agents-recheck:disabled {
@@ -7215,24 +7215,24 @@ onMounted(() => {
 
 .local-agent-name {
   font-size: 13px;
-  color: var(--text-primary);
+  color: var(--ink);
   min-width: 96px;
 }
 
 .local-agent-pill {
   font-size: 11px;
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
 }
 
 .local-agent-pill.ok {
-  color: #8fe0b0;
-  background: rgba(80, 200, 140, 0.14);
+  color: var(--success);
+  background: var(--success-tint);
 }
 
 .local-agent-pill.missing {
-  color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink-3);
+  background: var(--surface-hover);
 }
 
 .local-agents-spacer {
@@ -7248,11 +7248,11 @@ onMounted(() => {
 }
 
 .local-agent-test-result.ok {
-  color: #8fe0b0;
+  color: var(--success);
 }
 
 .local-agent-test-result.missing {
-  color: #e0a08f;
+  color: var(--danger);
 }
 
 .local-agent-install {
@@ -7265,13 +7265,13 @@ onMounted(() => {
 }
 
 .local-agent-install:disabled {
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: default;
 }
 
 .provider-list {
   padding: 18px 14px;
-  border-right: 1px solid var(--line-soft);
+  border-right: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -7296,10 +7296,10 @@ onMounted(() => {
   width: 30px;
   height: 30px;
   flex: 0 0 auto;
-  border-radius: 999px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-primary);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink);
   cursor: pointer;
   font-size: 18px;
   line-height: 1;
@@ -7309,17 +7309,17 @@ onMounted(() => {
   position: relative;
   width: 100%;
   min-height: 72px;
-  border-radius: 12px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.025);
-  color: var(--text-secondary);
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   padding: 0;
   overflow: hidden;
 }
 
 .provider-list-item.active {
-  border-color: rgba(106, 169, 255, 0.34);
-  background: rgba(106, 169, 255, 0.1);
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
 }
 
 .provider-list-select {
@@ -7346,36 +7346,36 @@ onMounted(() => {
 .provider-list-delete {
   border: 1px solid transparent;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: pointer;
 }
 
 .provider-list-default {
   min-height: 26px;
   padding: 0 7px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   font-size: 10px;
   font-weight: var(--w-medium);
 }
 
 .provider-list-default:hover:not(:disabled) {
-  border-color: rgba(106, 169, 255, 0.28);
-  background: rgba(106, 169, 255, 0.1);
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
   color: var(--accent);
 }
 
 .provider-list-delete {
   width: 26px;
   height: 26px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   font-size: 18px;
   line-height: 1;
 }
 
 .provider-list-delete:hover:not(:disabled) {
-  border-color: rgba(255, 179, 179, 0.26);
-  background: rgba(255, 99, 99, 0.08);
-  color: #ffb3b3;
+  border-color: var(--danger-line);
+  background: var(--danger-tint);
+  color: var(--danger);
 }
 
 .provider-list-default:disabled,
@@ -7394,14 +7394,14 @@ onMounted(() => {
 }
 
 .provider-list-name {
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 13px;
   font-weight: var(--w-medium);
 }
 
 .provider-list-meta {
   margin-top: 6px;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 11px;
 }
 
@@ -7409,8 +7409,8 @@ onMounted(() => {
   display: inline-flex;
   margin-top: 8px;
   padding: 3px 7px;
-  border-radius: 999px;
-  background: rgba(106, 169, 255, 0.14);
+  border-radius: var(--r-pill);
+  background: var(--accent-tint);
   color: var(--accent);
   font-size: 10px;
   font-weight: var(--w-medium);
@@ -7440,10 +7440,10 @@ onMounted(() => {
 .provider-summary {
   max-width: 360px;
   min-height: 30px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.035);
-  color: var(--text-muted);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink-3);
   padding: 7px 10px;
   font-size: 11px;
   overflow: hidden;
@@ -7457,7 +7457,7 @@ onMounted(() => {
   gap: 14px;
   padding-bottom: 18px;
   margin-bottom: 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--line);
 }
 
 .settings-field,
@@ -7483,9 +7483,9 @@ onMounted(() => {
 .settings-section-title {
   padding-top: 6px;
   margin-top: 4px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--line);
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   text-transform: uppercase;
   letter-spacing: var(--tracking-caps);
 }
@@ -7493,17 +7493,17 @@ onMounted(() => {
 .settings-field span,
 .settings-check span {
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 
 .settings-field input,
 .settings-field select {
   width: 100%;
   min-height: 40px;
-  border-radius: 10px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-primary);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-hover);
+  color: var(--ink);
   padding: 0 12px;
   outline: none;
 }
@@ -7526,7 +7526,7 @@ onMounted(() => {
 
 .settings-note,
 .settings-message {
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 12px;
   line-height: 1.45;
 }
@@ -7543,9 +7543,9 @@ onMounted(() => {
   flex-direction: column;
   overflow-x: auto;
   overflow-y: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-wash);
 }
 
 .model-table-head,
@@ -7560,8 +7560,8 @@ onMounted(() => {
 .model-table-head {
   min-height: 36px;
   padding: 0 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  color: var(--text-muted);
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-3);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0;
@@ -7573,7 +7573,7 @@ onMounted(() => {
 }
 
 .model-row + .model-row {
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--line);
 }
 
 .model-default-cell,
@@ -7582,7 +7582,7 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 12px;
 }
 
@@ -7598,7 +7598,7 @@ onMounted(() => {
 }
 
 .model-default-cell span {
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 11px;
 }
 
@@ -7615,7 +7615,7 @@ onMounted(() => {
 
 .model-field-cell span {
   display: none;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 11px;
 }
 
@@ -7623,17 +7623,17 @@ onMounted(() => {
   width: 100%;
   min-width: 0;
   min-height: 36px;
-  border-radius: 10px;
+  border-radius: var(--r-md);
   border: 1px solid transparent;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-primary);
+  background: var(--surface-hover);
+  color: var(--ink);
   padding: 0 11px;
   outline: none;
 }
 
 .model-field-cell input:focus {
-  border-color: rgba(106, 169, 255, 0.32);
-  background: rgba(255, 255, 255, 0.07);
+  border-color: var(--accent-line);
+  background: var(--surface-hover-strong);
 }
 
 .model-capability-cell {
@@ -7645,10 +7645,10 @@ onMounted(() => {
 
 .capability-chip {
   min-height: 26px;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-secondary);
+  border-radius: var(--r-pill);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   cursor: pointer;
   padding: 0 8px;
   font-size: 11px;
@@ -7660,31 +7660,31 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   cursor: default;
-  color: var(--text-muted);
+  color: var(--ink-3);
 }
 
 .capability-chip.active {
-  border-color: rgba(106, 169, 255, 0.36);
-  background: rgba(106, 169, 255, 0.16);
-  color: var(--text-primary);
+  border-color: var(--accent-line);
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 
 .model-remove-btn {
   width: 30px;
   height: 30px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   border: 1px solid transparent;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--ink-3);
   cursor: pointer;
   font-size: 20px;
   line-height: 1;
 }
 
 .model-remove-btn:hover:not(:disabled) {
-  border-color: rgba(255, 179, 179, 0.26);
-  background: rgba(255, 99, 99, 0.08);
-  color: #ffb3b3;
+  border-color: var(--danger-line);
+  background: var(--danger-tint);
+  color: var(--danger);
 }
 
 .model-remove-btn:disabled {
@@ -7695,30 +7695,30 @@ onMounted(() => {
 .settings-message {
   margin: 12px 20px 0;
   padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid rgba(106, 169, 255, 0.24);
-  background: rgba(106, 169, 255, 0.08);
-  color: var(--text-secondary);
+  border-radius: var(--r-md);
+  border: 1px solid var(--accent-line);
+  background: var(--accent-tint);
+  color: var(--ink-2);
   flex-shrink: 0;
 }
 
 .settings-message.failed {
-  border-color: rgba(255, 179, 179, 0.28);
-  background: rgba(255, 99, 99, 0.08);
-  color: #ffb3b3;
+  border-color: var(--danger-line);
+  background: var(--danger-tint);
+  color: var(--danger);
 }
 
 .settings-actions {
   justify-content: flex-end;
-  border-top: 1px solid var(--line-soft);
+  border-top: 1px solid var(--line);
 }
 
 .settings-btn {
   min-height: 38px;
-  border-radius: 10px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-secondary);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   cursor: pointer;
   padding: 0 14px;
 }
@@ -7738,21 +7738,21 @@ onMounted(() => {
   min-width: 0;
   min-height: 38px;
   padding: 0 12px;
-  border-radius: 10px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-primary);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink);
   outline: none;
   font-size: 13px;
 }
 
 .vault-input:focus {
-  border-color: rgba(106, 169, 255, 0.4);
+  border-color: var(--accent-line);
 }
 
 .vault-status {
   font-size: 12px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
 }
 
 .backup-keep {
@@ -7760,16 +7760,16 @@ onMounted(() => {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
 }
 
 .backup-keep select {
   min-height: 32px;
   padding: 0 8px;
-  border-radius: 8px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-primary);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink);
   outline: none;
 }
 
@@ -7777,10 +7777,10 @@ onMounted(() => {
   width: 56px;
   min-height: 32px;
   padding: 0 8px;
-  border-radius: 8px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-primary);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink);
   outline: none;
 }
 
@@ -7808,24 +7808,24 @@ onMounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
-  color: var(--text-primary);
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
 
 .backup-size {
   flex: 0 0 auto;
   font-size: 12px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
 }
 
 /* Knowledge API: the warning has to read as a warning, since enabling this
    widens the app's trust boundary to every process on the machine. */
 .knowledge-api-warning {
-  color: #e0b45a;
+  color: var(--warning);
 }
 
 .knowledge-api-error {
-  color: var(--danger, #e06a6a);
+  color: var(--danger);
 }
 
 .api-status {
@@ -7834,11 +7834,11 @@ onMounted(() => {
 }
 
 .api-status.is-up {
-  color: #3db570;
+  color: var(--success);
 }
 
 .api-status.is-down {
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
 }
 
 .api-token {
@@ -7848,24 +7848,24 @@ onMounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   padding: 8px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-primary);
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  background: var(--surface-wash);
+  color: var(--ink);
   font-family: var(--font-mono);
   font-size: 12px;
 }
 
 .settings-btn.primary {
-  background: var(--accent-soft);
-  border-color: rgba(106, 169, 255, 0.32);
-  color: var(--text-primary);
+  background: var(--accent-tint);
+  border-color: var(--accent-line);
+  color: var(--ink);
 }
 
 .settings-btn.primary-subtle {
-  background: rgba(106, 169, 255, 0.12);
-  border-color: rgba(106, 169, 255, 0.28);
-  color: var(--text-primary);
+  background: var(--accent-tint);
+  border-color: var(--accent-line);
+  color: var(--ink);
 }
 
 .settings-btn:disabled {
@@ -7881,7 +7881,7 @@ onMounted(() => {
 
   .settings-nav {
     border-right: none;
-    border-bottom: 1px solid var(--line-soft);
+    border-bottom: 1px solid var(--line);
     flex-direction: row;
     overflow-x: auto;
   }
@@ -7892,7 +7892,7 @@ onMounted(() => {
 
   .provider-list {
     border-right: none;
-    border-bottom: 1px solid var(--line-soft);
+    border-bottom: 1px solid var(--line);
   }
 
   .provider-detail-head,
@@ -7914,7 +7914,7 @@ onMounted(() => {
   }
 
   .model-table {
-    border-radius: 12px;
+    border-radius: var(--r-lg);
   }
 
   .model-table-head {

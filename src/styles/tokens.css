@@ -7,7 +7,7 @@
    Layout of this file:
      1. surfaces      2. lines        3. ink          4. semantic roles
      5. elevation     6. radius       7. type         8. spacing
-     9. motion       10. legacy aliases
+     9. motion
 
    ── Why elevation is mostly a 1px ring ──
    On a dark canvas a drop shadow is nearly invisible: `0 2px 6px #0003`
@@ -27,10 +27,22 @@
   --surface-field: #2b2c2f; /* form control bed */
 
   /* Interaction states are alpha washes, not opaque greys: a row keeps its
-     own surface's tint whether it sits on the page or inside a menu. */
+     own surface's tint whether it sits on the page or inside a menu.
+     `--surface-wash` is the resting state of a translucent block — a chip bed,
+     an inset field — which is why it is separate from the hover ramp. */
+  --surface-wash: rgba(255, 255, 255, 0.03);
   --surface-hover: rgba(255, 255, 255, 0.045);
   --surface-hover-strong: rgba(255, 255, 255, 0.075);
   --surface-active: rgba(255, 255, 255, 0.1);
+
+  /* Behind modals and backdrops. */
+  --scrim: rgba(0, 0, 0, 0.45);
+
+  /* Chrome that floats over document content — the selection toolbar on a PDF
+     page, the translation popover. Nearly opaque rather than fully so, because
+     the page underneath should still register as being there. It cannot be
+     --surface-3: that is opaque and would read as a hole punched in the page. */
+  --surface-float: rgba(24, 28, 34, 0.94);
 
   /* ── 2. Lines — two weights. `--line` divides, `--line-strong` encloses. ── */
   --line: #2e3033;
@@ -53,6 +65,13 @@
   --danger: #ee5c61;
   --danger-tint: rgba(238, 92, 97, 0.16);
 
+  /* Role-colored borders. A solid role hex is too loud for a 1px edge, and
+     every component that needed one was mixing its own alpha. */
+  --accent-line: rgba(75, 157, 255, 0.42);
+  --success-line: rgba(61, 187, 114, 0.42);
+  --warning-line: rgba(246, 143, 60, 0.42);
+  --danger-line: rgba(238, 92, 97, 0.42);
+
   /* ── 5. Elevation — see the note at the top of this file. ── */
   --shadow-hairline: 0 0 0 1px var(--line);
   --shadow-card: 0 0 0 1px var(--line), 0 1px 2px rgba(0, 0, 0, 0.2),
@@ -61,6 +80,10 @@
   --shadow-btn: 0 0 0 1px var(--line-strong), 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-overlay: 0 0 0 1px var(--line-strong), 0 8px 28px rgba(0, 0, 0, 0.34);
   --shadow-field: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  /* A sheet of paper over the canvas — the PDF page, a rendered translation
+     page. The one place a deep blur genuinely reads on this background, because
+     the surface above it is near-white. */
+  --shadow-page: 0 20px 50px rgba(0, 0, 0, 0.3);
   --ring-focus: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-tint);
 
   /* ── 6. Radius — `--r-sm` is the default. Anything that isn't a pill and
@@ -69,6 +92,7 @@
   --r-sm: 6px;
   --r-md: 8px;
   --r-lg: 12px;
+  --r-xl: 16px; /* modals and full-stage cards only */
   --r-pill: 999px;
 
   /* ── 7. Type ──
@@ -125,18 +149,4 @@
   --dur-base: 160ms;
   --dur-slow: 220ms;
   --ease: cubic-bezier(0.2, 0, 0, 1);
-
-  /* ── 10. Legacy aliases ──
-     The 563 existing var() call sites keep working untouched; components
-     migrate to the names above one file at a time. Do NOT use these in new
-     code — they exist only so that introducing this file changed nothing. */
-  --bg-app: var(--surface-0);
-  --bg-panel: var(--surface-1);
-  --bg-elevated: var(--surface-2);
-  --bg-sidebar: var(--surface-3);
-  --line-soft: var(--line);
-  --text-primary: var(--ink);
-  --text-secondary: var(--ink-2);
-  --text-muted: var(--ink-3);
-  --accent-soft: var(--accent-tint);
 }

@@ -390,17 +390,17 @@ onBeforeUnmount(destroyPptxViewer)
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-base, var(--bg-panel));
+  background: var(--surface-1);
 }
 
 .office-status {
   padding: 24px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
   font-size: 14px;
 }
 
 .office-error {
-  color: var(--danger, #e06a6a);
+  color: var(--danger);
 }
 
 .office-placeholder {
@@ -410,7 +410,7 @@ onBeforeUnmount(destroyPptxViewer)
   align-items: center;
   justify-content: center;
   gap: 8px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
   padding: 24px;
   text-align: center;
 }
@@ -421,7 +421,7 @@ onBeforeUnmount(destroyPptxViewer)
 
 .office-placeholder-title {
   font-size: 16px;
-  color: var(--text-primary);
+  color: var(--ink);
   margin: 0;
 }
 
@@ -473,19 +473,19 @@ onBeforeUnmount(destroyPptxViewer)
 
 .office-sheet-name {
   font-size: 13px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
   margin: 0 0 8px;
 }
 
 .office-table {
   border-collapse: collapse;
   font-size: 13px;
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .office-table th,
 .office-table td {
-  border: 1px solid var(--line-soft);
+  border: 1px solid var(--line);
   padding: 4px 8px;
   white-space: nowrap;
   max-width: 320px;
@@ -501,8 +501,8 @@ onBeforeUnmount(destroyPptxViewer)
 .office-colhead,
 .office-rowhead {
   position: sticky;
-  background: var(--bg-panel, #1f1f24);
-  color: var(--text-muted, var(--text-secondary));
+  background: var(--surface-1);
+  color: var(--ink-3);
   font-size: 11px;
   font-weight: var(--w-strong);
   text-align: center;
@@ -535,31 +535,31 @@ onBeforeUnmount(destroyPptxViewer)
    Toning it down to the UI weight would misrepresent the file. */
 .office-table .is-bold {
   font-weight: 700;
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .office-sheet-note {
   margin: 6px 0 0;
   font-size: 11px;
-  color: var(--text-muted, var(--text-secondary));
+  color: var(--ink-3);
 }
 
 /* Evidence anchoring: the row (xlsx) or paragraph (docx) a chat citation points
    at. Sustained tint so it stays findable after the scroll, plus a one-shot
    pulse to catch the eye on arrival. */
 .office-table tr.is-cited td {
-  background: rgba(240, 181, 74, 0.16);
-  box-shadow: inset 0 0 0 1px rgba(240, 181, 74, 0.4);
+  background: var(--warning-tint);
+  box-shadow: inset 0 0 0 1px var(--warning-line);
 }
 
 .office-table tr.is-cited th {
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .office-docx-host :deep(.office-cite-hit) {
-  background: rgba(240, 181, 74, 0.28);
-  border-radius: 3px;
-  box-shadow: 0 0 0 3px rgba(240, 181, 74, 0.28);
+  background: var(--warning-tint);
+  border-radius: var(--r-xs);
+  box-shadow: 0 0 0 3px var(--warning-tint);
 }
 
 .office-table tr.is-cited td,
@@ -569,7 +569,7 @@ onBeforeUnmount(destroyPptxViewer)
 
 @keyframes office-cite-pulse {
   0% {
-    background: rgba(240, 181, 74, 0.55);
+    background: var(--warning);
   }
 }
 

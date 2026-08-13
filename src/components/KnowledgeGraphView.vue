@@ -643,7 +643,7 @@ watch(colorBy, () => {
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background: var(--bg-app);
+  background: var(--surface-0);
 }
 
 .graph-head {
@@ -653,14 +653,14 @@ watch(colorBy, () => {
   gap: 12px;
   padding: 0 18px;
   min-height: 60px;
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line);
   flex-wrap: wrap;
 }
 
 .graph-title {
   font-size: 15px;
   font-weight: var(--w-strong);
-  color: var(--text-primary);
+  color: var(--ink);
 }
 
 .graph-search {
@@ -668,10 +668,10 @@ watch(colorBy, () => {
   min-width: 120px;
   height: 30px;
   padding: 0 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-primary);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface-wash);
+  color: var(--ink);
   font-size: 12px;
   outline: none;
 }
@@ -684,40 +684,40 @@ watch(colorBy, () => {
 
 .graph-segmented {
   display: inline-flex;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
   overflow: hidden;
 }
 
 .graph-segmented button {
   border: none;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   padding: 5px 12px;
   font-size: 12px;
   cursor: pointer;
 }
 
 .graph-segmented button.active {
-  background: rgba(106, 169, 255, 0.16);
-  color: var(--text-primary);
+  background: var(--accent-tint);
+  color: var(--ink);
 }
 
 .graph-refresh,
 .graph-retry {
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-secondary);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   padding: 5px 12px;
   font-size: 12px;
   cursor: pointer;
 }
 
 .graph-toggle-on {
-  border-color: rgba(106, 169, 255, 0.5) !important;
-  background: rgba(106, 169, 255, 0.16) !important;
-  color: var(--text-primary) !important;
+  border-color: var(--accent-line) !important;
+  background: var(--accent-tint) !important;
+  color: var(--ink) !important;
 }
 
 .graph-close {
@@ -725,19 +725,19 @@ watch(colorBy, () => {
   height: 28px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--line-soft);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--text-secondary);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface-wash);
+  color: var(--ink-2);
   cursor: pointer;
   font-size: 13px;
   margin-left: 2px;
 }
 
 .graph-close:hover {
-  color: var(--text-primary);
-  border-color: rgba(255, 120, 120, 0.5);
-  background: rgba(255, 120, 120, 0.12);
+  color: var(--ink);
+  border-color: var(--danger-line);
+  background: var(--danger-tint);
 }
 
 .graph-legend {
@@ -745,15 +745,15 @@ watch(colorBy, () => {
   gap: 16px;
   padding: 7px 18px;
   font-size: 11px;
-  color: var(--text-muted);
-  border-bottom: 1px solid var(--line-soft);
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--line);
 }
 
 .graph-legend .dot {
   display: inline-block;
   width: 9px;
   height: 9px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   margin-right: 5px;
   vertical-align: middle;
 }
@@ -781,12 +781,12 @@ watch(colorBy, () => {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 13px;
 }
 
 .graph-state-error {
-  color: #ffb3b3;
+  color: var(--danger);
 }
 
 .graph-insights {
@@ -797,11 +797,11 @@ watch(colorBy, () => {
   max-height: calc(100% - 24px);
   overflow-y: auto;
   padding: 12px 14px;
-  border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  background: rgba(29, 31, 35, 0.96);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface-1);
   backdrop-filter: blur(8px);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-overlay);
 }
 
 .insights-section {
@@ -813,7 +813,7 @@ watch(colorBy, () => {
   font-weight: var(--w-medium);
   letter-spacing: var(--tracking-caps);
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: var(--ink-3);
   margin-bottom: 6px;
 }
 
@@ -824,9 +824,9 @@ watch(colorBy, () => {
   padding: 5px 8px;
   margin-bottom: 3px;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--ink-2);
   font-size: 12px;
   cursor: pointer;
   overflow: hidden;
@@ -835,9 +835,9 @@ watch(colorBy, () => {
 }
 
 .insights-item:hover {
-  background: rgba(255, 255, 255, 0.05);
-  border-color: rgba(106, 169, 255, 0.25);
-  color: var(--text-primary);
+  background: var(--surface-hover);
+  border-color: var(--accent-line);
+  color: var(--ink);
 }
 
 .insights-link {
@@ -845,13 +845,13 @@ watch(colorBy, () => {
 }
 
 .insights-meta {
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 11px;
 }
 
 .insights-empty {
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--ink-3);
 }
 
 .graph-edge-tip {
@@ -861,10 +861,10 @@ watch(colorBy, () => {
   transform: translateX(-50%);
   max-width: 70%;
   padding: 6px 14px;
-  border: 1px solid rgba(106, 169, 255, 0.4);
-  border-radius: 999px;
-  background: rgba(29, 31, 35, 0.96);
-  color: var(--text-primary);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-pill);
+  background: var(--surface-1);
+  color: var(--ink);
   font-size: 12px;
   cursor: pointer;
   overflow: hidden;

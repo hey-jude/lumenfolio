@@ -90,7 +90,7 @@ function escapeHtml(value) {
 
 <style scoped>
 .markdown-text {
-  color: var(--text-primary);
+  color: var(--ink);
   font-size: 13px;
   line-height: 1.58;
   white-space: normal;
@@ -121,7 +121,7 @@ function escapeHtml(value) {
 .markdown-text :deep(h5),
 .markdown-text :deep(h6) {
   margin: 12px 0 7px;
-  color: var(--text-primary);
+  color: var(--ink);
   font-weight: var(--w-strong);
   line-height: 1.28;
 }
@@ -155,33 +155,33 @@ function escapeHtml(value) {
 }
 
 .markdown-text :deep(a) {
-  color: var(--accent-text);
+  color: var(--accent-ink);
   text-decoration: none;
-  border-bottom: 1px dashed rgba(106, 169, 255, 0.45);
+  border-bottom: 1px dashed var(--accent-line);
 }
 
 .markdown-text :deep(blockquote) {
   padding-left: 12px;
-  border-left: 3px solid rgba(106, 169, 255, 0.35);
-  color: var(--text-secondary);
+  border-left: 3px solid var(--accent-line);
+  color: var(--ink-2);
 }
 
 .markdown-text :deep(code) {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 5px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
   padding: 1px 5px;
-  background: rgba(255, 255, 255, 0.045);
-  color: var(--text-primary);
+  background: var(--surface-hover);
+  color: var(--ink);
   font-family: var(--font-mono);
   font-size: 12px;
 }
 
 .markdown-text :deep(.md-code-block) {
   overflow: auto;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
   padding: 11px 12px;
-  background: rgba(0, 0, 0, 0.22);
+  background: var(--surface-inset);
 }
 
 .markdown-text :deep(.md-code-block code) {
@@ -199,7 +199,7 @@ function escapeHtml(value) {
 
 .markdown-text :deep(th),
 .markdown-text :deep(td) {
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--line);
   padding: 6px 8px;
 }
 
@@ -208,9 +208,9 @@ function escapeHtml(value) {
   width: 7px;
   height: 7px;
   margin-left: 6px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   vertical-align: middle;
-  background: rgba(106, 169, 255, 0.9);
+  background: var(--accent);
   animation: stream-bubble-pulse 1.2s ease-in-out infinite;
 }
 

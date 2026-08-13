@@ -356,13 +356,13 @@ const hint = computed(() => {
 .mini-bridge {
   stroke: rgba(192, 132, 252, 0.5);
   stroke-width: 1.4;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 
 .mini-cocite {
   stroke: rgba(192, 132, 252, 0.75);
   stroke-width: 2;
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 
 .mini-inter {
@@ -377,7 +377,7 @@ const hint = computed(() => {
 }
 
 .mini-term circle {
-  fill: #c084fc;
+  fill: var(--accent);
   fill-opacity: 0.75;
   stroke: rgba(255, 255, 255, 0.2);
   stroke-width: 0.8;
@@ -385,7 +385,7 @@ const hint = computed(() => {
 
 .mini-term text {
   font-size: 9.5px;
-  fill: var(--text-muted);
+  fill: var(--ink-3);
   pointer-events: none;
 }
 
@@ -394,7 +394,7 @@ const hint = computed(() => {
 }
 
 .mini-term:hover text {
-  fill: var(--text-secondary);
+  fill: var(--ink-2);
 }
 
 .mini-term.dim,
@@ -404,7 +404,7 @@ const hint = computed(() => {
 
 .mini-term,
 .mini-doc {
-  transition: opacity 120ms ease;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 
 .mini-doc {
@@ -412,7 +412,7 @@ const hint = computed(() => {
 }
 
 .mini-doc circle {
-  fill: #6aa9ff;
+  fill: var(--accent);
   fill-opacity: 0.85;
   stroke: rgba(255, 255, 255, 0.25);
   stroke-width: 1;
@@ -424,16 +424,16 @@ const hint = computed(() => {
 
 .mini-doc text {
   font-size: 10.5px;
-  fill: var(--text-secondary);
+  fill: var(--ink-2);
   pointer-events: none;
 }
 
 .mini-doc:hover text {
-  fill: var(--text-primary);
+  fill: var(--ink);
 }
 
 .mini-center circle {
-  fill: #6aa9ff;
+  fill: var(--accent);
   stroke: rgba(255, 255, 255, 0.6);
   stroke-width: 1.5;
 }
@@ -443,13 +443,13 @@ const hint = computed(() => {
   min-height: 16px;
   font-size: 10.5px;
   line-height: 1.45;
-  color: var(--text-muted);
+  color: var(--ink-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .mini-hint.active {
-  color: var(--text-secondary);
+  color: var(--ink-2);
 }
 </style>
