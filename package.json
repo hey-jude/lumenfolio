@@ -9,6 +9,7 @@
     "build": "vite build",
     "test:unit": "node --test \"src/**/*.test.js\"",
     "test:e2e": "VITE_E2E=1 playwright test",
+    "check:design-tokens": "node scripts/check-design-tokens.mjs",
     "check:translation-linking": "node scripts/check-translation-linking.mjs",
     "check:prod-no-testids": "node scripts/check-prod-no-testids.mjs",
     "preview": "vite preview",
