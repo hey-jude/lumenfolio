@@ -44,6 +44,13 @@ const WorkspaceSidebar = defineAsyncComponent({
   delay: 80,
   timeout: ASYNC_COMPONENT_TIMEOUT_MS,
 })
+// Async with no loading component: the palette opens on a keystroke, and a
+// spinner flashing in the middle of the screen would be worse than the ~1 frame
+// the chunk takes to arrive.
+const CommandPalette = defineAsyncComponent({
+  loader: () => import('./components/CommandPalette.vue'),
+  timeout: ASYNC_COMPONENT_TIMEOUT_MS,
+})
 const ReaderPane = defineAsyncComponent({
   loader: () => import('./components/ReaderPane.vue'),
   loadingComponent: AsyncPanelLoading,
@@ -487,6 +494,7 @@ const modelProviders = ref([])
 const editableProviders = ref([])
 const selectedProviderEditKey = ref('')
 const settingsOpen = ref(false)
+const paletteOpen = ref(false)
 const settingsSection = usePersistedRef('settingsSection', 'chat')
 // Locally-installed agent CLIs (Codex / Claude Code) offered as zero-config chat
 // providers. P0: detection + status only. [{ kind, label, installed, version, path, installUrl }]
@@ -2189,6 +2197,32 @@ function openGraphView() {
   if (graphStatus.value === 'idle' || graphStatus.value === 'failed') {
     fetchKnowledgeGraph()
   }
+}
+
+// The palette's action list. Built here rather than inside the component so the
+// component stays a renderer — and so an action that is switched off (trending,
+// knowledge graph) simply isn't offered instead of failing silently when run.
+const paletteActions = computed(() => {
+  const list = [
+    { id: 'home', label: ui.value.commandActionHome, hint: '' },
+    { id: 'new-note', label: ui.value.commandActionNewNote, hint: '' },
+  ]
+  if (knowledgeEnabled.value) {
+    list.push({ id: 'graph', label: ui.value.commandActionGraph, hint: '' })
+  }
+  if (trendingEnabled.value) {
+    list.push({ id: 'trending', label: ui.value.commandActionTrending, hint: '' })
+  }
+  list.push({ id: 'settings', label: ui.value.commandActionSettings, hint: '' })
+  return list
+})
+
+function runPaletteAction(id) {
+  if (id === 'home') goHome()
+  else if (id === 'new-note') handleCreateNote()
+  else if (id === 'graph') openGraphView()
+  else if (id === 'trending') handleOpenTrending()
+  else if (id === 'settings') openSettings()
 }
 
 function handleOpenTrending() {
@@ -5446,6 +5480,11 @@ onBeforeUnmount(() => {
 // ESC exits the full-screen global knowledge graph back to the reader. Guarded
 // to graph-open so it never swallows ESC from inputs/other views.
 function handleGlobalKeydown(event) {
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'k') {
+    event.preventDefault()
+    paletteOpen.value = !paletteOpen.value
+    return
+  }
   if (event.key === 'Escape' && graphView.value) {
     handleCloseGraph()
   }
@@ -6092,6 +6131,17 @@ onMounted(() => {
         </div>
       </section>
     </div>
+
+    <CommandPalette
+      v-if="paletteOpen"
+      :open="paletteOpen"
+      :documents="allDocs"
+      :actions="paletteActions"
+      :ui="ui"
+      @close="paletteOpen = false"
+      @run-action="runPaletteAction"
+      @open-doc="selectDoc"
+    />
 
     <div v-if="settingsOpen" class="settings-backdrop" @click.self="closeSettings">
       <section class="settings-modal" role="dialog" aria-modal="true" :aria-label="ui.modelSettings">

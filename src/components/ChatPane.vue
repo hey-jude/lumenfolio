@@ -303,6 +303,10 @@ const expandedAgentPanels = ref({})
 // Message ids whose evidence chips are expanded to the full chain (vs the "+N"
 // preview). The full chain is already in memory, so expanding is instant.
 const expandedEvidence = ref(new Set())
+// `${message.id}::${group.key}` for evidence groups whose retrieved passage is
+// shown as a card. Separate from expandedEvidence, which controls how many chips
+// are listed — this controls whether one chip's text is on screen.
+const openEvidenceCards = ref(new Set())
 let messageScrollFrame = 0
 let messageScrollbarTimer = null
 let lastMessageScrollTop = 0
@@ -1626,6 +1630,30 @@ function toggleEvidenceExpanded(message) {
   expandedEvidence.value = next
 }
 
+function evidenceCardKey(message, group) {
+  return `${message.id}::${group.key}`
+}
+
+function isEvidenceCardOpen(message, group) {
+  return openEvidenceCards.value.has(evidenceCardKey(message, group))
+}
+
+// The passage the model actually read. It has always been in the payload but was
+// only reachable as a native title= tooltip — unreadable for anything longer than
+// a line, and impossible to copy from. Opening it costs nothing: this is the same
+// object the chip is already rendering.
+function toggleEvidenceCard(message, group) {
+  const key = evidenceCardKey(message, group)
+  const next = new Set(openEvidenceCards.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  openEvidenceCards.value = next
+}
+
+function openEvidenceGroupsFor(message) {
+  return evidenceDisplayGroups(message).filter((group) => isEvidenceCardOpen(message, group))
+}
+
 function resolveCitation(message, evidence) {
   return (message.citations || []).find((citation) => citation.id === evidence.citationId) || null
 }
@@ -2238,23 +2266,73 @@ function evidenceSourceLabel(source) {
                   >{{ isEvidenceExpanded(message) ? ui.evidenceCollapse : `+${evidenceHiddenCount(message)}` }}</button>
                 </div>
                 <div class="evidence-chips">
-                  <button
+                  <!-- Two controls in one pill: the body jumps the reader to the
+                       passage (unchanged), the caret reveals the passage here.
+                       Splitting them means a user can read what was retrieved
+                       without losing their place in the document. -->
+                  <span
                     v-for="group in evidenceDisplayGroups(message)"
                     :key="`${message.id}-grp-${group.key}`"
                     class="evidence-chip"
-                    :class="{ active: isEvidenceGroupActive(group) }"
-                    :title="group.quote"
-                    @click="clickEvidenceGroup(message, group)"
+                    :class="{ active: isEvidenceGroupActive(group), peeking: isEvidenceCardOpen(message, group) }"
                   >
-                    <span
-                      v-if="group.crossDocName"
-                      class="evidence-doc-badge"
-                      :title="group.crossDocName"
-                    >@{{ group.crossDocName }}</span>
-                    <span v-if="group.page > 0" class="evidence-chip-page">{{ locale === 'zh' ? `${ui.page}${group.page}` : `p${group.page}` }}</span>
-                    <span class="evidence-chip-title">{{ group.sectionTitle || evidenceSourceLabel(group.source) }}</span>
-                    <span v-if="group.citationIds.length > 1" class="evidence-chip-count">×{{ group.citationIds.length }}</span>
-                  </button>
+                    <button
+                      type="button"
+                      class="evidence-chip-jump"
+                      @click="clickEvidenceGroup(message, group)"
+                    >
+                      <span
+                        v-if="group.crossDocName"
+                        class="evidence-doc-badge"
+                        :title="group.crossDocName"
+                      >@{{ group.crossDocName }}</span>
+                      <span v-if="group.page > 0" class="evidence-chip-page">{{ locale === 'zh' ? `${ui.page}${group.page}` : `p${group.page}` }}</span>
+                      <span class="evidence-chip-title">{{ group.sectionTitle || evidenceSourceLabel(group.source) }}</span>
+                      <span v-if="group.citationIds.length > 1" class="evidence-chip-count">×{{ group.citationIds.length }}</span>
+                    </button>
+                    <button
+                      v-if="group.quote"
+                      type="button"
+                      class="evidence-chip-peek"
+                      :aria-label="ui.evidenceShowPassage"
+                      :title="ui.evidenceShowPassage"
+                      :aria-expanded="isEvidenceCardOpen(message, group)"
+                      @click="toggleEvidenceCard(message, group)"
+                    >
+                      <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M4 6.5 8 10.5l4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                      </svg>
+                    </button>
+                  </span>
+                </div>
+
+                <div v-if="openEvidenceGroupsFor(message).length" class="evidence-cards">
+                  <article
+                    v-for="group in openEvidenceGroupsFor(message)"
+                    :key="`${message.id}-card-${group.key}`"
+                    class="evidence-card"
+                  >
+                    <header class="evidence-card-head">
+                      <span class="evidence-card-title">
+                        {{ group.sectionTitle || evidenceSourceLabel(group.source) }}
+                      </span>
+                      <span class="evidence-card-meta">
+                        {{ ui.evidenceCharacters.replace('{n}', group.quote.length.toLocaleString()) }}
+                      </span>
+                    </header>
+                    <p class="evidence-card-quote">{{ group.quote }}</p>
+                    <footer class="evidence-card-foot">
+                      <span v-if="group.crossDocName" class="evidence-card-source">{{ group.crossDocName }}</span>
+                      <span v-if="group.page > 0" class="evidence-card-source">
+                        {{ locale === 'zh' ? `${ui.page}${group.page}` : `p${group.page}` }}
+                      </span>
+                      <button
+                        type="button"
+                        class="evidence-card-open"
+                        @click="clickEvidenceGroup(message, group)"
+                      >{{ ui.evidenceOpenSource }}</button>
+                    </footer>
+                  </article>
                 </div>
               </div>
             </div>
@@ -2268,6 +2346,18 @@ function evidenceSourceLabel(source) {
               >
                 <span class="rec-toggle-label">{{ ui.recommendationsTitle }}</span>
                 <span class="rec-toggle-count">{{ recommendationCount(message) }}</span>
+                <!-- Two states, not a meter: the backend reports confidence as a
+                     boolean, and drawing a graded bar from it would invent
+                     precision that isn't there. This also explains why the panel
+                     opened by itself on some answers and not others. -->
+                <span
+                  class="rec-confidence"
+                  :class="messageRecommendations(message).confident ? 'is-high' : 'is-low'"
+                >{{
+                  messageRecommendations(message).confident
+                    ? ui.recommendationsConfident
+                    : ui.recommendationsTentative
+                }}</span>
                 <span class="rec-toggle-caret" aria-hidden="true">{{ isRecExpanded(message) ? '▾' : '▸' }}</span>
               </button>
               <div v-if="isRecExpanded(message)" class="rec-body">
@@ -3606,6 +3696,26 @@ function evidenceSourceLabel(source) {
   color: var(--ink-2);
 }
 
+.rec-confidence {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 var(--gap-2);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-micro);
+  font-weight: var(--w-medium);
+}
+
+.rec-confidence.is-high {
+  background: var(--success-tint);
+  color: var(--success);
+}
+
+.rec-confidence.is-low {
+  background: var(--surface-hover);
+  color: var(--ink-3);
+}
+
 .rec-toggle-count {
   display: inline-flex;
   align-items: center;
@@ -3786,14 +3896,152 @@ function evidenceSourceLabel(source) {
   align-items: center;
   min-width: 0;
   min-height: 28px;
-  gap: 5px;
   border: 1px solid var(--line);
   border-radius: var(--r-pill);
   background: var(--surface-wash);
   color: var(--ink-2);
+  font-size: var(--fs-caption);
+  overflow: hidden;
+}
+
+/* The pill splits into two targets. The jump half keeps the whole remaining
+   width so the section title still has room to truncate into. */
+.evidence-chip-jump {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 4px 0 10px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   cursor: pointer;
-  padding: 0 10px;
-  font-size: 11px;
+}
+
+.evidence-chip-peek {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  align-self: stretch;
+  padding: 0;
+  border: none;
+  border-left: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.evidence-chip-peek svg {
+  width: 12px;
+  height: 12px;
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.evidence-chip-peek:hover {
+  background: var(--surface-hover);
+  color: var(--ink);
+}
+
+.evidence-chip.peeking {
+  border-color: var(--accent-line);
+  color: var(--ink);
+}
+
+.evidence-chip.peeking .evidence-chip-peek {
+  color: var(--accent-ink);
+}
+
+.evidence-chip.peeking .evidence-chip-peek svg {
+  transform: rotate(180deg);
+}
+
+/* ─── Context cards: the passage the model actually retrieved ─── */
+.evidence-cards {
+  display: grid;
+  gap: var(--gap-2);
+  margin-top: var(--gap-3);
+}
+
+.evidence-card {
+  padding: var(--gap-3) var(--gap-4);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-card);
+}
+
+.evidence-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--gap-3);
+  margin-bottom: var(--gap-2);
+}
+
+.evidence-card-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-size: var(--fs-body);
+  font-weight: var(--w-medium);
+}
+
+.evidence-card-meta {
+  flex: none;
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The retrieved chunk can be long. Cap it and let it scroll rather than pushing
+   the rest of the thread off screen, and keep it selectable so it can be copied
+   — the tooltip this replaces allowed neither. */
+.evidence-card-quote {
+  margin: 0;
+  max-height: 190px;
+  overflow: auto;
+  color: var(--ink-2);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.evidence-card-foot {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-3);
+  margin-top: var(--gap-3);
+}
+
+.evidence-card-source {
+  color: var(--ink-3);
+  font-size: var(--fs-micro);
+}
+
+.evidence-card-open {
+  margin-left: auto;
+  padding: 3px var(--gap-3);
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--accent-tint);
+  color: var(--accent-ink);
+  font-size: var(--fs-caption);
+  cursor: pointer;
+}
+
+.evidence-card-open:hover {
+  background: var(--accent);
+  color: var(--surface-0);
 }
 
 .evidence-chip-page {
