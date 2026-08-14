@@ -2501,25 +2501,53 @@ async function handleClearUnfiled() {
 // (the single writer) rather than written to the database, so it can never race the
 // autosave. Requires the proposal's note to be the one on screen: applying to a
 // document the user isn't looking at would be an invisible edit.
+/* NoteEditor is a lazily-loaded async component, so after selecting the note its
+   chunk still has to download, mount, and register this ref. A single nextTick()
+   never wins that race from a cold start — which is exactly the case where the
+   user reaches for Apply, having just reopened the app with no note open — so it
+   reported "open the note" for a note it had just opened. Poll by frame instead,
+   with a ceiling so a document that will never mount an editor still fails. */
+const NOTE_EDITOR_WAIT_MS = 5000
+
+async function waitForNoteEditor() {
+  const deadline = Date.now() + NOTE_EDITOR_WAIT_MS
+  while (Date.now() < deadline) {
+    if (noteEditorRef.value?.applyProposal) return noteEditorRef.value
+    await new Promise((resolve) => requestAnimationFrame(resolve))
+  }
+  return null
+}
+
 async function handleApplyNoteEdit(proposal = {}) {
-  const { documentId } = proposal
+  const { documentId, onResult } = proposal
+  const target = documentId ? allDocs.value.find((doc) => doc.id === documentId) : selectedDocument.value
+  // Bail before the wait when the target cannot host an editor at all — spending
+  // five seconds to reach the same conclusion helps nobody.
+  if (documentId && target && !isEditableSourceDoc(target)) {
+    workspaceError.value = ui.value.proposedEditNeedsNote || 'Open the note to apply this edit.'
+    onResult?.(false)
+    return
+  }
   if (documentId && documentId !== selectedDocId.value) {
     selectDoc(documentId)
     await nextTick()
   }
-  const editor = noteEditorRef.value
-  if (!editor?.applyProposal) {
+  const editor = await waitForNoteEditor()
+  if (!editor) {
     workspaceError.value = ui.value.proposedEditNeedsNote || 'Open the note to apply this edit.'
+    onResult?.(false)
     return
   }
   try {
     await editor.applyProposal(proposal)
     workspaceError.value = ''
+    onResult?.(true)
   } catch (err) {
     // A precise edit refused to apply because the note moved on under it. Say so
     // rather than falling back to a whole-note overwrite, which is exactly the
     // silent data loss precise edits exist to prevent.
     workspaceError.value = err?.message || String(err)
+    onResult?.(false)
   }
 }
 

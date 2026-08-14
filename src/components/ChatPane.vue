@@ -4,6 +4,7 @@ import MarkdownText from './MarkdownText.vue'
 import { startWindowDrag } from '../windowDrag'
 import { testAttrs } from '../testAttrs'
 import { docDrag, registerDocDropZone } from '../docDrag'
+import { readPersisted, writePersisted } from '../persistedState'
 
 const props = defineProps({
   // The active agent session (conversation). Messages live here, not on the
@@ -167,7 +168,37 @@ const emit = defineEmits([
 // The agent proposes note rewrites via the propose_note_edit tool rather than
 // writing them — the proposed Markdown rides on that call's args. Surface it as an
 // explicit accept/reject card so the user, not the model, decides what lands.
-const appliedEditIds = reactive(new Set())
+// Which proposed edits have already been applied. Persisted, because the chat
+// message that carries the proposal outlives the session: without this the card
+// forgets on restart, offers Apply again on an edit that is already in the note,
+// and applying twice either duplicates the text or fails against a note that has
+// already moved on.
+//
+// Keyed by `${message.id}:${index}`, which is stable across restarts because the
+// message id comes from the database. Capped so a long-lived install does not
+// grow this without bound — the oldest entries are the least likely to still be
+// on screen.
+const APPLIED_EDITS_KEY = 'appliedNoteEdits'
+const APPLIED_EDITS_CAP = 500
+
+const appliedEditIds = reactive(new Set(readPersisted(APPLIED_EDITS_KEY, [])))
+
+function rememberAppliedEdit(key) {
+  appliedEditIds.add(key)
+  const all = [...appliedEditIds]
+  const kept = all.slice(-APPLIED_EDITS_CAP)
+  if (kept.length !== all.length) {
+    appliedEditIds.clear()
+    for (const id of kept) appliedEditIds.add(id)
+  }
+  writePersisted(APPLIED_EDITS_KEY, kept)
+}
+
+/** Roll back the mark when the apply did not actually land. */
+function forgetAppliedEdit(key) {
+  appliedEditIds.delete(key)
+  writePersisted(APPLIED_EDITS_KEY, [...appliedEditIds])
+}
 
 function noteEditProposal(message) {
   const events = message?.activityEvents || message?.retrievalTrace?.events || []
@@ -193,11 +224,18 @@ function noteEditProposal(message) {
 
 function applyNoteEdit(proposal) {
   if (!proposal || appliedEditIds.has(proposal.key)) return
-  appliedEditIds.add(proposal.key)
+  // Marked before the emit, not after: the apply is asynchronous, and a second
+  // click while the first is in flight would apply the same edit twice. Rolled
+  // back through onResult if it did not land, so a failure leaves the button
+  // available rather than stranding the proposal as "Applied".
+  rememberAppliedEdit(proposal.key)
   emit('apply-note-edit', {
     documentId: proposal.documentId,
     edits: proposal.edits,
     content: proposal.content,
+    onResult: (applied) => {
+      if (!applied) forgetAppliedEdit(proposal.key)
+    },
   })
 }
 
