@@ -7201,12 +7201,20 @@ onMounted(() => {
   font-size: 20px;
 }
 
+/* The two columns scroll independently. Scrolling the whole layout — which is
+   what this used to do — dragged the section list off the top of the dialog
+   along with the content, and gave the dialog a single scrollbar running its
+   full height right against the rounded border. */
 .settings-layout {
   display: grid;
   grid-template-columns: 190px minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
+  /* A gutter for the panel's scrollbar. Without it the bar sits flush against
+     the dialog's rounded frame and reads as being drawn on top of the dialog
+     rather than inside its content. */
+  padding-right: 6px;
 }
 
 .settings-nav {
@@ -7216,6 +7224,9 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* min-height on a grid item, or the track refuses to shrink and scroll. */
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .settings-nav-item {
@@ -7252,15 +7263,21 @@ onMounted(() => {
   background: var(--accent-tint);
 }
 
+/* Every section (general / chat / websearch / translation) carries this class,
+   so putting the scroll here covers all four. */
 .settings-panel {
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .settings-body {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
-  padding: 20px;
+  /* Right padding is trimmed by the layout's 6px scrollbar gutter, so the
+     content still sits optically centred between the nav and the frame. */
+  padding: 20px 14px 20px 20px;
 }
 
 .provider-settings-panel {
