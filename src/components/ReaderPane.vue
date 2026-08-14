@@ -2087,7 +2087,12 @@ watch(translationArtifactActivePage, async () => {
    the application, and must not follow the app's theme. Reading a translation
    on a dark grey card is not the same artifact as reading it on paper.
 
-   Do not migrate these onto tokens. */
+   Do not migrate these onto tokens.
+
+   They do need ONE theme-dependent addition, though (see the rule after this
+   block): on the dark canvas the page separates itself by being light, but on
+   the light canvas paper-on-paper has no edge at all, so the sheet needs a
+   hairline to stay a distinct object. */
 .translation-page {
   flex: 1;
   min-height: 0;
@@ -2262,6 +2267,16 @@ watch(translationArtifactActivePage, async () => {
   box-shadow: var(--shadow-page);
   max-width: 860px;
   margin: 0 auto;
+}
+
+/* Paper needs an edge only when the canvas behind it is also light. A cream
+   sheet on charcoal is already unmistakably a sheet; the same sheet on #f1f2f3
+   dissolves into it. Scoped to the light theme so the dark view keeps the
+   cleaner borderless page. */
+:root[data-theme='light'] .translation-page,
+:root[data-theme='light'] .translation-page-content,
+:root[data-theme='light'] .page-card {
+  border: 1px solid rgba(29, 33, 38, 0.12);
 }
 
 .translation-page-title {

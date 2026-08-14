@@ -30,8 +30,10 @@ const EXEMPT_FILES = new Set([TOKENS])
  */
 const RAW_COLOR_BUDGET = {
   // Paints the translated page as a sheet of paper: light on purpose, and must
-  // not re-tint when the app theme moves. Plus two decorative gradients.
-  'components/ReaderPane.vue': 23,
+  // not re-tint when the app theme moves. Plus two decorative gradients, and
+  // two light-theme-only hairlines — paper on a light canvas has no edge of its
+  // own, and the ink for that edge belongs to the page, not to the palette.
+  'components/ReaderPane.vue': 25,
   // Decorative gradients (rail brand mark, drop-target sheen, progress bar).
   'components/WorkspaceSidebar.vue': 12,
   // SVG strokes handed to the graph renderer, not chrome.
@@ -43,8 +45,9 @@ const RAW_COLOR_BUDGET = {
   // The annotation swatch's two-tone ring, which must stay legible on whatever
   // color the user picked.
   'components/PdfAnnotationViewer.vue': 2,
-  // The PDF page host is white because the page is paper.
-  'components/PdfViewer.vue': 2,
+  // The PDF page host is white because the page is paper, plus the light-theme
+  // hairline that keeps a white page distinct from a near-white canvas.
+  'components/PdfViewer.vue': 3,
   // Shimmer gradient on the update banner.
   'App.vue': 2,
   // Concept-category ink.
@@ -135,14 +138,63 @@ for (const path of walk(SRC)) {
   }
 }
 
+const tokenSource = readFileSync(TOKENS, 'utf8')
+
+/**
+ * Every color token defined for dark needs a light counterpart.
+ *
+ * This is the check with the longest reach. Adding a color token is a one-line
+ * edit in the dark block, and nothing about writing it prompts you to open the
+ * light block forty lines below — so the failure mode is a token that looks
+ * fine in development and renders as a dark smear for anyone on the light
+ * theme, discovered only when they report it.
+ *
+ * Non-color tokens (radii, durations, sizes, weights) are shared by both
+ * themes and must NOT be duplicated. Tokens composed from other tokens
+ * (--shadow-hairline, --ring-focus) inherit the flip for free.
+ */
+// Comments are stripped first, and not as a nicety: the prose in this file
+// names tokens mid-sentence ("It cannot be --surface-3: that is opaque…"),
+// which a naive declaration regex reads as a declaration whose value runs to
+// the next semicolon — swallowing the real token that follows it.
+function tokensIn(block) {
+  const code = block.replace(/\/\*[\s\S]*?\*\//g, '')
+  return new Map([...code.matchAll(/^\s+(--[a-z0-9-]+)\s*:\s*([^;]+);/gm)].map((m) => [m[1], m[2].trim()]))
+}
+
+const darkBlock = tokenSource.match(/:root\s*\{([\s\S]*?)\n\}/)
+const lightBlock = tokenSource.match(/:root\[data-theme=['"]light['"]\]\s*\{([\s\S]*?)\n\}/)
+
+if (!darkBlock) failures.push(`${TOKENS}: could not find the base :root block.`)
+if (!lightBlock) failures.push(`${TOKENS}: could not find the :root[data-theme="light"] block.`)
+
+if (darkBlock && lightBlock) {
+  const dark = tokensIn(darkBlock[1])
+  const light = tokensIn(lightBlock[1])
+  // A literal color, not a var() reference — composed tokens follow their parts.
+  const isLiteralColor = (value) => /#[0-9a-fA-F]{3,8}\b|rgba?\(\s*\d/.test(value)
+
+  for (const [name, value] of dark) {
+    if (!isLiteralColor(value)) continue
+    if (light.has(name)) continue
+    failures.push(
+      `${TOKENS}: ${name} has a dark value but no light one. Add it to the ` +
+        `:root[data-theme="light"] block — a color that only exists for one ` +
+        `theme renders wrong on the other.`,
+    )
+  }
+  for (const name of light.keys()) {
+    if (dark.has(name)) continue
+    failures.push(`${TOKENS}: ${name} is defined only for light. Every token needs a base value.`)
+  }
+}
+
 /**
  * Every var(--x) must resolve, unless the call site supplies a fallback. This is
  * the check that would have caught the note editor rendering its own background
  * as nothing: --bg-base was never defined, and only the fallback was holding it up.
  */
-const defined = new Set(
-  [...readFileSync(TOKENS, 'utf8').matchAll(/^\s+(--[a-z0-9-]+)\s*:/gm)].map((m) => m[1]),
-)
+const defined = new Set([...tokenSource.matchAll(/^\s+(--[a-z0-9-]+)\s*:/gm)].map((m) => m[1]))
 // Set from JS as an inline style rather than declared in CSS.
 defined.add('--annotation-color')
 defined.add('--scale-factor') // pdf.js owns this one

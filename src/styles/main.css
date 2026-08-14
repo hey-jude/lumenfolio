@@ -2,9 +2,16 @@
    only the app-wide element defaults that sit on top of them. */
 @import './tokens.css';
 
+/* color-scheme is not decoration: it decides how the platform paints native
+   <select> popups, form controls and the default scrollbar. It has to follow
+   the theme or a light window still drops a black menu. */
 :root {
   color-scheme: dark;
   font-family: var(--font-sans);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 * {
@@ -29,9 +36,16 @@ select {
   font: inherit;
   /* color-scheme alone isn't enough for the native <option> popup on Windows
      (WebView2), especially when the <select> background is transparent — the
-     popup renders white. Pin explicit dark colors on the options so the dropdown
-     list is dark on every platform. */
+     popup renders white. Pin the scheme on the control too, and the `option`
+     rule below pins explicit colors, so the dropdown list matches on every
+     platform in both themes. */
   color-scheme: dark;
+}
+
+:root[data-theme='light'] button,
+:root[data-theme='light'] input,
+:root[data-theme='light'] select {
+  color-scheme: light;
 }
 
 option {
@@ -67,17 +81,17 @@ option {
 ::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: var(--r-pill);
-  background-color: var(--surface-active);
+  background-color: var(--scrollbar-thumb);
   background-clip: padding-box;
 }
 
 :hover::-webkit-scrollbar-thumb,
 .is-scrolling::-webkit-scrollbar-thumb {
-  background-color: rgba(255, 255, 255, 0.22);
+  background-color: var(--scrollbar-thumb-hover);
   background-clip: padding-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background-color: rgba(255, 255, 255, 0.34);
+  background-color: var(--scrollbar-thumb-active);
   background-clip: padding-box;
 }

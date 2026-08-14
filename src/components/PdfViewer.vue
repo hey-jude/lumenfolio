@@ -2357,6 +2357,12 @@ defineExpose({
   overflow: hidden;
 }
 
+/* A white page on a near-white canvas has no edge of its own; on the dark
+   canvas it never needed one. */
+:root[data-theme='light'] .pdf-page-host {
+  border: 1px solid rgba(16, 24, 40, 0.12);
+}
+
 .pdf-canvas,
 .pdf-text-layer,
 .highlight-layer {

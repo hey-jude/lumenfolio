@@ -35,6 +35,12 @@
   --surface-hover-strong: rgba(255, 255, 255, 0.075);
   --surface-active: rgba(255, 255, 255, 0.1);
 
+  /* The app-wide scrollbar thumb. A token because the wash direction flips with
+     the theme — white-on-dark is invisible on a light canvas. */
+  --scrollbar-thumb: var(--surface-active);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.22);
+  --scrollbar-thumb-active: rgba(255, 255, 255, 0.34);
+
   /* Behind modals and backdrops. */
   --scrim: rgba(0, 0, 0, 0.45);
 
@@ -149,4 +155,90 @@
   --dur-base: 160ms;
   --dur-slow: 220ms;
   --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* ──────────────────────────── Light theme ────────────────────────────
+   Dark is the base above; this block only redefines what actually changes.
+   Sizes, weights, radii, durations and the two composed tokens
+   (--shadow-hairline, --ring-focus, which are built from --line and --accent)
+   are theme-independent and are deliberately absent here.
+
+   `src/theme.js` always writes an explicit data-theme, resolving "system" at
+   runtime, so there is no `@media (prefers-color-scheme)` branch to keep in
+   sync with this one.
+
+   Three things are NOT a mechanical inversion, and they are where a naive
+   light theme falls apart:
+
+   1. The interaction washes flip polarity. White at 4.5% over a white card is
+      literally nothing; light mode needs a black wash, at a lower alpha,
+      because black over white bites harder than white over near-black.
+
+   2. Elevation changes its center of gravity. On the dark canvas the blur is
+      nearly invisible and the 1px ring does all the work (see the note at the
+      top of this file). Here the blur is finally readable, so the shadows get
+      real spread — the ring stays, but it is no longer carrying the edge alone.
+
+   3. --accent-ink inverts its relationship to --accent. On a dark bed it is
+      the *lighter* of the two so accent text lifts off the surface; on white
+      it has to be the *darker*, or the text fails contrast. Every role color
+      is re-picked rather than reused: the dark palette is tuned for luminance
+      against near-black and washes out on white. */
+:root[data-theme='light'] {
+  /* Elevation runs the other way here: the page is the greyest plane and
+     floating chrome is pure white, separated by shadow rather than by tone. */
+  --surface-0: #f1f2f3;
+  --surface-1: #fafafb;
+  --surface-2: #ffffff;
+  --surface-3: #ffffff;
+  --surface-inset: #f2f3f5;
+  --surface-field: #f2f2f3;
+
+  --surface-wash: rgba(16, 24, 40, 0.02);
+  --surface-hover: rgba(16, 24, 40, 0.04);
+  --surface-hover-strong: rgba(16, 24, 40, 0.07);
+  --surface-active: rgba(16, 24, 40, 0.1);
+
+  --scrollbar-thumb: rgba(16, 24, 40, 0.16);
+  --scrollbar-thumb-hover: rgba(16, 24, 40, 0.28);
+  --scrollbar-thumb-active: rgba(16, 24, 40, 0.4);
+
+  /* A modal scrim stays dark in both themes — it exists to push the page back,
+     and a white veil would wash it out instead. */
+  --scrim: rgba(16, 24, 40, 0.35);
+  /* Chrome floating over document content, near-opaque so the page still
+     registers underneath. */
+  --surface-float: rgba(255, 255, 255, 0.96);
+
+  --line: #e6e8ea;
+  --line-strong: #d5d8dc;
+
+  --ink: #1f2124;
+  --ink-2: #5c6068;
+  --ink-3: #8b8f97;
+
+  --accent: #0b7ff5;
+  --accent-ink: #0a63bd;
+  --accent-tint: rgba(11, 127, 245, 0.1);
+  --success: #12854a;
+  --success-tint: rgba(18, 133, 74, 0.1);
+  --warning: #b45f06;
+  --warning-tint: rgba(180, 95, 6, 0.1);
+  --danger: #cf2f36;
+  --danger-tint: rgba(207, 47, 54, 0.1);
+
+  --accent-line: rgba(11, 127, 245, 0.35);
+  --success-line: rgba(18, 133, 74, 0.35);
+  --warning-line: rgba(180, 95, 6, 0.35);
+  --danger-line: rgba(207, 47, 54, 0.35);
+
+  --shadow-card: 0 0 0 1px var(--line), 0 1px 2px rgba(16, 24, 40, 0.05),
+    0 2px 6px rgba(16, 24, 40, 0.04);
+  --shadow-raised: 0 0 0 1px var(--line), 0 2px 10px rgba(16, 24, 40, 0.06);
+  --shadow-btn: 0 0 0 1px var(--line-strong), 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-overlay: 0 0 0 1px var(--line-strong), 0 8px 28px rgba(16, 24, 40, 0.1);
+  --shadow-field: inset 0 1px 2px rgba(16, 24, 40, 0.06);
+  /* The page still floats over the canvas, but a paper-on-paper drop needs far
+     less ink than paper-on-charcoal did. */
+  --shadow-page: 0 12px 32px rgba(16, 24, 40, 0.1);
 }

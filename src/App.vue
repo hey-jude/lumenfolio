@@ -16,6 +16,7 @@ import { translationLanguages } from './mockData'
 import { messages } from './i18n'
 import { normalizeLinkedBlockHover } from './translationLinking'
 import { usePersistedRef, readPersisted, writePersisted } from './persistedState'
+import { themePreference, setThemePreference } from './theme'
 
 const UNCONFIGURED_CHAT_MODEL_ID = 'unconfigured-model'
 const ASSISTANT_STREAM_DRAIN_MS = 35
@@ -495,6 +496,13 @@ const editableProviders = ref([])
 const selectedProviderEditKey = ref('')
 const settingsOpen = ref(false)
 const paletteOpen = ref(false)
+// Order is deliberate: the default sits last so the row reads
+// least-committal → most-committal rather than putting "system" in the middle.
+const themeChoices = computed(() => [
+  { id: 'system', label: ui.value.appearanceSystem },
+  { id: 'light', label: ui.value.appearanceLight },
+  { id: 'dark', label: ui.value.appearanceDark },
+])
 const settingsSection = usePersistedRef('settingsSection', 'chat')
 // Locally-installed agent CLIs (Codex / Claude Code) offered as zero-config chat
 // providers. P0: detection + status only. [{ kind, label, installed, version, path, installUrl }]
@@ -6195,6 +6203,60 @@ onMounted(() => {
 
           <div v-if="settingsSection === 'general'" class="settings-panel settings-body">
             <div class="settings-section-title full">{{ ui.generalNav }}</div>
+
+            <!-- A segmented control rather than a <select>: there are exactly
+                 three choices, all worth seeing at once, and appearance is the
+                 one setting where the result is visible the instant you pick. -->
+            <div class="settings-field full">
+              <span>{{ ui.appearance }}</span>
+              <div class="theme-choice" role="radiogroup" :aria-label="ui.appearance">
+                <button
+                  v-for="option in themeChoices"
+                  :key="option.id"
+                  type="button"
+                  role="radio"
+                  class="theme-choice-btn"
+                  :class="{ active: themePreference === option.id }"
+                  :aria-checked="themePreference === option.id"
+                  @click="setThemePreference(option.id)"
+                >
+                  <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <template v-if="option.id === 'dark'">
+                      <path
+                        d="M13 9.6A5.4 5.4 0 0 1 6.4 3a5.5 5.5 0 1 0 6.6 6.6Z"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linejoin="round"
+                      />
+                    </template>
+                    <template v-else-if="option.id === 'light'">
+                      <circle cx="8" cy="8" r="3" stroke="currentColor" stroke-width="1.4" />
+                      <path
+                        d="M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                        stroke-linecap="round"
+                      />
+                    </template>
+                    <template v-else>
+                      <rect
+                        x="1.8"
+                        y="3"
+                        width="12.4"
+                        height="8.4"
+                        rx="1.4"
+                        stroke="currentColor"
+                        stroke-width="1.4"
+                      />
+                      <path d="M5.5 13.6h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                    </template>
+                  </svg>
+                  {{ option.label }}
+                </button>
+              </div>
+            </div>
+            <div class="settings-note full">{{ ui.appearanceHint }}</div>
+
             <label class="settings-field full">
               <span>{{ ui.interfaceLanguage }}</span>
               <select v-model="locale">
@@ -7522,6 +7584,79 @@ onMounted(() => {
 .settings-check.full,
 .settings-note.full {
   grid-column: 1 / -1;
+}
+
+/* .settings-toggle was used in the template but never actually styled, so it
+   inherited .settings-field's column flex: the checkbox became a full-width
+   flex item, 840px wide, floating above its own label. It was always wrong —
+   just hard to see as a dark box on a dark panel. Under color-scheme: light the
+   platform paints a filled blue square and it is unmissable. */
+.settings-field.settings-toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--gap-3);
+  cursor: pointer;
+}
+
+.settings-field.settings-toggle input[type='checkbox'] {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+/* Segmented control. The track carries the hairline so the three buttons read
+   as one control rather than three loose chips. */
+.theme-choice {
+  display: inline-flex;
+  align-self: start;
+  padding: 2px;
+  gap: 2px;
+  border-radius: var(--r-md);
+  background: var(--surface-field);
+  box-shadow: var(--shadow-hairline);
+}
+
+.theme-choice-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gap-2);
+  min-height: 28px;
+  padding: 0 var(--gap-4);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: var(--fs-body);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+
+.theme-choice-btn svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.theme-choice-btn:hover {
+  color: var(--ink);
+}
+
+/* The selected segment is a raised tile on the recessed track — the same
+   figure/ground trick the platform controls use, so it reads as pressed in
+   both themes without needing an accent fill. */
+.theme-choice-btn.active {
+  background: var(--surface-2);
+  color: var(--ink);
+  box-shadow: var(--shadow-btn);
+}
+
+.theme-choice-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
 }
 
 .settings-section-title.full,

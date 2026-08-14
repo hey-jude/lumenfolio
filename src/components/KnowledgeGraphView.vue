@@ -4,6 +4,7 @@ import Graph from 'graphology'
 import Sigma from 'sigma'
 import forceAtlas2 from 'graphology-layout-forceatlas2'
 import louvain from 'graphology-communities-louvain'
+import { resolvedTheme } from '../theme'
 
 const props = defineProps({
   // { documents:[{id,title}], artifacts:[{documentId,kind,name,normalized,salience}], links:[{docA,docB,basis,weight}] }
@@ -80,15 +81,43 @@ const hasNodes = ref(false)
 const edgeTip = ref('') // click-an-edge explanation ("shared: …" / "co-cited")
 const searchQuery = ref('')
 
-const NODE_COLORS = {
-  document: '#6aa9ff',
-  concept: '#c084fc',
-  entity: '#60a5fa',
+// Sigma paints to a canvas, so these cannot be CSS variables — the renderer
+// needs literal colors. That makes the graph the one place a theme switch has
+// to be handled in JS rather than by the token layer.
+//
+// The light set is not the dark set darkened: the dark palette is tuned for
+// luminance against near-black, and those same hues (#facc15, #4ade80) turn to
+// mush on white. Each one is re-picked for contrast against its own canvas.
+const GRAPH_PALETTES = {
+  dark: {
+    node: { document: '#6aa9ff', concept: '#c084fc', entity: '#60a5fa' },
+    fallback: '#94a3b8',
+    community: [
+      '#60a5fa', '#4ade80', '#fb923c', '#c084fc', '#f87171',
+      '#2dd4bf', '#facc15', '#f472b6', '#a78bfa', '#34d399',
+    ],
+    label: '#c8d0e0',
+    edge: 'rgba(120,130,150,0.25)',
+    edgeFaded: 'rgba(120,130,150,0.05)',
+    nodeFaded: 'rgba(120,130,150,0.12)',
+    coCitation: 'rgba(106,169,255,0.5)',
+  },
+  light: {
+    node: { document: '#1668d6', concept: '#8b3fd1', entity: '#1d76c7' },
+    fallback: '#6b7280',
+    community: [
+      '#1d6fd1', '#1f8b4c', '#c2620a', '#8b3fd1', '#c62f37',
+      '#0f8b84', '#9a6b06', '#c03177', '#6d4bd1', '#12855f',
+    ],
+    label: '#3b3f47',
+    edge: 'rgba(90,100,120,0.3)',
+    edgeFaded: 'rgba(90,100,120,0.08)',
+    nodeFaded: 'rgba(90,100,120,0.16)',
+    coCitation: 'rgba(11,127,245,0.5)',
+  },
 }
-const COMMUNITY_COLORS = [
-  '#60a5fa', '#4ade80', '#fb923c', '#c084fc', '#f87171',
-  '#2dd4bf', '#facc15', '#f472b6', '#a78bfa', '#34d399',
-]
+
+const palette = computed(() => GRAPH_PALETTES[resolvedTheme.value] || GRAPH_PALETTES.dark)
 // Concepts shared by more documents than this are too generic to connect on in
 // document mode (would create a hairball + O(k^2) edges) — skip them.
 const GENERIC_CONCEPT_DOC_LIMIT = 10
@@ -412,9 +441,10 @@ function recolor() {
 function colorForNode(attrs, community) {
   if (colorBy.value === 'community') {
     const index = Number.isFinite(community) ? community : 0
-    return COMMUNITY_COLORS[((index % COMMUNITY_COLORS.length) + COMMUNITY_COLORS.length) % COMMUNITY_COLORS.length]
+    const wheel = palette.value.community
+    return wheel[((index % wheel.length) + wheel.length) % wheel.length]
   }
-  return NODE_COLORS[attrs.kind] || '#94a3b8'
+  return palette.value.node[attrs.kind] || palette.value.fallback
 }
 
 async function render() {
@@ -436,21 +466,25 @@ async function render() {
   // Kill AFTER the await (not before) so two render() calls racing through the
   // tick can't both create a Sigma and leak the first.
   if (sigma) { sigma.kill(); sigma = null }
+  // Read once and close over it: the reducers below run on every frame, and
+  // touching a computed ref inside them would re-track the dependency each pass.
+  const theme = palette.value
   sigma = new Sigma(g, containerRef.value, {
     allowInvalidContainer: true,
     renderLabels: true,
     labelDensity: 0.6,
     labelRenderedSizeThreshold: 7,
-    // Default label color is black — invisible on the dark graph overlay.
-    labelColor: { color: '#c8d0e0' },
+    // Sigma's default label color is black, which is invisible on the dark
+    // overlay and too heavy on the light one — it is set per theme either way.
+    labelColor: { color: theme.label },
     labelSize: 12,
     labelWeight: '500',
     labelFont: 'Inter, system-ui, -apple-system, sans-serif',
-    defaultEdgeColor: 'rgba(120,130,150,0.25)',
+    defaultEdgeColor: theme.edge,
     nodeReducer: (node, attrs) => {
       const res = { ...attrs }
       if (hoveredNode && node !== hoveredNode && !g.areNeighbors(node, hoveredNode)) {
-        res.color = 'rgba(120,130,150,0.12)'
+        res.color = theme.nodeFaded
         res.label = ''
       }
       return res
@@ -460,10 +494,10 @@ async function render() {
       const weight = g.getEdgeAttribute(edge, 'weight') || 1
       res.size = Math.min(5, 0.6 + Math.sqrt(weight) * 0.9)
       if (g.getEdgeAttribute(edge, 'relation') === 'co_citation') {
-        res.color = 'rgba(106,169,255,0.5)'
+        res.color = theme.coCitation
       }
       if (hoveredNode && !g.hasExtremity(edge, hoveredNode)) {
-        res.color = 'rgba(120,130,150,0.05)'
+        res.color = theme.edgeFaded
       }
       return res
     },
@@ -537,6 +571,11 @@ watch([mode, focusMode, collapseCommunities, expandedCommunities], () => {
 })
 watch(colorBy, () => {
   if (props.data) recolor()
+})
+// labelColor and defaultEdgeColor are constructor settings, so a recolor() is
+// not enough — the renderer has to be rebuilt for a theme change to reach them.
+watch(resolvedTheme, () => {
+  if (props.data) render()
 })
 </script>
 
