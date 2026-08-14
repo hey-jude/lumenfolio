@@ -2081,7 +2081,7 @@ onBeforeUnmount(() => {
   padding: 4px 10px;
   border-radius: var(--r-md);
   background: var(--accent);
-  color: var(--surface-0);
+  color: var(--on-fill);
   font-size: 12px;
   font-weight: var(--w-medium);
   white-space: nowrap;

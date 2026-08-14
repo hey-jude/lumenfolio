@@ -83,23 +83,24 @@ const props = defineProps({
   color: var(--danger);
 }
 
-/* Filled inverts the pairing: a saturated bed needs near-black text, not the
-   role color, or it fails contrast. */
+/* Filled inverts the pairing: a saturated bed needs the far end of the scale,
+   not the role color, or it fails contrast. --on-fill rather than --surface-0,
+   because the light theme's page floor is a grey and loses half a point. */
 .filled.tone-accent {
   background: var(--accent);
-  color: var(--surface-0);
+  color: var(--on-fill);
 }
 .filled.tone-success {
   background: var(--success);
-  color: var(--surface-0);
+  color: var(--on-fill);
 }
 .filled.tone-warning {
   background: var(--warning);
-  color: var(--surface-0);
+  color: var(--on-fill);
 }
 .filled.tone-danger {
   background: var(--danger);
-  color: var(--surface-0);
+  color: var(--on-fill);
 }
 .filled.tone-neutral {
   background: var(--surface-field);

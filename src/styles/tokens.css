@@ -71,6 +71,13 @@
   --danger: #ee5c61;
   --danger-tint: rgba(238, 92, 97, 0.16);
 
+  /* Foreground for text sitting ON a saturated role fill — the filled chip, an
+     accent button. Always the far end from the fills, which is why one token
+     covers all four roles. It is NOT --surface-0: that reads as light grey in
+     the light theme and costs about half a point of contrast, which is exactly
+     enough to drop three of the four fills under AA. */
+  --on-fill: var(--surface-0);
+
   /* Role-colored borders. A solid role hex is too loud for a 1px edge, and
      every component that needed one was mixing its own alpha. */
   --accent-line: rgba(75, 157, 255, 0.42);
@@ -217,9 +224,15 @@
   --ink-2: #5c6068;
   --ink-3: #8b8f97;
 
-  --accent: #0b7ff5;
+  /* Deeper than the obvious light-mode blue. Seventeen places set
+     `color: var(--accent)` on 11–13px text, and a brighter blue measures 3.91
+     against white — under AA, with no large-text exemption at this size. This
+     lands at 4.99 as text and 4.99 under white when used as a fill. */
+  --accent: #0d6fd1;
   --accent-ink: #0a63bd;
-  --accent-tint: rgba(11, 127, 245, 0.1);
+  --accent-tint: rgba(13, 111, 209, 0.1);
+
+  --on-fill: #ffffff;
   --success: #12854a;
   --success-tint: rgba(18, 133, 74, 0.1);
   --warning: #b45f06;
@@ -227,7 +240,7 @@
   --danger: #cf2f36;
   --danger-tint: rgba(207, 47, 54, 0.1);
 
-  --accent-line: rgba(11, 127, 245, 0.35);
+  --accent-line: rgba(13, 111, 209, 0.35);
   --success-line: rgba(18, 133, 74, 0.35);
   --warning-line: rgba(180, 95, 6, 0.35);
   --danger-line: rgba(207, 47, 54, 0.35);

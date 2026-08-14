@@ -4041,7 +4041,7 @@ function evidenceSourceLabel(source) {
 
 .evidence-card-open:hover {
   background: var(--accent);
-  color: var(--surface-0);
+  color: var(--on-fill);
 }
 
 .evidence-chip-page {
