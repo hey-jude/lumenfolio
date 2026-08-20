@@ -83,3 +83,4 @@ playwright-report/
 resources/pdf2zh-sidecar/python/
 resources/pdf2zh-sidecar/pdf2zh-sidecar
 resources/pdf2zh-sidecar/pdf2zh-sidecar.exe
+.osgrep

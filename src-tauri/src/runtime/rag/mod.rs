@@ -339,6 +339,8 @@ fn citation_source_rank(source: &str) -> u8 {
         "inspect_objects" => 55,
         "open_section" => 40,
         "open_pages" => 30,
+        "scholar_search" => 15,
+        "web_search" => 15,
         "fts" => 20,
         "client-context" => 10,
         _ => 0,
@@ -427,6 +429,7 @@ enum RagToolName {
     ReadSheet,
     WebSearch,
     WebFetch,
+    ScholarSearch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -480,6 +483,7 @@ impl RagToolName {
             Self::ReadSheet => "read_sheet",
             Self::WebSearch => "web_search",
             Self::WebFetch => "web_fetch",
+            Self::ScholarSearch => "scholar_search",
         }
     }
 }
@@ -833,6 +837,18 @@ pub fn rag_tool_specs_for_capabilities(
                 "required": ["url"]
             }),
         });
+        specs.push(RagToolSpec {
+            name: "scholar_search",
+            description: "Search academic paper databases (Semantic Scholar + CrossRef) for papers by keyword, author, or topic. Returns titles, URLs, abstracts, year, authors, and citation counts. Use when the question requires external academic knowledge not in the user's documents — e.g. verifying a claim, finding related work, or understanding a concept's scholarly context.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Academic search query (keywords, topic, or paper title)" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Max results (default 5)" }
+                },
+                "required": ["query"]
+            }),
+        });
     }
     specs
 }
@@ -1099,6 +1115,7 @@ pub fn execute_rag_tool_call_for_capabilities(
         "read_sheet" => execute_read_sheet_tool(&registry, args),
         "web_search" => execute_web_search_tool(&registry, args, fallback_query),
         "web_fetch" => execute_web_fetch_tool(&registry, args),
+        "scholar_search" => execute_scholar_search_tool(&registry, args, fallback_query),
         _ => execute_search_chunks_tool(&registry, args, fallback_query),
     };
 
@@ -1903,6 +1920,49 @@ fn execute_web_fetch_tool(
             RagToolName::WebFetch,
             serde_json::json!({ "url": url }),
             1,
+        ),
+    })
+}
+
+/// `scholar_search`: search Semantic Scholar + CrossRef for academic papers.
+fn execute_scholar_search_tool(
+    registry: &RagToolRegistry<'_>,
+    args: &serde_json::Value,
+    fallback_query: &str,
+) -> Result<RagToolExecutionOutput, String> {
+    let query = string_arg(args, "query")
+        .unwrap_or(fallback_query)
+        .trim()
+        .to_string();
+    let limit = u32_arg(args, "limit", 5, 1, 10) as usize;
+    let hits = crate::runtime::scholar_search::scholar_search(&query, limit)?;
+    let citations: Vec<Citation> = hits
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| {
+            let snippet = truncate_chars(hit.snippet.trim(), registry.max_quote_chars);
+            Citation {
+                id: format!("scholar-{index}"),
+                label: format!("[{}]", index + 1),
+                page: 0,
+                block_id: String::new(),
+                section_title: Some("academic paper".to_string()),
+                quote: format!("{}\n{}\n{}", hit.title.trim(), hit.url.trim(), snippet),
+                bbox_list: serde_json::json!([]),
+                document_id: String::new(),
+                source: "scholar_search".to_string(),
+            }
+        })
+        .collect();
+    let count = citations.len();
+    Ok(RagToolExecutionOutput {
+        citations,
+        trace_candidates: Vec::new(),
+        tree_nodes: Vec::new(),
+        tool_call: tool_success_call(
+            RagToolName::ScholarSearch,
+            serde_json::json!({ "query": query, "limit": limit }),
+            count,
         ),
     })
 }

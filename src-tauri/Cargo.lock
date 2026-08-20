@@ -2490,6 +2490,7 @@ dependencies = [
  "tauri-plugin-log",
  "tokio",
  "tokio-util",
+ "urlencoding",
  "zip 8.6.0",
 ]
 

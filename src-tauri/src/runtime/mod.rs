@@ -4,4 +4,5 @@ pub mod knowledge_graph;
 pub mod note_edit;
 pub mod precipitation;
 pub mod rag;
+pub mod scholar_search;
 pub mod web_search;
