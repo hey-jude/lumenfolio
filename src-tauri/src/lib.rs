@@ -789,24 +789,24 @@ struct OpenAiChatChoice {
 }
 
 #[derive(Deserialize)]
-struct OpenAiChatChunk {
-    choices: Vec<OpenAiChatChunkChoice>,
+pub(crate) struct OpenAiChatChunk {
+    pub(crate) choices: Vec<OpenAiChatChunkChoice>,
 }
 
 #[derive(Deserialize)]
-struct OpenAiChatChunkChoice {
-    delta: Option<OpenAiChatChunkDelta>,
+pub(crate) struct OpenAiChatChunkChoice {
+    pub(crate) delta: Option<OpenAiChatChunkDelta>,
 }
 
 #[derive(Deserialize)]
-struct OpenAiChatChunkDelta {
-    content: Option<String>,
-    reasoning_content: Option<String>,
-    reasoning: Option<String>,
+pub(crate) struct OpenAiChatChunkDelta {
+    pub(crate) content: Option<String>,
+    pub(crate) reasoning_content: Option<String>,
+    pub(crate) reasoning: Option<String>,
     // Streamed native tool calls (the agent loop accumulates these across chunks
     // by `index`). Ignored by the plain answer-stream path, which never offers tools.
     #[serde(default)]
-    tool_calls: Option<Vec<OpenAiStreamToolCall>>,
+    pub(crate) tool_calls: Option<Vec<OpenAiStreamToolCall>>,
 }
 
 /// One fragment of a streamed tool call. The `id`/`function.name` arrive in the
@@ -3655,20 +3655,14 @@ async fn run_ask_document(
             let answer = llm::chat::run_simple_completion(provider, system, question, 0.7, 30)
                 .await
                 .unwrap_or_else(|_| runtime::conversation::default_reply(question));
-            let is_zh = input
-                .locale
-                .as_deref()
-                .is_some_and(|locale| locale.starts_with("zh"))
-                || question
-                    .chars()
-                    .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
-            let (ev_title, ev_summary) = if is_zh {
-                ("直接回复", "寒暄消息 — 直接作答，无需检索")
-            } else {
-                (
+            let lang = llm::chat::answer_language_for_question(question, input.locale.as_deref());
+            let (ev_title, ev_summary) = match lang {
+                "Korean" => ("직접 응답", "일상 대화 — 검색 없이 직접 응답"),
+                "Chinese" => ("直接回复", "寒暄消息 — 直接作答，无需检索"),
+                _ => (
                     "Direct reply",
                     "Conversational message — answered directly, no retrieval needed",
-                )
+                ),
             };
             let mut trace = runtime::agent::AgentTrace {
                 run_id: String::new(),
@@ -4728,29 +4722,43 @@ fn insufficient_evidence_answer(
         .get("maxAttempts")
         .and_then(|value| value.as_u64())
         .unwrap_or(20);
-    let is_chinese = llm::chat::answer_language_for_question(question, locale) == "Chinese";
-    let mut message = if is_chinese {
-        if budget_exhausted {
-            format!("我已经完成本轮 {max_attempts} 次检索，但还没有拿到足够可靠的证据来回答这个问题。\n\n原因：{reason}\n\n这类情况继续重复同一轮检索通常不会带来新证据。建议把问题改得更具体，或先选中文档中的相关段落再提问。")
-        } else if let Some(missing) = &missing {
-            format!("我还没有拿到足够可靠的证据来回答这个问题。\n\n原因：{reason}\n缺少：{missing}\n\n你可以换一个更具体的问题，或者先选中文档中的相关段落再提问。")
-        } else {
-            format!("我还没有拿到足够可靠的证据来回答这个问题。\n\n原因：{reason}\n\n你可以换一个更具体的问题，或者先选中文档中的相关段落再提问。")
+    let lang = llm::chat::answer_language_for_question(question, locale);
+    let mut message = match lang {
+        "Korean" => {
+            if budget_exhausted {
+                format!("이번 {max_attempts}회 검색을 모두 완료했으나, 이 질문에 답할 수 있는 충분하고 신뢰할 수 있는 근거를 찾지 못했습니다.\n\n이유: {reason}\n\n동일한 검색을 반복해도 새로운 근거를 얻기 어렵습니다. 질문을 더 구체적으로 수정하거나, PDF에서 관련 문단을 선택한 후 질문해 보세요.")
+            } else if let Some(missing) = &missing {
+                format!("이 질문에 답할 수 있는 충분하고 신뢰할 수 있는 근거를 아직 찾지 못했습니다.\n\n이유: {reason}\n부족한 내용: {missing}\n\n질문을 더 구체적으로 변경하거나, PDF에서 관련 문단을 선택한 후 질문해 보세요.")
+            } else {
+                format!("이 질문에 답할 수 있는 충분하고 신뢰할 수 있는 근거를 아직 찾지 못했습니다.\n\n이유: {reason}\n\n질문을 더 구체적으로 변경하거나, PDF에서 관련 문단을 선택한 후 질문해 보세요.")
+            }
         }
-    } else if budget_exhausted {
-        format!("I completed this retrieval budget of {max_attempts} steps, but I still do not have enough reliable evidence to answer.\n\nReason: {reason}\n\nRepeating the same retrieval loop is unlikely to add new evidence. Try asking a more specific question, or select a relevant passage in the PDF before asking.")
-    } else if let Some(missing) = &missing {
-        format!("I do not have enough reliable evidence to answer yet.\n\nReason: {reason}\nMissing: {missing}\n\nTry asking a more specific question, or select a relevant passage in the PDF before asking.")
-    } else {
-        format!("I do not have enough reliable evidence to answer yet.\n\nReason: {reason}\n\nTry asking a more specific question, or select a relevant passage in the PDF before asking.")
+        "Chinese" => {
+            if budget_exhausted {
+                format!("我已经完成本轮 {max_attempts} 次检索，但还没有拿到足够可靠的证据来回答这个问题。\n\n原因：{reason}\n\n这类情况继续重复同一轮检索通常不会带来新证据。建议把问题改得更具体，或先选中文档中的相关段落再提问。")
+            } else if let Some(missing) = &missing {
+                format!("我还没有拿到足够可靠的证据来回答这个问题。\n\n原因：{reason}\n缺少：{missing}\n\n你可以换一个更具体的问题，或者先选中文档中的相关段落再提问。")
+            } else {
+                format!("我还没有拿到足够可靠的证据来回答这个问题。\n\n原因：{reason}\n\n你可以换一个更具体的问题，或者先选中文档中的相关段落再提问。")
+            }
+        }
+        _ => {
+            if budget_exhausted {
+                format!("I completed this retrieval budget of {max_attempts} steps, but I still do not have enough reliable evidence to answer.\n\nReason: {reason}\n\nRepeating the same retrieval loop is unlikely to add new evidence. Try asking a more specific question, or select a relevant passage in the PDF before asking.")
+            } else if let Some(missing) = &missing {
+                format!("I do not have enough reliable evidence to answer yet.\n\nReason: {reason}\nMissing: {missing}\n\nTry asking a more specific question, or select a relevant passage in the PDF before asking.")
+            } else {
+                format!("I do not have enough reliable evidence to answer yet.\n\nReason: {reason}\n\nTry asking a more specific question, or select a relevant passage in the PDF before asking.")
+            }
+        }
     };
     // Be transparent about what was already examined so the user knows the
     // answer is "not found after looking", not "didn't bother to look".
     if let Some(coverage) = agent_run.ledger.coverage_summary() {
-        if is_chinese {
-            message.push_str(&format!("\n\n（已检索过：{coverage}）"));
-        } else {
-            message.push_str(&format!("\n\n(Already reviewed: {coverage})"));
+        match lang {
+            "Korean" => message.push_str(&format!("\n\n(이미 확인한 범위: {coverage})")),
+            "Chinese" => message.push_str(&format!("\n\n（已检索过：{coverage}）")),
+            _ => message.push_str(&format!("\n\n(Already reviewed: {coverage})")),
         }
     }
     message
@@ -5814,6 +5822,17 @@ mod tests {
         assert_eq!(coerce_context_window(&serde_json::json!("n/a")), None);
         assert_eq!(coerce_context_window(&serde_json::json!(512)), None);
         assert_eq!(coerce_context_window(&serde_json::json!(true)), None);
+    }
+
+    #[test]
+    fn budget_exhausted_korean_answer_does_not_suggest_continue_retrieval() {
+        let run = insufficient_run(true);
+        let answer = insufficient_evidence_answer("이 논문은 무슨 내용이야?", &run, Some("ko"));
+
+        assert!(agent_judge::retrieval_budget_exhausted(&run));
+        assert!(answer.contains("동일한 검색을 반복해도"));
+        assert!(answer.contains("더 구체적으로"));
+        assert!(answer.contains("관련 문단을 선택"));
     }
 
     #[test]

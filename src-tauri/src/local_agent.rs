@@ -224,20 +224,21 @@ fn write_image_temp(data_url: &str) -> Option<ImageTemp> {
 
 fn answer_language(locale: Option<&str>) -> &'static str {
     match locale.map(str::trim).unwrap_or("") {
+        l if l.starts_with("ko") => "Korean",
         l if l.starts_with("zh") => "Chinese",
         _ => "English",
     }
 }
 
 /// The language directive shared by both prompt modes. The answer must follow the
-/// QUESTION's language (a Chinese question gets a Chinese answer), regardless of
-/// the app UI locale or the document's language; `locale` is only the tiebreaker
+/// QUESTION's language (a Chinese question gets a Chinese answer, a Korean question gets a Korean answer),
+/// regardless of the app UI locale or the document's language; `locale` is only the tiebreaker
 /// when the question itself is language-neutral.
 fn language_directive(locale: Option<&str>) -> String {
     let fallback = answer_language(locale);
     format!(
         "Always write your answer in the SAME language as the user's Question below \
-(e.g. a Chinese question gets a Chinese answer, an English question gets an English answer), \
+(e.g. a Chinese question gets a Chinese answer, an English question gets an English answer, a Korean question gets a Korean answer), \
 even when the document evidence is in another language. Only if the question's language is \
 genuinely ambiguous, default to {fallback}."
     )
@@ -1339,7 +1340,11 @@ mod tests {
         let d = language_directive(Some("en"));
         assert!(d.contains("SAME language as the user's Question"));
         assert!(d.contains("a Chinese question gets a Chinese answer"));
+        assert!(d.contains("a Korean question gets a Korean answer"));
         assert!(d.contains("default to English"));
+
+        let d_ko = language_directive(Some("ko-KR"));
+        assert!(d_ko.contains("default to Korean"));
     }
 
     #[test]

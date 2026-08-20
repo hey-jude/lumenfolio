@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::{
     llm, normalize_base_url, truncate_for_error, MicrosoftTranslateResponseItem,
-    MicrosoftTranslatorProvider, OpenAiChatRequest, OpenAiChatResponse, OpenAiCompatibleProvider,
+    MicrosoftTranslatorProvider, OpenAiChatRequest, OpenAiCompatibleProvider,
     TranslationProvider,
 };
 
@@ -59,7 +59,9 @@ pub(crate) async fn translate_with_provider(
 }
 
 fn local_placeholder_translation(source_text: &str, target_lang: &str) -> String {
-    if target_lang.eq_ignore_ascii_case("zh") {
+    if target_lang.eq_ignore_ascii_case("ko") {
+        format!("【로컬 임시 번역】번역 Provider가 아직 설정되지 않았습니다.\n\n{source_text}")
+    } else if target_lang.eq_ignore_ascii_case("zh") {
         format!("【本地占位翻译】尚未配置翻译 Provider。\n\n{source_text}")
     } else {
         format!(
@@ -262,7 +264,7 @@ async fn translate_with_openai_compatible(
     let request = OpenAiChatRequest {
         model: provider.model.clone(),
         temperature: 0.2,
-        stream: None,
+        stream: Some(false),
         messages: vec![
             llm::chat::text_message(
                 "system",
@@ -283,25 +285,16 @@ async fn translate_with_openai_compatible(
         .await
         .map_err(|err| format!("Translation provider request failed: {err}"))?;
     let status = response.status();
+    let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
         return Err(format!(
             "Translation provider returned {status}: {}",
             truncate_for_error(&body, 600)
         ));
     }
 
-    let response = response
-        .json::<OpenAiChatResponse>()
-        .await
-        .map_err(|err| format!("Failed to decode translation response: {err}"))?;
-    response
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| llm::chat::extract_chat_response_text(&choice.message.content))
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| "Translation provider returned an empty response".to_string())
+    llm::chat::decode_chat_completion_response(&body)
+        .map_err(|err| format!("Failed to decode translation response: {err}"))
 }
 
 fn translation_language_name(lang: &str) -> String {

@@ -23,9 +23,18 @@ const SMALLTALK_PHRASES: &[&str] = &[
     "谢谢", "谢谢你", "多谢", "感谢", "感谢你", "辛苦了", "麻烦了", "好的", "好", "收到",
     "嗯", "嗯嗯", "ok", "okay", "好嘞", "行", "可以", "没事了", "算了",
     "再见", "拜拜", "回头见", "晚点聊",
+    // Korean greetings / acknowledgements / farewells.
+    "안녕", "안녕하세요", "안녕하십니까", "하이", "반가워", "반갑습니다",
+    "좋은 아침", "좋은 저녁", "잘자", "굿모닝", "굿나잇",
+    "고마워", "고마워요", "고맙습니다", "감사", "감사합니다", "감사해요", "수고했어", "수고하셨습니다",
+    "알겠어", "알겠습니다", "네", "응", "오케이", "좋아", "좋아요", "됐어", "괜찮아",
+    "바이", "잘 가", "잘 있어", "안녕히 계세요", "안녕히 가세요", "다음에 봐",
     // Meta questions about the assistant itself (not the library).
     "你是谁", "你叫什么", "你叫什么名字", "你是什么", "你能做什么", "你会什么",
     "介绍一下你自己", "自我介绍", "你好厉害",
+    "누구야", "누구세요", "너는 누구니", "넌 누구야", "너 누구야", "당신은 누구십니까",
+    "이름이 뭐야", "뭐 할 수 있어", "무엇을 할 수 있나요", "뭐해", "뭐하니",
+    "자기소개", "자기소개 해줘", "자기소개해줘", "소개해줘",
     // English.
     "hello", "hey", "yo", "hiya", "heya", "howdy", "hi there", "hello there",
     "thanks", "thank you", "thanks a lot", "thx", "ty", "cheers", "much appreciated",
@@ -39,7 +48,8 @@ const SMALLTALK_PHRASES: &[&str] = &[
 /// phrase (e.g. "你好~~" after punctuation stripping, "thanks so much").
 const GREETING_PREFIXES: &[&str] = &[
     "你好", "您好", "哈喽", "嗨", "早上好", "晚上好", "晚安", "谢谢", "多谢", "感谢",
-    "再见", "拜拜", "hello", "hi ", "hey ", "thanks", "thank you", "good morning",
+    "再见", "拜拜", "안녕", "안녕하세요", "안녕하십니까", "좋은 아침", "좋은 저녁", "감사",
+    "고마워", "고맙습니다", "hello", "hi ", "hey ", "thanks", "thank you", "good morning",
     "good afternoon", "good evening", "good night",
 ];
 
@@ -51,6 +61,10 @@ const QUESTION_SIGNALS: &[&str] = &[
     "什么", "为什么", "为何", "怎么", "怎样", "如何", "多少", "哪", "啥", "是不是",
     "能不能", "可不可以", "有没有", "总结", "概括", "解释", "说明", "分析", "翻译",
     "对比", "区别", "列出", "查", "找", "帮我", "帮忙", "讲了", "讲的", "介绍一下这",
+    // Korean interrogatives / imperatives.
+    "뭐", "무엇", "왜", "어떻게", "어떤", "어디", "언제", "얼마", "있어?", "있나요",
+    "가능해", "요약", "정리", "설명", "분석", "번역", "비교", "차이", "목록", "검색",
+    "찾아", "도와줘", "알려줘", "해줘",
     // English interrogatives / imperatives.
     "what ", "why", "how ", "which", "where", "when", "explain", "summar", "analyz",
     "translate", "compare", "list ", "find ", "search", "help me", "tell me about",
@@ -88,9 +102,16 @@ pub fn is_smalltalk(question: &str, has_context: bool) -> bool {
 
 /// A canned, language-matched greeting used only when the direct LLM completion
 /// fails (network / provider error) — so a smalltalk turn never dead-ends on an
-/// error message. Mirrors the user's script (Han → Chinese, else English).
+/// error message. Mirrors the user's script (Hangul → Korean, Han → Chinese, else English).
 pub fn default_reply(question: &str) -> String {
-    if question.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
+    if question.chars().any(|c| {
+        matches!(
+            u32::from(c),
+            0xAC00..=0xD7AF | 0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xD7B0..=0xD7FF
+        )
+    }) {
+        "안녕하세요! 저는 지식베이스 어시스턴트입니다. 무엇을 도와드릴까요?".to_string()
+    } else if question.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) {
         "你好！我是你的知识库助手，有什么可以帮你的吗？".to_string()
     } else {
         "Hi! I'm your knowledge-base assistant — how can I help?".to_string()
@@ -157,6 +178,12 @@ mod tests {
             "你是谁",
             "你能做什么",
             "好的",
+            "안녕",
+            "안녕하세요!",
+            "감사합니다",
+            "고마워요~",
+            "너는 누구니",
+            "뭐 할 수 있어",
             "hi",
             "Hello!",
             "hey",
@@ -180,6 +207,10 @@ mod tests {
             "这两篇有什么区别",
             "你好我想问一下这篇文章讲了啥",
             "解释一下 Table 3",
+            "이 논문 요약해줘",
+            "안녕하세요, 이 논문 요약 부탁해요",
+            "주의 메커니즘이 뭐야?",
+            "이 두 논문의 차이점은?",
             "how does attention work",
             "what is DOPD",
             "summarize this paper",
@@ -191,12 +222,30 @@ mod tests {
     }
 
     #[test]
+    fn default_reply_matches_language() {
+        assert_eq!(
+            default_reply("안녕하세요"),
+            "안녕하세요! 저는 지식베이스 어시스턴트입니다. 무엇을 도와드릴까요?"
+        );
+        assert_eq!(
+            default_reply("你好"),
+            "你好！我是你的知识库助手，有什么可以帮你的吗？"
+        );
+        assert_eq!(
+            default_reply("Hello"),
+            "Hi! I'm your knowledge-base assistant — how can I help?"
+        );
+    }
+
+    #[test]
     fn context_disables_the_gate() {
         // A greeting while reading a document / with a selection still runs the
         // normal path — the user may be about to ask about what they're looking at,
         // and we must never short-circuit real intent.
         assert!(is_smalltalk("你好", false));
         assert!(!is_smalltalk("你好", true));
+        assert!(is_smalltalk("안녕하세요", false));
+        assert!(!is_smalltalk("안녕하세요", true));
     }
 
     #[test]
@@ -204,6 +253,8 @@ mod tests {
         // Even greeting-flavoured, anything past the length cap goes to retrieval.
         let long = "你好你好你好你好你好你好你好你好你好你好你好你好你好";
         assert!(!is_smalltalk(long, false));
+        let long_ko = "안녕하세요안녕하세요안녕하세요안녕하세요안녕하세요안녕하세요";
+        assert!(!is_smalltalk(long_ko, false));
     }
 
     #[test]

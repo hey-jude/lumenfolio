@@ -7,7 +7,7 @@ import { messages } from '../i18n'
 const ui = messages.en
 const params = new URLSearchParams(window.location.search)
 const scenario = params.get('scenario') || 'complete'
-const translationLang = ref('zh')
+const translationLang = ref('ko')
 const viewMode = ref('original')
 const activePage = ref(1)
 const startCalls = ref(0)

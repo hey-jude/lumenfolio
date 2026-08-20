@@ -90,6 +90,7 @@ pub async fn run_precipitation_job(
     document_id: &str,
     database: &AppDatabase,
     provider: &OpenAiCompatibleProvider,
+    target_lang: Option<&str>,
 ) -> Result<PrecipitationResult, String> {
     // 1. Gather sampled input + prior hash/status (scoped lock).
     let (title, source_text, prior_hash, prior_status) = {
@@ -133,7 +134,12 @@ pub async fn run_precipitation_job(
         return Ok(skipped(document_id));
     }
 
-    let hash = stable_text_hash(&format!("{title}\n\n{source_text}"));
+    let lang_tag = target_lang.unwrap_or("").trim().to_lowercase();
+    let hash = if lang_tag.is_empty() {
+        stable_text_hash(&format!("{title}\n\n{source_text}"))
+    } else {
+        stable_text_hash(&format!("{title}\n\n{source_text}\n\nlang:{lang_tag}"))
+    };
     // Unchanged + already done → skip the LLM entirely.
     if hash == prior_hash && prior_status == "done" {
         return Ok(skipped(document_id));
@@ -142,7 +148,7 @@ pub async fn run_precipitation_job(
     mark_status(database, document_id, "running", &prior_hash, "")?;
 
     // 2. One bounded LLM call (the only token cost).
-    let user_prompt = build_extraction_prompt(&title, &source_text);
+    let user_prompt = build_extraction_prompt(&title, &source_text, target_lang);
     let raw = match crate::llm::chat::run_simple_completion(
         provider,
         EXTRACTION_SYSTEM,
@@ -425,7 +431,37 @@ fn gather_source_text(conn: &rusqlite::Connection, document_id: &str) -> String 
 
 const EXTRACTION_SYSTEM: &str = "You are a research-paper knowledge extractor. Read the (sampled) document text and return ONE JSON object only — no prose, no markdown fences. Use the document's own language for names where natural, but keep canonical full names for methods/datasets/systems so they match across papers.";
 
-fn build_extraction_prompt(title: &str, source_text: &str) -> String {
+fn target_language_name(lang: &str) -> &'static str {
+    match lang.trim().to_lowercase().as_str() {
+        "ko" | "ko-kr" => "Korean",
+        "zh" | "zh-cn" | "cn" => "Simplified Chinese",
+        "zh-tw" | "zh-hk" => "Traditional Chinese",
+        "ja" | "ja-jp" => "Japanese",
+        "fr" | "fr-fr" => "French",
+        "de" | "de-de" => "German",
+        "es" | "es-es" => "Spanish",
+        "ru" | "ru-ru" => "Russian",
+        "it" | "it-it" => "Italian",
+        "pt" | "pt-pt" | "pt-br" => "Portuguese",
+        "en" | "en-us" => "English",
+        _ => "English",
+    }
+}
+
+fn build_extraction_prompt(title: &str, source_text: &str, target_lang: Option<&str>) -> String {
+    let language_rule = match target_lang.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(lang) => {
+            let lang_name = target_language_name(lang);
+            format!(
+                "- Write the summary, entity details, and concept details in {lang_name}.\n\
+                 - Preserve canonical/standard full names for methods, models, datasets, and systems (e.g. ResNet, AdamW, ImageNet, Transformer) so they match across papers."
+            )
+        }
+        None => {
+            "- Use the document's own language for names and details where natural, but keep canonical full names for methods/datasets/systems.".to_string()
+        }
+    };
+
     format!(
         "Title: {title}\n\n{source_text}\n\n\
 Return ONLY this JSON object:\n\
@@ -435,7 +471,8 @@ Return ONLY this JSON object:\n\
   \"concepts\": [{{\"name\": \"\", \"detail\": \"one short clause\", \"salience\": 0.0}}],\n\
   \"keywords\": [\"\"]\n\
 }}\n\
-Rules: salience in 0..1. Prefer canonical full names. entities<=24, concepts<=24, keywords<=16. Output JSON only."
+Rules: salience in 0..1. Prefer canonical full names. entities<=24, concepts<=24, keywords<=16. Output JSON only.\n\
+{language_rule}"
     )
 }
 
@@ -657,6 +694,7 @@ pub(crate) async fn enqueue_document_knowledge(
     document_id: String,
     model_provider_id: Option<String>,
     model_key: Option<String>,
+    target_lang: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<KnowledgeEventOutput, String> {
     use tauri::{Emitter, Manager};
@@ -676,10 +714,11 @@ pub(crate) async fn enqueue_document_knowledge(
 
     let task_app = app.clone();
     let doc = document_id.clone();
+    let target_lang_cloned = target_lang.clone();
     tauri::async_runtime::spawn(async move {
         let result = {
             let database = task_app.state::<AppDatabase>();
-            run_precipitation_job(&doc, &database, &provider).await
+            run_precipitation_job(&doc, &database, &provider, target_lang_cloned.as_deref()).await
         };
         let event = match result {
             Ok(r) => KnowledgeEventOutput {
@@ -798,6 +837,7 @@ pub(crate) async fn reprecipitate_document(
     document_id: String,
     model_provider_id: Option<String>,
     model_key: Option<String>,
+    target_lang: Option<String>,
     app: tauri::AppHandle,
 ) -> Result<KnowledgeEventOutput, String> {
     use tauri::Manager;
@@ -818,7 +858,7 @@ pub(crate) async fn reprecipitate_document(
         )
         .map_err(|err| format!("Failed to reset knowledge cache: {err}"))?;
     }
-    enqueue_document_knowledge(document_id, model_provider_id, model_key, app).await
+    enqueue_document_knowledge(document_id, model_provider_id, model_key, target_lang, app).await
 }
 
 /// Consolidate existing knowledge: re-apply the (improved) alias normalization to
@@ -903,5 +943,18 @@ mod tests {
     #[test]
     fn parse_extraction_rejects_non_json() {
         assert!(parse_extraction("no json here").is_err());
+    }
+
+    #[test]
+    fn build_extraction_prompt_includes_language_directive() {
+        let prompt_ko = build_extraction_prompt("Test Paper", "Sample Text", Some("ko"));
+        assert!(prompt_ko.contains("Write the summary, entity details, and concept details in Korean"));
+        assert!(prompt_ko.contains("Preserve canonical/standard full names"));
+
+        let prompt_zh = build_extraction_prompt("Test Paper", "Sample Text", Some("zh"));
+        assert!(prompt_zh.contains("Write the summary, entity details, and concept details in Simplified Chinese"));
+
+        let prompt_none = build_extraction_prompt("Test Paper", "Sample Text", None);
+        assert!(prompt_none.contains("Use the document's own language"));
     }
 }

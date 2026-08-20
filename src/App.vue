@@ -156,7 +156,7 @@ watch(selectedDocId, (id) => {
 watch(openTabs, (tabs) => {
   writePersisted('openTabs', tabs)
 })
-const translationLang = ref('zh')
+const translationLang = usePersistedRef('translationLang', 'ko')
 const viewMode = ref('original')
 const activePage = ref(1)
 const activeBlockId = ref('')
@@ -1202,7 +1202,7 @@ function applySelectedChatModel(modelId, doc = selectedDocument.value) {
 watch(selectedDocument, (doc) => {
   if (!doc) return
   syncingTranslationLangFromDocument = true
-  translationLang.value = doc.translation.lang || 'zh'
+  translationLang.value = doc.translation.lang || translationLang.value || 'ko'
   nextTick(() => {
     syncingTranslationLangFromDocument = false
   })
@@ -4454,10 +4454,11 @@ async function reprecipitateCurrentDocument() {
   const documentId = selectedDocId.value
   if (!documentId || documentId === 'empty') return
   const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
+  const targetLang = selectedDocument.value?.translation?.lang || translationLang.value || 'ko'
   knowledgeByDoc[documentId] = { ...(knowledgeByDoc[documentId] || {}), status: 'running' }
   if (knowledgeCard.value) knowledgeCard.value.status = 'running'
   try {
-    await invoke('reprecipitate_document', { documentId, modelProviderId: providerId, modelKey })
+    await invoke('reprecipitate_document', { documentId, modelProviderId: providerId, modelKey, targetLang })
   } catch (err) {
     console.warn('Failed to reprecipitate document', err)
   }
@@ -4504,7 +4505,9 @@ function pumpPrecipitation() {
     releasePrecipitationSlot(documentId)
   }, 120000)
   const { providerId, modelKey } = parseChatModelOptionId(selectedChatModelId.value)
-  invoke('enqueue_document_knowledge', { documentId, modelProviderId: providerId, modelKey })
+  const targetDoc = allDocs.value.find((doc) => doc.id === documentId)
+  const targetLang = targetDoc?.translation?.lang || translationLang.value || 'ko'
+  invoke('enqueue_document_knowledge', { documentId, modelProviderId: providerId, modelKey, targetLang })
     .catch((err) => {
       console.warn('Failed to enqueue knowledge precipitation', err)
       releasePrecipitationSlot(documentId)
@@ -6288,6 +6291,7 @@ onMounted(() => {
             <label class="settings-field full">
               <span>{{ ui.interfaceLanguage }}</span>
               <select v-model="locale">
+                <option value="ko">{{ ui.languageNameKorean }}</option>
                 <option value="en">{{ ui.languageNameEnglish }}</option>
                 <option value="zh">{{ ui.languageNameChinese }}</option>
               </select>

@@ -281,22 +281,22 @@ export const mockWorkspace = {
 }
 
 export const translationLanguages = [
-  { value: 'zh', label: { en: 'Chinese', zh: '中文' } },
-  { value: 'zh-TW', label: { en: 'Chinese (Trad.)', zh: '繁体中文' } },
-  { value: 'en', label: { en: 'English', zh: '英语' } },
-  { value: 'ja', label: { en: 'Japanese', zh: '日语' } },
-  { value: 'ko', label: { en: 'Korean', zh: '韩语' } },
-  { value: 'fr', label: { en: 'French', zh: '法语' } },
-  { value: 'de', label: { en: 'German', zh: '德语' } },
-  { value: 'es', label: { en: 'Spanish', zh: '西班牙语' } },
-  { value: 'pt', label: { en: 'Portuguese', zh: '葡萄牙语' } },
-  { value: 'it', label: { en: 'Italian', zh: '意大利语' } },
-  { value: 'ru', label: { en: 'Russian', zh: '俄语' } },
-  { value: 'ar', label: { en: 'Arabic', zh: '阿拉伯语' } },
-  { value: 'hi', label: { en: 'Hindi', zh: '印地语' } },
-  { value: 'th', label: { en: 'Thai', zh: '泰语' } },
-  { value: 'vi', label: { en: 'Vietnamese', zh: '越南语' } },
-  { value: 'id', label: { en: 'Indonesian', zh: '印尼语' } },
+  { value: 'ko', label: { en: 'Korean', zh: '韩语', ko: '한국어' } },
+  { value: 'zh', label: { en: 'Chinese', zh: '中文', ko: '중국어 (간체)' } },
+  { value: 'zh-TW', label: { en: 'Chinese (Trad.)', zh: '繁体中文', ko: '중국어 (번체)' } },
+  { value: 'en', label: { en: 'English', zh: '英语', ko: '영어' } },
+  { value: 'ja', label: { en: 'Japanese', zh: '日语', ko: '일본어' } },
+  { value: 'fr', label: { en: 'French', zh: '法语', ko: '프랑스어' } },
+  { value: 'de', label: { en: 'German', zh: '德语', ko: '독일어' } },
+  { value: 'es', label: { en: 'Spanish', zh: '西班牙语', ko: '스페인어' } },
+  { value: 'pt', label: { en: 'Portuguese', zh: '葡萄牙语', ko: '포르투갈어' } },
+  { value: 'it', label: { en: 'Italian', zh: '意大利语', ko: '이탈리아어' } },
+  { value: 'ru', label: { en: 'Russian', zh: '俄语', ko: '러시아어' } },
+  { value: 'ar', label: { en: 'Arabic', zh: '阿拉伯语', ko: '아랍어' } },
+  { value: 'hi', label: { en: 'Hindi', zh: '印地语', ko: '힌디어' } },
+  { value: 'th', label: { en: 'Thai', zh: '泰语', ko: '태국어' } },
+  { value: 'vi', label: { en: 'Vietnamese', zh: '越南语', ko: '베트남어' } },
+  { value: 'id', label: { en: 'Indonesian', zh: '印尼语', ko: '인도네시아어' } },
 ]
 
 export const chatModels = [

@@ -725,7 +725,7 @@ async fn execute_analyze_visual_with_provider(
     let request = OpenAiChatRequest {
         model: ctx.provider.model.clone(),
         temperature: 0.0,
-        stream: None,
+        stream: Some(false),
         messages: vec![
             llm::chat::text_message(
                 "system",
@@ -748,8 +748,8 @@ async fn execute_analyze_visual_with_provider(
         }
     };
     let status = response.status();
+    let body = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
         return Ok(analyze_visual_error_output(
             &call.args,
             &format!(
@@ -758,17 +758,8 @@ async fn execute_analyze_visual_with_provider(
             ),
         ));
     }
-    let response = response
-        .json::<OpenAiChatResponse>()
-        .await
-        .map_err(|err| format!("Failed to decode visual analysis response: {err}"))?;
-    let answer = response
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| llm::chat::extract_chat_response_text(&choice.message.content))
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or_else(|| "The vision model returned no visual analysis.".to_string());
+    let answer = llm::chat::decode_chat_completion_response(&body)
+        .unwrap_or_else(|_| "The vision model returned no visual analysis.".to_string());
     let quote = format!(
         "Visual analysis for {} on page {}:\n{}\n\nCaption: {}",
         asset.asset_type, asset.page, answer, asset.caption

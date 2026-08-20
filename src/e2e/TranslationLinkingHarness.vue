@@ -6,7 +6,7 @@ import { messages } from '../i18n'
 import { normalizeLinkedBlockHover } from '../translationLinking'
 
 const ui = messages.en
-const translationLang = ref('zh')
+const translationLang = ref('ko')
 const viewMode = ref('dual')
 const activePage = ref(1)
 const activeBlockId = ref('')

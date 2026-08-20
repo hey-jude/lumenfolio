@@ -3,7 +3,7 @@ use std::time::Duration;
 use super::{claims, openai_stream};
 use crate::{
     normalize_base_url, optional_non_empty, runtime, truncate_for_error, AskAnswerResult,
-    AskDocumentInput, OpenAiChatMessage, OpenAiChatRequest, OpenAiChatResponse,
+    AskDocumentInput, OpenAiChatChunk, OpenAiChatMessage, OpenAiChatRequest, OpenAiChatResponse,
     OpenAiCompatibleProvider,
 };
 
@@ -85,6 +85,78 @@ pub(crate) fn extract_chat_response_text(content: &serde_json::Value) -> String 
     }
 }
 
+/// Decodes non-streaming completions flexibly: handles standard OpenAiChatResponse,
+/// raw JSON objects, and gateways/proxies that return SSE stream chunks (`data: {...}`).
+pub(crate) fn decode_chat_completion_response(body: &str) -> Result<String, String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return Err("Response body is empty".to_string());
+    }
+
+    // 1. Try standard OpenAI chat response JSON
+    if let Ok(response) = serde_json::from_str::<OpenAiChatResponse>(trimmed) {
+        let text = response
+            .choices
+            .into_iter()
+            .next()
+            .map(|choice| extract_chat_response_text(&choice.message.content))
+            .filter(|text| !text.trim().is_empty());
+        if let Some(text) = text {
+            return Ok(text);
+        }
+    }
+
+    // 2. If it's an SSE stream (lines starting with `data:`), extract content from chunks
+    if trimmed.contains("data:") {
+        let mut content = String::new();
+        let mut has_chunk = false;
+        for line in trimmed.lines() {
+            let line = line.trim();
+            if let Some(payload) = line.strip_prefix("data:") {
+                let payload = payload.trim();
+                if payload.is_empty() || payload == "[DONE]" {
+                    continue;
+                }
+                if let Ok(chunk) = serde_json::from_str::<OpenAiChatChunk>(payload) {
+                    has_chunk = true;
+                    for choice in chunk.choices {
+                        if let Some(delta) = choice.delta {
+                            if let Some(c) = delta.content {
+                                content.push_str(&c);
+                            }
+                        }
+                    }
+                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
+                    if let Some(c) = val.pointer("/choices/0/delta/content").and_then(|v| v.as_str()) {
+                        has_chunk = true;
+                        content.push_str(c);
+                    } else if let Some(c) = val.pointer("/choices/0/message/content").and_then(|v| v.as_str()) {
+                        has_chunk = true;
+                        content.push_str(c);
+                    }
+                }
+            }
+        }
+        if has_chunk && !content.trim().is_empty() {
+            return Ok(content);
+        }
+    }
+
+    // 3. Fallback to generic serde_json::Value
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        if let Some(text) = value.pointer("/choices/0/message/content").and_then(|v| v.as_str()) {
+            if !text.trim().is_empty() {
+                return Ok(text.to_string());
+            }
+        }
+    }
+
+    Err(format!(
+        "Failed to decode response: body={}",
+        truncate_for_error(trimmed, 400)
+    ))
+}
+
 /// Minimal non-streaming chat completion: one system + one user message → the
 /// assistant's text. Retries once on transient (429 / 5xx / network / decode)
 /// failures. Used where we need a single one-shot reply (e.g. knowledge
@@ -104,7 +176,7 @@ pub(crate) async fn run_simple_completion(
     let request = OpenAiChatRequest {
         model: provider.model.clone(),
         temperature,
-        stream: None,
+        stream: Some(false),
         messages: vec![
             text_message("system", system.to_string()),
             text_message("user", user.to_string()),
@@ -135,19 +207,8 @@ pub(crate) async fn run_simple_completion(
             }
             break;
         }
-        match serde_json::from_str::<OpenAiChatResponse>(&body) {
-            Ok(decoded) => {
-                let text = decoded
-                    .choices
-                    .into_iter()
-                    .next()
-                    .map(|choice| extract_chat_response_text(&choice.message.content))
-                    .filter(|text| !text.trim().is_empty());
-                if let Some(text) = text {
-                    return Ok(text);
-                }
-                last_error = "Completion returned an empty response".to_string();
-            }
+        match decode_chat_completion_response(&body) {
+            Ok(text) => return Ok(text),
             Err(err) => {
                 last_error = format!(
                     "Failed to decode completion on attempt {}: {err}; body={}",
@@ -191,7 +252,7 @@ pub(crate) async fn judge_answerability_with_openai_compatible(
     let request = OpenAiChatRequest {
         model: provider.model.clone(),
         temperature: 0.0,
-        stream: None,
+        stream: Some(false),
         messages: vec![
             text_message(
                 "system",
@@ -201,7 +262,7 @@ pub(crate) async fn judge_answerability_with_openai_compatible(
         ],
     };
     let mut last_error = String::new();
-    let response = {
+    let text = {
         let mut decoded = None;
         for retry in 0..2 {
             let mut builder = client.post(&endpoint).json(&request);
@@ -227,9 +288,9 @@ pub(crate) async fn judge_answerability_with_openai_compatible(
                 }
                 break;
             }
-            match serde_json::from_str::<OpenAiChatResponse>(&body) {
-                Ok(response) => {
-                    decoded = Some(response);
+            match decode_chat_completion_response(&body) {
+                Ok(text) => {
+                    decoded = Some(text);
                     break;
                 }
                 Err(err) => {
@@ -245,13 +306,6 @@ pub(crate) async fn judge_answerability_with_openai_compatible(
         decoded
     }
     .ok_or_else(|| last_error.clone())?;
-    let text = response
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| extract_chat_response_text(&choice.message.content))
-        .filter(|text| !text.trim().is_empty())
-        .ok_or_else(|| "Answerability judge returned an empty response".to_string())?;
     parse_answerability_decision_for_vision(&text, vision_enabled)
 }
 
@@ -276,7 +330,7 @@ pub(crate) async fn judge_current_view_relevance_with_openai_compatible(
     let request = OpenAiChatRequest {
         model: provider.model.clone(),
         temperature: 0.0,
-        stream: None,
+        stream: Some(false),
         messages: vec![
             text_message(
                 "system",
@@ -301,20 +355,13 @@ pub(crate) async fn judge_current_view_relevance_with_openai_compatible(
             truncate_for_error(&body, 600)
         ));
     }
-    let response = serde_json::from_str::<OpenAiChatResponse>(&body).map_err(|err| {
+    let text = decode_chat_completion_response(&body).map_err(|err| {
         format!(
             "Failed to decode current-view judge response: {}; body={}",
             err,
             truncate_for_error(&body, 600)
         )
     })?;
-    let text = response
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| extract_chat_response_text(&choice.message.content))
-        .filter(|text| !text.trim().is_empty())
-        .ok_or_else(|| "Current-view judge returned an empty response".to_string())?;
     parse_current_view_decision(&text)
 }
 
@@ -343,7 +390,7 @@ pub(crate) async fn generate_session_title_with_openai_compatible(
     let request = OpenAiChatRequest {
         model: provider.model.clone(),
         temperature: 0.0,
-        stream: None,
+        stream: Some(false),
         messages: vec![
             text_message(
                 "system",
@@ -368,21 +415,17 @@ pub(crate) async fn generate_session_title_with_openai_compatible(
             truncate_for_error(&body, 400)
         ));
     }
-    let response = serde_json::from_str::<OpenAiChatResponse>(&body).map_err(|err| {
+    let text = decode_chat_completion_response(&body).map_err(|err| {
         format!(
             "Failed to decode session-title response: {}; body={}",
             err,
             truncate_for_error(&body, 400)
         )
     })?;
-    let text = response
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| extract_chat_response_text(&choice.message.content))
-        .map(|text| clean_session_title(&text))
-        .filter(|text| !text.is_empty())
-        .ok_or_else(|| "Session-title request returned an empty response".to_string())?;
+    let text = clean_session_title(&text);
+    if text.is_empty() {
+        return Err("Session-title request returned an empty response".to_string());
+    }
     Ok(text)
 }
 
@@ -808,7 +851,7 @@ pub(crate) async fn test_openai_compatible_provider(
     let request = OpenAiChatRequest {
         model: provider.model.clone(),
         temperature: 0.0,
-        stream: None,
+        stream: Some(false),
         messages: vec![text_message("user", "Reply with OK only.".to_string())],
     };
     let mut builder = client.post(endpoint).json(&request);
@@ -829,28 +872,36 @@ pub(crate) async fn test_openai_compatible_provider(
         ));
     }
 
-    let response = response
-        .json::<OpenAiChatResponse>()
-        .await
-        .map_err(|err| format!("Failed to decode provider test response: {err}"))?;
-    response
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| extract_chat_response_text(&choice.message.content))
-        .filter(|text| !text.trim().is_empty())
+    let body = response.text().await.unwrap_or_default();
+    decode_chat_completion_response(&body)
         .map(|_| ())
-        .ok_or_else(|| "Provider test returned an empty response".to_string())
+        .map_err(|err| format!("Provider test returned an empty response: {err}"))
 }
 
 pub(crate) fn answer_language_for_question(question: &str, locale: Option<&str>) -> &'static str {
+    if contains_hangul_text(question) {
+        return "Korean";
+    }
     if contains_han_text(question) {
         return "Chinese";
     }
-    match locale.unwrap_or("en").to_lowercase().as_str() {
-        "zh" | "zh-cn" | "cn" => "Chinese",
+    let loc = locale.unwrap_or("en").to_lowercase();
+    if loc.starts_with("ko") {
+        return "Korean";
+    }
+    match loc.as_str() {
+        "zh" | "zh-cn" | "cn" | "zh-tw" | "zh-hk" => "Chinese",
         _ => "English",
     }
+}
+
+fn contains_hangul_text(value: &str) -> bool {
+    value.chars().any(|ch| {
+        matches!(
+            u32::from(ch),
+            0xAC00..=0xD7AF | 0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xD7B0..=0xD7FF
+        )
+    })
 }
 
 fn contains_han_text(value: &str) -> bool {
@@ -1033,5 +1084,38 @@ mod tests {
         assert!(prompt.contains("Tool feedback from previous judge-requested calls"));
         assert!(prompt.contains("search_chunks returned results but added no new citations"));
         assert!(prompt.contains("do not request the same tool with the same arguments again"));
+    }
+
+    #[test]
+    fn answer_language_detects_korean_and_chinese() {
+        assert_eq!(answer_language_for_question("이 논문의 주요 내용은?", None), "Korean");
+        assert_eq!(answer_language_for_question("이 論文의 結論은?", Some("en")), "Korean");
+        assert_eq!(answer_language_for_question("What is this?", Some("ko")), "Korean");
+        assert_eq!(answer_language_for_question("What is this?", Some("ko-KR")), "Korean");
+        assert_eq!(answer_language_for_question("这篇文章讲了什么？", None), "Chinese");
+        assert_eq!(answer_language_for_question("What is this?", Some("zh")), "Chinese");
+        assert_eq!(answer_language_for_question("What is this?", Some("zh-CN")), "Chinese");
+        assert_eq!(answer_language_for_question("What is this?", Some("en")), "English");
+        assert_eq!(answer_language_for_question("What is this?", None), "English");
+    }
+
+    #[test]
+    fn decode_chat_completion_response_handles_json_and_sse() {
+        // Standard JSON
+        let plain_json = r#"{"choices":[{"message":{"role":"assistant","content":"{\"status\":\"answerable\"}"}}]}"#;
+        assert_eq!(
+            decode_chat_completion_response(plain_json).unwrap(),
+            r#"{"status":"answerable"}"#
+        );
+
+        // SSE chunks (e.g. from Gemini or proxy with reasoning_content)
+        let sse_body = "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n\
+                        data: {\"id\":\"2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"thinking...\"}}]}\n\n\
+                        data: {\"id\":\"3\",\"choices\":[{\"delta\":{\"content\":\"{\\\"status\\\":\\\"answerable\\\"}\"}}]}\n\n\
+                        data: [DONE]\n";
+        assert_eq!(
+            decode_chat_completion_response(sse_body).unwrap(),
+            r#"{"status":"answerable"}"#
+        );
     }
 }
