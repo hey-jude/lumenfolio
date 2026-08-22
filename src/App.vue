@@ -135,7 +135,15 @@ const collections = ref([])
 // The collection new imports/notes/clips file into; also the highlighted tree row.
 const selectedCollectionId = usePersistedRef('selectedCollectionId', null)
 const locale = usePersistedRef('locale', 'en')
-const ui = computed(() => messages[locale.value] || messages.en)
+const ui = computed(() => {
+  const selected = messages[locale.value] || messages.en
+  const en = messages.en
+  const result = {}
+  for (const key of Object.keys(en)) {
+    result[key] = selected[key] ?? en[key]
+  }
+  return result
+})
 const filter = ref('')
 const selectedDocId = ref('')
 // IDE-style document tabs: an ordered working set of opened documents, layered on

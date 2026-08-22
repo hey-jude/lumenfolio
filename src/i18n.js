@@ -1049,4 +1049,21 @@ export const messages = {
     traceStatusUnknown: '已检查',
     traceAttemptSummary: '第 {attempt}/{max} 步',
   },
+  ko: {
+    forceRetranslate: '강제 재번역',
+    forceRetranslateConfirm: '이 문서를 강제 재번역하시겠습니까? 기존 번역 결과와 아티팩트가 지워지고 번역 파이프라인이 다시 실행됩니다.',
+    forceRetranslateError: '강제 재번역을 할 수 없습니다.',
+    suggestedQuestionsTitle: '다음과 같이 물어보세요',
+    suggestQSummary: '이 논문 요약해 주세요',
+    suggestQContributions: '주요 기여는 무엇인가요?',
+    suggestQMethods: '어떤 방법과 데이터를 사용하나요?',
+    suggestQLimitations: '제한사항과 향후 연구는 무엇인가요?',
+    suggestQExplainConcept: '{concept} 설명해 주세요',
+    chatEmptyTitle: '이 문서에 대해 물어보세요',
+    chatEmptyHint: '아래 작성란을 사용하여 설명, 요약, 표, 그림, 근거 있는 답변을 요청하실 수 있습니다.',
+    // Shown when the chat is the main stage with nothing open — the question is
+    // then aimed at the whole library, not at one document.
+    chatEmptyTitleHome: '지식 베이스에 물어보세요',
+    chatEmptyHintHome: '수집한 모든 내용—문서, 노트, 웹 클립—을 대상으로 물어보세요. 답변에는 출처가 함께 표시됩니다.',
+  },
 }
