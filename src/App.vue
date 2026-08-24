@@ -1693,6 +1693,18 @@ function contextWindowPlaceholder(model) {
   return detected ? `${detected} · ${ui.value.contextWindowAuto}` : ui.value.contextWindowAuto
 }
 
+// openai-compatible providers expose many irrelevant entries via /models.
+// Keep only: ids starting with "auto", ids without a "/" segment, or
+// namespaced ids ("/") ending with "free" or "alpha".
+function isStorableOpenAiCompatibleModelId(modelId) {
+  const value = String(modelId || '').trim()
+  if (!value) return false
+  const lower = value.toLowerCase()
+  if (lower.startsWith('auto')) return true
+  if (!value.includes('/')) return true
+  return lower.endsWith('free') || lower.endsWith('alpha')
+}
+
 function mergeFetchedProviderModels(modelIds, contextWindows = {}) {
   // Refresh the auto-detected window on models we already have (the server's
   // /models value may have changed); never clobber a user override.
@@ -1700,18 +1712,36 @@ function mergeFetchedProviderModels(modelIds, contextWindows = {}) {
     const detected = normalizeContextWindow(contextWindows[model.modelId])
     if (detected) model.detectedContextWindow = detected
   })
-  const existingIds = new Set(
+  const existingById = new Map(
     providerForm.models
-      .map((model) => String(model.modelId || '').trim().toLowerCase())
-      .filter(Boolean),
+      .map((model) => [String(model.modelId || '').trim().toLowerCase(), model])
+      .filter(([dedupeKey]) => Boolean(dedupeKey)),
   )
   const imported = []
-  modelIds.forEach((modelId) => {
+  // Sort fetched ids: names without "/" first, then namespaced ones, a-z within each group.
+  const sortedModelIds = [...modelIds]
+    .map((id) => String(id || '').trim())
+    .filter(Boolean)
+    .sort((a, b) => {
+      const slashDiff = Number(a.includes('/')) - Number(b.includes('/'))
+      if (slashDiff !== 0) return slashDiff
+      return a.localeCompare(b)
+    })
+  sortedModelIds.forEach((modelId) => {
     const normalizedModelId = String(modelId || '').trim()
     if (!normalizedModelId) return
+    if (providerForm.providerType === 'openai-compatible' && !isStorableOpenAiCompatibleModelId(normalizedModelId)) return
     const dedupeKey = normalizedModelId.toLowerCase()
-    if (existingIds.has(dedupeKey)) return
-    existingIds.add(dedupeKey)
+    const existing = existingById.get(dedupeKey)
+    if (existing) {
+      // Same model_id: overwrite stored values with the freshly fetched ones.
+      // Keep user-owned fields (key, enabled, default flag, context-window override).
+      existing.nickname = normalizedModelId
+      existing.capabilities = normalizeCapabilities(inferModelCapabilities(providerForm.providerType, normalizedModelId))
+      existingById.set(dedupeKey, existing)
+      return
+    }
+    existingById.set(dedupeKey, null)
     imported.push(createProviderModelDraft(providerForm.providerType, {
       modelId: normalizedModelId,
       nickname: normalizedModelId,
@@ -1769,6 +1799,14 @@ function addProviderModel() {
   if (!providerForm.defaultModelKey) {
     providerForm.defaultModelKey = providerForm.models.at(-1)?.key || ''
   }
+}
+
+function clearProviderModels() {
+  const draft = createProviderModelDraft(providerForm.providerType)
+  draft.isDefaultChatModel = true
+  providerForm.models = [draft]
+  providerForm.defaultModelKey = draft.key
+  persistCurrentProviderEdit()
 }
 
 function removeProviderModel(index) {
@@ -6615,6 +6653,14 @@ onMounted(() => {
                 <div class="models-head-actions">
                   <button
                     type="button"
+                    class="settings-btn"
+                    :disabled="modelFetchStatus === 'fetching' || settingsStatus === 'saving'"
+                    @click="clearProviderModels"
+                  >
+                    {{ ui.clearModels }}
+                  </button>
+                  <button
+                    type="button"
                     class="settings-btn primary-subtle"
                     :disabled="modelFetchStatus === 'fetching' || settingsStatus === 'saving' || !providerForm.baseUrl"
                     @click="fetchProviderModels"
@@ -7239,6 +7285,9 @@ onMounted(() => {
 .settings-modal {
   width: min(1080px, 100%);
   max-height: min(720px, calc(100vh - 48px));
+  min-width: 520px;
+  min-height: 320px;
+  resize: both;
   display: flex;
   flex-direction: column;
   overflow: hidden;
