@@ -454,6 +454,7 @@ fn build_extraction_prompt(title: &str, source_text: &str, target_lang: Option<&
             let lang_name = target_language_name(lang);
             format!(
                 "- Write the summary, entity details, and concept details in {lang_name}.\n\
+                 - For every concept name and keyword, output the {lang_name} translation followed by the original term in parentheses, i.e. \"{lang_name} translation (original term)\" — e.g. \"Self-Attention\" → \"자기 어텐션(Self-Attention)\".\n\
                  - Preserve canonical/standard full names for methods, models, datasets, and systems (e.g. ResNet, AdamW, ImageNet, Transformer) so they match across papers."
             )
         }
