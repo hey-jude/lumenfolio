@@ -91,6 +91,19 @@ pub(crate) struct TranslationEnginePayload {
     pub(crate) api_key: Option<String>,
 }
 
+/// Per-original-font-property translated-text font choice.
+/// Each value must be one of "auto" | "serif" | "sans-serif" | "script".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FontFamilyOverrides {
+    #[serde(default)]
+    pub(crate) serif: Option<String>,
+    #[serde(default)]
+    pub(crate) sans_serif: Option<String>,
+    #[serde(default)]
+    pub(crate) script: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranslatePayload {
@@ -106,6 +119,8 @@ pub(crate) struct TranslatePayload {
     pub(crate) only_include_translated_page: bool,
     pub(crate) force_refresh: bool,
     pub(crate) engine: TranslationEnginePayload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) font_family_overrides: Option<FontFamilyOverrides>,
 }
 
 #[derive(Debug, Clone, Serialize)]

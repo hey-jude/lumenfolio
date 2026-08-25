@@ -16,8 +16,8 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 pub(crate) use manager::Pdf2zhSidecarState;
 use protocol::{
-    PreflightPayload, ProbePayload, SidecarEvent, SidecarRequest, TranslatePayload,
-    TranslationEnginePayload,
+    FontFamilyOverrides, PreflightPayload, ProbePayload, SidecarEvent, SidecarRequest,
+    TranslatePayload, TranslationEnginePayload,
 };
 
 use crate::{stable_text_hash, translation_fallback_enabled, AppDatabase, PdfRegistry};
@@ -48,6 +48,8 @@ pub(crate) struct StartPdfTranslationInput {
     page_count: Option<u32>,
     #[serde(default)]
     force_refresh: Option<bool>,
+    #[serde(default)]
+    font_family_overrides: Option<FontFamilyOverrides>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -615,6 +617,17 @@ fn wait_for_translation_slot<'a>(
     }
 }
 
+/// Keep only valid font choices ("serif" | "sans-serif" | "script"); None/"auto"
+/// means "follow the original font's own properties".
+fn sanitize_font_choice(value: Option<&str>) -> Option<String> {
+    match value.map(str::trim) {
+        Some("serif") | Some("sans-serif") | Some("script") => {
+            value.map(str::trim).map(ToString::to_string)
+        }
+        _ => None,
+    }
+}
+
 fn build_translate_payload(
     input: &StartPdfTranslationInput,
     source_pdf: &Path,
@@ -625,6 +638,19 @@ fn build_translate_payload(
     pages: Option<String>,
     only_include_translated_page: bool,
 ) -> TranslatePayload {
+    let font_family_overrides = input.font_family_overrides.as_ref().and_then(|overrides| {
+        let serif = sanitize_font_choice(overrides.serif.as_deref());
+        let sans_serif = sanitize_font_choice(overrides.sans_serif.as_deref());
+        let script = sanitize_font_choice(overrides.script.as_deref());
+        if serif.is_none() && sans_serif.is_none() && script.is_none() {
+            return None;
+        }
+        Some(FontFamilyOverrides {
+            serif,
+            sans_serif,
+            script,
+        })
+    });
     TranslatePayload {
         job_id: job_id.to_string(),
         input_pdf_path: source_pdf.to_string_lossy().to_string(),
@@ -644,6 +670,7 @@ fn build_translate_payload(
         only_include_translated_page,
         force_refresh: input.force_refresh.unwrap_or(false),
         engine: engine.clone(),
+        font_family_overrides,
     }
 }
 
@@ -1042,8 +1069,9 @@ fn build_cache_key(
     input: &StartPdfTranslationInput,
     provider_key: &str,
 ) -> String {
+    let font_overrides = input.font_family_overrides.as_ref();
     stable_text_hash(&format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{:?}",
         PDF_TRANSLATION_CACHE_VERSION,
         source_hash,
         input
@@ -1056,7 +1084,12 @@ fn build_cache_key(
             .artifact_mode
             .clone()
             .unwrap_or_else(|| "both".to_string()),
-        input.pages.clone().unwrap_or_default()
+        input.pages.clone().unwrap_or_default(),
+        (
+            font_overrides.and_then(|o| sanitize_font_choice(o.serif.as_deref())),
+            font_overrides.and_then(|o| sanitize_font_choice(o.sans_serif.as_deref())),
+            font_overrides.and_then(|o| sanitize_font_choice(o.script.as_deref())),
+        )
     ))
 }
 
@@ -1809,6 +1842,7 @@ mod tests {
             nearby_page_radius: None,
             page_count: None,
             force_refresh: None,
+            font_family_overrides: None,
         };
         assert_eq!(priority_page_request(&input), Some("7".to_string()));
     }
@@ -1827,6 +1861,7 @@ mod tests {
             nearby_page_radius: Some(1),
             page_count: Some(10),
             force_refresh: None,
+            font_family_overrides: None,
         };
         assert_eq!(
             priority_page_request(&input),
@@ -1848,6 +1883,7 @@ mod tests {
             nearby_page_radius: Some(1),
             page_count: Some(7),
             force_refresh: None,
+            font_family_overrides: None,
         };
         assert_eq!(
             priority_page_requests(&input),
@@ -1874,6 +1910,7 @@ mod tests {
             nearby_page_radius: Some(5),
             page_count: Some(100),
             force_refresh: None,
+            font_family_overrides: None,
         };
         let pages = priority_page_request(&input).expect("priority pages");
         assert_eq!(pages.split(',').count(), MAX_PRIORITY_PARTIAL_PAGES);
@@ -1920,6 +1957,7 @@ mod tests {
             nearby_page_radius: None,
             page_count: None,
             force_refresh: None,
+            font_family_overrides: None,
         };
         let first = build_cache_key("source-a", &input, "google-web:stable");
         input.target_lang = "ja".to_string();
@@ -2582,6 +2620,7 @@ mod tests {
             nearby_page_radius: None,
             page_count: Some(1),
             force_refresh: None,
+            font_family_overrides: None,
         };
         let source_info = file_source_identity(&source).unwrap();
         let engine = build_engine_payload(input.provider.as_deref());
@@ -2781,6 +2820,7 @@ emit(
                 nearby_page_radius: Some(0),
                 page_count: Some(1),
                 force_refresh: Some(true),
+                font_family_overrides: None,
             },
             app.handle().clone(),
             app.state::<PdfRegistry>(),
@@ -2961,6 +3001,7 @@ emit(
                 nearby_page_radius: Some(0),
                 page_count: Some(1),
                 force_refresh: Some(true),
+                font_family_overrides: None,
             },
             app.handle().clone(),
             app.state::<PdfRegistry>(),
@@ -3111,6 +3152,7 @@ while True:
                 nearby_page_radius: Some(0),
                 page_count: Some(1),
                 force_refresh: Some(true),
+                font_family_overrides: None,
             },
             app.handle().clone(),
             app.state::<PdfRegistry>(),
@@ -3292,6 +3334,7 @@ sys.exit(23)
                 nearby_page_radius: Some(0),
                 page_count: Some(1),
                 force_refresh: Some(true),
+                font_family_overrides: None,
             },
             app.handle().clone(),
             app.state::<PdfRegistry>(),

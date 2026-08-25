@@ -165,6 +165,11 @@ watch(openTabs, (tabs) => {
   writePersisted('openTabs', tabs)
 })
 const translationLang = usePersistedRef('translationLang', 'ko')
+// Translated-text font per original-font property (serif / sans-serif / script).
+// "auto" keeps pdf2zh's default behavior of mirroring the original font's properties.
+const fontFamilySerif = usePersistedRef('fontFamilySerif', 'auto')
+const fontFamilySansSerif = usePersistedRef('fontFamilySansSerif', 'auto')
+const fontFamilyScript = usePersistedRef('fontFamilyScript', 'auto')
 const viewMode = ref('original')
 const activePage = ref(1)
 const activeBlockId = ref('')
@@ -3965,6 +3970,11 @@ async function handleTranslationAction(viewerContext = {}) {
           nearbyPageRadius: 1,
           pageCount: sidecarPageCount,
           forceRefresh: false,
+          fontFamilyOverrides: {
+            serif: fontFamilySerif.value,
+            sansSerif: fontFamilySansSerif.value,
+            script: fontFamilyScript.value,
+          },
         },
       })
       : await invoke('start_document_translation', {
@@ -6810,6 +6820,38 @@ onMounted(() => {
 
               <div v-if="microsoftForm.hasApiKey" class="settings-note full">{{ ui.apiKeySaved }}</div>
             </template>
+
+            <div class="settings-section-title full">{{ ui.translatedFontSection }}</div>
+            <label class="settings-field full">
+              <span>{{ ui.translatedFontSerifOriginal }}</span>
+              <select v-model="fontFamilySerif">
+                <option value="auto">{{ ui.translatedFontAuto }}</option>
+                <option value="serif">{{ ui.translatedFontSerif }}</option>
+                <option value="sans-serif">{{ ui.translatedFontSansSerif }}</option>
+                <option value="script">{{ ui.translatedFontScript }}</option>
+              </select>
+            </label>
+            <label class="settings-field full">
+              <span>{{ ui.translatedFontSansOriginal }}</span>
+              <select v-model="fontFamilySansSerif">
+                <option value="auto">{{ ui.translatedFontAuto }}</option>
+                <option value="serif">{{ ui.translatedFontSerif }}</option>
+                <option value="sans-serif">{{ ui.translatedFontSansSerif }}</option>
+                <option value="script">{{ ui.translatedFontScript }}</option>
+              </select>
+            </label>
+            <label class="settings-field full">
+              <span>{{ ui.translatedFontScriptOriginal }}</span>
+              <select v-model="fontFamilyScript">
+                <option value="auto">{{ ui.translatedFontAuto }}</option>
+                <option value="serif">{{ ui.translatedFontSerif }}</option>
+                <option value="sans-serif">{{ ui.translatedFontSansSerif }}</option>
+                <option value="script">{{ ui.translatedFontScript }}</option>
+              </select>
+            </label>
+            <div class="settings-note full">
+              {{ ui.translatedFontNote }}
+            </div>
           </div>
         </div>
 

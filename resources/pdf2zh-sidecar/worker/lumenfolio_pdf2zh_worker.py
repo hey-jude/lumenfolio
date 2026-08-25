@@ -48,16 +48,28 @@ def redact(value: Any) -> Any:
 
 
 def setup_logging(log_dir: str | None) -> None:
-    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
-    if log_dir:
+    # Explicit config instead of logging.basicConfig(): the module-level font
+    # patch install logs at import time, which auto-calls basicConfig() and
+    # leaves a bare stderr handler on the root logger. basicConfig() would then
+    # be a no-op and the root level would stay WARNING, dropping all INFO.
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    if not any(
+        isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+        for h in root.handlers
+    ):
+        stream = logging.StreamHandler(sys.stderr)
+        stream.setFormatter(formatter)
+        root.addHandler(stream)
+    if log_dir and not any(isinstance(h, logging.FileHandler) for h in root.handlers):
         path = Path(log_dir)
         path.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(path / "lumenfolio-pdf2zh-worker.log", encoding="utf-8"))
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        handlers=handlers,
-    )
+        file_handler = logging.FileHandler(
+            path / "lumenfolio-pdf2zh-worker.log", encoding="utf-8"
+        )
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
 
 
 def request_timeout_seconds(default_value: float) -> float:
@@ -238,6 +250,137 @@ def first_requested_page(pages: Any) -> int | None:
     return page or None
 
 
+# Per-original-font-property translated-text font choices, set per translate
+# request from the payload's "fontFamilyOverrides" ({serif, sansSerif, script}).
+# Values: "serif" | "sans-serif" | "script"; missing/"auto" = follow the original.
+#
+# IMPORTANT: pdf2zh_next runs the actual translation in a multiprocessing
+# subprocess (spawn on macOS), which re-imports all modules fresh. Globals do
+# NOT survive into that child, so overrides are passed via an environment
+# variable and the FontMapper patch is installed at MODULE IMPORT TIME (the
+# spawn child imports this worker file as __mp_main__, re-running top-level code).
+_FONT_OVERRIDES_ENV = "LUMENFOLIO_PDF2ZH_FONT_OVERRIDES"
+
+# Counters of how translated characters were classified from the ORIGINAL
+# font's properties ("serif" | "sansSerif" | "script"). These live in whichever
+# process actually maps fonts (the translation subprocess), so they are logged
+# as periodic samples from inside the patched map() instead of at request end.
+_FONT_PROP_STATS: dict[str, int] = {}
+_FONT_PROP_SAMPLE_LOGGED = False
+
+_font_overrides_cache: tuple[str, dict[str, str] | None] | None = None
+
+
+def _get_font_overrides() -> dict[str, str] | None:
+    """Read font overrides from the environment (spawn-subprocess safe)."""
+    global _font_overrides_cache
+    raw = os.environ.get(_FONT_OVERRIDES_ENV) or ""
+    if _font_overrides_cache is not None and _font_overrides_cache[0] == raw:
+        return _font_overrides_cache[1]
+    overrides: dict[str, str] | None = None
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and parsed:
+                overrides = parsed
+        except ValueError:
+            logging.warning("ignoring malformed %s: %r", _FONT_OVERRIDES_ENV, raw)
+    _font_overrides_cache = (raw, overrides)
+    return overrides
+
+
+def _install_font_override_patch() -> None:
+    """Patch BabelDOC's FontMapper.map so each original font property (serif /
+    sans-serif / script) can map to a user-chosen translated-font family.
+    BabelDOC only supports a single global primary_font_family override, so we
+    temporarily swap it per character based on the ORIGINAL font's properties."""
+    try:
+        from babeldoc.format.pdf.document_il.utils.fontmap import FontMapper, PrimaryFontFamily
+    except Exception as exc:  # pragma: no cover - babeldoc always present in runtime
+        logging.warning("font override patch unavailable: %s", exc)
+        return
+
+    if getattr(FontMapper, "_lumenfolio_font_patch", False):
+        return
+
+    original_map = FontMapper.map
+
+    def map_with_overrides(self, original_font, char_unicode):
+        global _FONT_PROP_SAMPLE_LOGGED
+        italic = bool(
+            getattr(original_font, "italic", False) or getattr(original_font, "is_italic", False)
+        )
+        serif = bool(
+            getattr(original_font, "serif", False) or getattr(original_font, "is_serif", False)
+        )
+        prop = "script" if italic else ("serif" if serif else "sansSerif")
+        _FONT_PROP_STATS[prop] = _FONT_PROP_STATS.get(prop, 0) + 1
+        total = sum(_FONT_PROP_STATS.values())
+        # Sample logs run in the translation subprocess; its log records are
+        # forwarded to the worker log through pdf2zh_next's logger queue.
+        if not _FONT_PROP_SAMPLE_LOGGED and total >= 100:
+            _FONT_PROP_SAMPLE_LOGGED = True
+            logging.info(
+                "font prop sample (first %d chars): %s", total, dict(_FONT_PROP_STATS)
+            )
+        elif total % 5000 == 0:
+            logging.info("font prop totals so far (%d chars): %s", total, dict(_FONT_PROP_STATS))
+        overrides = _get_font_overrides()
+        if not overrides:
+            return original_map(self, original_font, char_unicode)
+        choice = overrides.get(prop) or "auto"
+        if choice == "auto":
+            return original_map(self, original_font, char_unicode)
+        saved = self.primary_font_family
+        self.primary_font_family = PrimaryFontFamily.from_str(choice)
+        try:
+            return original_map(self, original_font, char_unicode)
+        finally:
+            self.primary_font_family = saved
+
+    FontMapper.map = map_with_overrides
+    FontMapper._lumenfolio_font_patch = True
+    logging.info("font override patch installed")
+
+
+def _apply_font_overrides_from_payload(payload: dict[str, Any]) -> None:
+    raw = payload.get("fontFamilyOverrides") or {}
+    allowed = {"serif", "sans-serif", "script"}
+    overrides = {
+        key: value.strip()
+        for key, value in raw.items()
+        if isinstance(value, str) and value.strip() in allowed
+    }
+    # Env var propagates to the translation subprocess across spawn().
+    if overrides:
+        os.environ[_FONT_OVERRIDES_ENV] = json.dumps(overrides)
+    else:
+        os.environ.pop(_FONT_OVERRIDES_ENV, None)
+    global _font_overrides_cache
+    _font_overrides_cache = None  # force re-parse after env change
+    logging.info("font overrides applied: %s", overrides or None)
+
+
+def _log_font_prop_stats() -> None:
+    if _FONT_PROP_STATS:
+        logging.info(
+            "font prop classification: serif=%d, sansSerif=%d, script=%d",
+            _FONT_PROP_STATS.get("serif", 0),
+            _FONT_PROP_STATS.get("sansSerif", 0),
+            _FONT_PROP_STATS.get("script", 0),
+        )
+
+
+# Install eagerly at import time so spawned translation subprocesses (which
+# import this file as __mp_main__) also carry the patched FontMapper.map.
+# Raise the root level before any module-level logging: the first logging
+# call auto-runs basicConfig() when root has no handlers, which leaves root
+# at WARNING so INFO records are dropped. Applies to spawned translation
+# subprocesses too, since they re-import this file as __mp_main__.
+logging.getLogger().setLevel(logging.INFO)
+_install_font_override_patch()
+
+
 async def handle_translate_async(request_id: str, payload: dict[str, Any]) -> None:
     setup_logging(payload.get("logDir"))
     install_requests_default_timeout(DEFAULT_TRANSLATE_TIMEOUT_SECONDS)
@@ -249,6 +392,7 @@ async def handle_translate_async(request_id: str, payload: dict[str, Any]) -> No
     from pdf2zh_next.high_level import do_translate_async_stream
 
     settings = build_settings(payload)
+    _apply_font_overrides_from_payload(payload)
     input_pdf = Path(payload["inputPdfPath"])
     emit(request_id, "progress", status="running", phase="starting", progressPercent=1)
 
@@ -280,6 +424,7 @@ async def handle_translate_async(request_id: str, payload: dict[str, Any]) -> No
                 monoPdfPath=mono_pdf_path,
                 dualPdfPath=dual_pdf_path,
             )
+            _log_font_prop_stats()
             return
         if event_type == "error":
             emit(
@@ -291,6 +436,7 @@ async def handle_translate_async(request_id: str, payload: dict[str, Any]) -> No
                 errorCode=str(event.get("error_type") or "pdf2zh_error"),
                 message=str(event.get("error") or "PDF translation failed"),
             )
+            _log_font_prop_stats()
             return
 
         phase, progress, current_page = normalize_progress(event)
