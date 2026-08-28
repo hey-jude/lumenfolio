@@ -755,6 +755,7 @@ pub(crate) enum TranslationProvider {
     LocalPlaceholder,
     GoogleWeb,
     Microsoft(MicrosoftTranslatorProvider),
+    SiliconFlowFree,
     OpenAiCompatible(Box<OpenAiCompatibleProvider>),
     Unavailable {
         cache_key: String,
@@ -5491,6 +5492,9 @@ fn resolve_translation_provider(
     if requested == "microsoft" {
         return resolve_microsoft_translation_provider(database);
     }
+    if requested == "siliconflow-free" {
+        return TranslationProvider::SiliconFlowFree;
+    }
     if requested == "llm" {
         if let Some(provider) = resolve_llm_translation_provider(database) {
             return provider;
@@ -5507,6 +5511,7 @@ fn resolve_translation_provider(
     match stored_setting.as_str() {
         "google-web" => return TranslationProvider::GoogleWeb,
         "microsoft" => return resolve_microsoft_translation_provider(database),
+        "siliconflow-free" => return TranslationProvider::SiliconFlowFree,
         "local-placeholder" => return TranslationProvider::LocalPlaceholder,
         "llm" => {
             if let Some(provider) = resolve_llm_translation_provider(database) {
@@ -5571,7 +5576,7 @@ fn normalize_translation_provider_name(provider: &str) -> String {
 fn is_supported_translation_setting(provider: &str) -> bool {
     matches!(
         provider,
-        "google-web" | "microsoft" | "llm" | "local-placeholder"
+        "google-web" | "microsoft" | "siliconflow-free" | "llm" | "local-placeholder"
     )
 }
 

@@ -1153,6 +1153,7 @@ const currentChatModel = computed(() => {
 const translationProviderNote = computed(() => {
   if (translationProvider.value === 'google-web') return ui.value.translationProviderGoogleWebNote
   if (translationProvider.value === 'microsoft') return ui.value.translationProviderMicrosoftNote
+  if (translationProvider.value === 'siliconflow-free') return ui.value.translationProviderSiliconflowFreeNote
   if (translationProvider.value === 'llm') return ui.value.translationProviderLlmNote
   return ui.value.translationProviderPlaceholderNote
 })
@@ -6780,6 +6781,7 @@ onMounted(() => {
               <select v-model="translationProvider">
                 <option value="google-web">{{ ui.translationProviderGoogleWeb }}</option>
                 <option value="microsoft">{{ ui.translationProviderMicrosoft }}</option>
+                <option value="siliconflow-free">{{ ui.translationProviderSiliconflowFree }}</option>
                 <option value="llm">{{ ui.translationProviderLlm }}</option>
                 <option value="local-placeholder">{{ ui.translationProviderPlaceholder }}</option>
               </select>

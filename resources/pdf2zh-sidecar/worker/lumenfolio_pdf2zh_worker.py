@@ -178,7 +178,12 @@ def handle_probe(request_id: str, payload: dict[str, Any]) -> None:
 
 def build_settings(payload: dict[str, Any]):
     from pdf2zh_next.config.model import SettingsModel
-    from pdf2zh_next.config.translate_engine_model import BingSettings, GoogleSettings, OpenAISettings
+    from pdf2zh_next.config.translate_engine_model import (
+        BingSettings,
+        GoogleSettings,
+        OpenAISettings,
+        SiliconFlowFreeSettings,
+    )
 
     engine = payload.get("engine") or {}
     provider = (engine.get("provider") or "google-web").lower()
@@ -192,6 +197,8 @@ def build_settings(payload: dict[str, Any]):
             openai_base_url=engine.get("baseUrl") or os.environ.get("OPENAI_BASE_URL"),
             openai_model=engine.get("model") or os.environ.get("OPENAI_MODEL") or "gpt-4o-mini",
         )
+    elif provider in {"siliconflow-free", "siliconflowfree"}:
+        translate_engine_settings = SiliconFlowFreeSettings()
     else:
         raise ValueError(f"Unsupported PDF translation provider: {engine.get('provider')}")
 

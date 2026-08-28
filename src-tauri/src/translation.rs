@@ -14,6 +14,7 @@ impl TranslationProvider {
             TranslationProvider::Microsoft(provider) => {
                 format!("microsoft:{}", normalize_base_url(&provider.endpoint))
             }
+            TranslationProvider::SiliconFlowFree => "siliconflow-free".to_string(),
             TranslationProvider::OpenAiCompatible(provider) => {
                 format!(
                     "openai-compatible:{}:{}",
@@ -30,6 +31,7 @@ impl TranslationProvider {
             TranslationProvider::LocalPlaceholder => "local-placeholder".to_string(),
             TranslationProvider::GoogleWeb => "google-web".to_string(),
             TranslationProvider::Microsoft(_) => "microsoft".to_string(),
+            TranslationProvider::SiliconFlowFree => "siliconflow-free".to_string(),
             TranslationProvider::OpenAiCompatible(provider) => {
                 format!("openai-compatible/{}", provider.model)
             }
@@ -51,11 +53,67 @@ pub(crate) async fn translate_with_provider(
         TranslationProvider::Microsoft(provider) => {
             translate_with_microsoft(source_text, target_lang, provider).await
         }
+        TranslationProvider::SiliconFlowFree => {
+            translate_with_siliconflow_free(source_text, target_lang).await
+        }
         TranslationProvider::OpenAiCompatible(provider) => {
             translate_with_openai_compatible(source_text, target_lang, provider).await
         }
         TranslationProvider::Unavailable { message, .. } => Err(message.clone()),
     }
+}
+
+async fn translate_with_siliconflow_free(
+    source_text: &str,
+    target_lang: &str,
+) -> Result<String, String> {
+    if source_text.chars().count() > 5000 {
+        return Err("SiliconFlow Free supports up to 5000 characters per request. Select a shorter passage.".to_string());
+    }
+    let prompt = format!(
+        "You are a professional,authentic machine translation engine.\n\n;; Treat next line as plain text input and translate it into {target_lang}, output translation ONLY. If translation is unnecessary (e.g. proper nouns, codes, {{1}}, etc.), return the original text. NO explanations. NO notes. Input:\n\n{source_text}"
+    );
+    let client = crate::net::client_builder()
+        .timeout(Duration::from_secs(100))
+        .build()
+        .map_err(|err| format!("Failed to create SiliconFlow Free client: {err}"))?;
+    let mut last_error = String::new();
+    for endpoint in [
+        "https://api1.pdf2zh-next.com/chatproxy",
+        "https://api2.pdf2zh-next.com/chatproxy",
+    ] {
+        for attempt in 0..3 {
+            let response = client
+                .post(endpoint)
+                .timeout(Duration::from_secs(100))
+                .json(&serde_json::json!({
+                    "model": "Qwen/Qwen2.5-7B-Instruct",
+                    "messages": [{ "role": "user", "content": prompt }],
+                }))
+                .send()
+                .await;
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    let payload: serde_json::Value = response.json().await
+                        .map_err(|err| format!("Failed to decode SiliconFlow Free response: {err}"))?;
+                    if let Some(content) = payload.get("choices").and_then(|v| v.get(0))
+                        .and_then(|v| v.get("message")).and_then(|v| v.get("content"))
+                        .and_then(|v| v.as_str()) {
+                        return Ok(content.trim().to_string());
+                    }
+                    last_error = "SiliconFlow Free returned an invalid response".to_string();
+                    break;
+                }
+                Ok(response) => {
+                    last_error = format!("SiliconFlow Free returned {}", response.status());
+                    if !(response.status().as_u16() == 429 || response.status().is_server_error()) { break; }
+                }
+                Err(err) => last_error = format!("SiliconFlow Free request failed: {err}"),
+            }
+            if attempt < 2 { tokio::time::sleep(Duration::from_millis(250 * (attempt + 1))).await; }
+        }
+    }
+    Err(last_error)
 }
 
 fn local_placeholder_translation(source_text: &str, target_lang: &str) -> String {

@@ -916,6 +916,7 @@ fn pdf_provider_candidates(
         match selected.as_str() {
             "google-web" => providers.push("microsoft".to_string()),
             "microsoft" | "bing" => providers.push("google-web".to_string()),
+            "siliconflow-free" => providers.push("google-web".to_string()),
             _ => {}
         }
     }
@@ -1039,6 +1040,7 @@ fn pdf_provider_label(provider: &str) -> &'static str {
         "google-web" | "google" => "Google Web",
         "microsoft" | "bing" => "Microsoft/Bing Web",
         "llm" | "openai" | "openai-compatible" => "LLM provider",
+        "siliconflow-free" => "SiliconFlow Free",
         _ => "Provider",
     }
 }
