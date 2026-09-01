@@ -1074,9 +1074,6 @@ export const messages = {
     traceAttemptSummary: '第 {attempt}/{max} 步',
   },
   ko: {
-    forceRetranslate: '강제 재번역',
-    forceRetranslateConfirm: '이 문서를 강제 재번역하시겠습니까? 기존 번역 결과와 아티팩트가 지워지고 번역 파이프라인이 다시 실행됩니다.',
-    forceRetranslateError: '강제 재번역을 할 수 없습니다.',
     suggestedQuestionsTitle: '다음과 같이 물어보세요',
     suggestQSummary: '이 논문 요약해 주세요',
     suggestQContributions: '주요 기여는 무엇인가요?',
